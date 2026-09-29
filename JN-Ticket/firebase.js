@@ -1,0 +1,574 @@
+/**
+ * Firebase Configuration & Initialization
+ * Unified for Branch Monitoring + Ticket System
+ * Uses Firebase v8 Compatibility SDK
+ */
+
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
+const firebaseConfig = {
+  apiKey: "AIzaSyD3R9VtLbqPxPlKXn5QBRdyiwPOrGRdDRE",
+  authDomain: "jn-data-f29ae.firebaseapp.com",
+  projectId: "jn-data-f29ae",
+  storageBucket: "jn-data-f29ae.firebasestorage.app",
+  messagingSenderId: "1067159087911",
+  appId: "1:1067159087911:web:9157cb14590a382a4a1702",
+  measurementId: "G-HR7CJLT7H3"
+};
+
+// Initialize Firebase
+firebase.initializeApp(firebaseConfig);
+
+// Initialize Firestore
+const db = firebase.firestore();
+
+// Initialize Auth
+const auth = firebase.auth();
+
+// Enable offline persistence (wrapped to avoid INTERNAL ASSERTION FAILED in v8.10.1)
+try {
+    db.enablePersistence()
+        .catch(function(err) {
+            if (err.code === 'failed-precondition') {
+                console.warn('Firebase persistence failed: Multiple tabs open');
+            } else if (err.code === 'unimplemented') {
+                console.warn('Firebase persistence not supported in this browser');
+            } else {
+                console.warn('Firebase persistence error (non-critical):', err);
+            }
+        });
+} catch (e) {
+    console.warn('Firebase persistence skipped:', e.message);
+}
+
+// ==============================================================
+// FIRESTORE UTILITY FUNCTIONS
+// ==============================================================
+
+// ==============================================================
+// TICKET NUMBER PREFIXES (single source of truth)
+// ==============================================================
+
+const BRANCH_CODES = {
+    "Banawe": "bnw", "BF Homes": "bf", "Eastwood": "estw",
+    "Fame": "fame", "Gil Fernando": "gilf", "Hemady": "hmdy",
+    "Holy Spirit": "hspi", "MOA": "moa", "Ortigas Center": "ortc",
+    "Paseo": "pseo", "Promenade": "prme", "SM Clark": "smc",
+    "SM Fairview": "smf", "SM Marikina": "smmk", "SM Marilao": "smml",
+    "SM South Mall": "smsm", "SMDC Wind": "smwd", "SM East Ortigas": "smeo",
+    "Sta. Rosa": "str", "SM Sucat": "smsu", "Tagaytay": "tag"
+};
+
+/**
+ * Map a branch name to its ticket-number prefix. Single source of truth for
+ * both the transactional generator and any public submission forms.
+ */
+function branchToPrefix(branch) {
+    if (!branch) return '';
+    return BRANCH_CODES[branch] || branch.toLowerCase().substring(0, 3);
+}
+window.branchToPrefix = branchToPrefix;
+window.BRANCH_CODES = BRANCH_CODES;
+
+const firestoreService = {
+    // ===== BRANCH MONITORING =====
+
+    /**
+     * Get all branches
+     */
+    async getBranches() {
+        const snapshot = await db.collection('branches').get();
+        const results = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        results.sort((a, b) => (a.branchName || '').localeCompare(b.branchName || ''));
+        return results;
+    },
+
+    /**
+     * Update or create a branch document
+     */
+    async setBranch(branchName, data) {
+        const docRef = db.collection('branches').doc(branchName);
+        await docRef.set({
+            branchName,
+            ...data,
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+    },
+
+    /**
+     * Delete a branch document
+     */
+    async deleteBranch(branchName) {
+        await db.collection('branches').doc(branchName).delete();
+    },
+
+    /**
+     * Get status logs for a specific branch
+     */
+    async getBranchLogs(branchName) {
+        const snapshot = await db.collection('status_logs')
+            .where('branchName', '==', branchName)
+            .get();
+        const results = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        results.sort((a, b) => {
+            const aTime = a.dateTime?.toDate?.()?.getTime() || 0;
+            const bTime = b.dateTime?.toDate?.()?.getTime() || 0;
+            return bTime - aTime;
+        });
+        return results;
+    },
+
+    /**
+     * Get all status logs
+     */
+    async getAllLogs() {
+        const snapshot = await db.collection('status_logs').get();
+        const results = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        results.sort((a, b) => {
+            const aTime = a.dateTime?.toDate?.()?.getTime() || 0;
+            const bTime = b.dateTime?.toDate?.()?.getTime() || 0;
+            return bTime - aTime;
+        });
+        return results;
+    },
+
+    /**
+     * Add a new status log entry
+     */
+    async addStatusLog(data) {
+        const docRef = await db.collection('status_logs').add({
+            branchName: data.branchName,
+            status: data.status,
+            dateTime: firebase.firestore.Timestamp.fromDate(new Date(data.dateTime)),
+            remarks: data.remarks || '',
+            createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+        return docRef.id;
+    },
+
+    /**
+     * Update an existing status log entry
+     */
+    async updateStatusLog(logId, data) {
+        await db.collection('status_logs').doc(logId).update({
+            branchName: data.branchName,
+            status: data.status,
+            dateTime: firebase.firestore.Timestamp.fromDate(new Date(data.dateTime)),
+            remarks: data.remarks || '',
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+    },
+
+    /**
+     * Delete a status log entry
+     */
+    async deleteStatusLog(logId) {
+        await db.collection('status_logs').doc(logId).delete();
+    },
+
+    /**
+     * Get logs for a branch within a date range
+     */
+    async getBranchLogsInRange(branchName, startDate, endDate) {
+        const snapshot = await db.collection('status_logs')
+            .where('branchName', '==', branchName)
+            .get();
+        const startTime = startDate.getTime();
+        const endTime = endDate.getTime();
+
+        let results = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        results = results.filter(log => {
+            const logTime = log.dateTime?.toDate?.()?.getTime() || 0;
+            return logTime >= startTime && logTime <= endTime;
+        });
+        results.sort((a, b) => {
+            const aTime = a.dateTime?.toDate?.()?.getTime() || 0;
+            const bTime = b.dateTime?.toDate?.()?.getTime() || 0;
+            return aTime - bTime;
+        });
+        return results;
+    },
+
+    // ===== TICKET SYSTEM =====
+
+    /**
+     * Get all tickets ordered by createdAt descending
+     */
+    async getTickets() {
+        const snapshot = await db.collection('tickets').get();
+        const results = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        results.sort((a, b) => {
+            const aTime = a.createdAt?.toDate?.()?.getTime() || 0;
+            const bTime = b.createdAt?.toDate?.()?.getTime() || 0;
+            return bTime - aTime;
+        });
+        return results;
+    },
+
+    /**
+     * Add (or set) a ticket document
+     */
+    async setTicket(ticketId, data) {
+        await db.collection('tickets').doc(ticketId).set(data, { merge: true });
+    },
+
+    /**
+     * Update specific fields of a ticket
+     */
+    async updateTicket(ticketId, data) {
+        await db.collection('tickets').doc(ticketId).update({
+            ...data,
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+    },
+
+    /**
+     * Delete a ticket
+     */
+    async deleteTicket(ticketId) {
+        await db.collection('tickets').doc(ticketId).delete();
+    },
+
+    /**
+     * Listen to real-time ticket updates
+     */
+    listenTickets(callback, onError = null) {
+        return db.collection('tickets').onSnapshot(
+            (snapshot) => {
+                const tickets = [];
+                snapshot.forEach((doc) => {
+                    tickets.push({ id: doc.id, ...doc.data() });
+                });
+                tickets.sort((a, b) => {
+                    const aTime = a.createdAt?.toDate?.()?.getTime() || 0;
+                    const bTime = b.createdAt?.toDate?.()?.getTime() || 0;
+                    return bTime - aTime;
+                });
+                callback(tickets, snapshot.docChanges());
+            },
+            (error) => {
+                console.error('🔥 Firestore ticket listener error:', error);
+                if (onError) onError(error);
+            }
+        );
+    },
+
+    // ===== VIOLATIONS REPORT (CCTV monitoring — operator & superadmin only) =====
+
+    /**
+     * Get all violation reports ordered by createdAt descending
+     */
+    async getViolations() {
+        const snapshot = await db.collection('violations').get();
+        const results = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        results.sort((a, b) => {
+            const aTime = a.createdAt?.toDate?.()?.getTime() || 0;
+            const bTime = b.createdAt?.toDate?.()?.getTime() || 0;
+            return bTime - aTime;
+        });
+        return results;
+    },
+
+    /**
+     * Add a new violation report document
+     */
+    async addViolation(data) {
+        const docRef = await db.collection('violations').add({
+            ...data,
+            createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+        return docRef.id;
+    },
+
+    /**
+     * Update specific fields of a violation report
+     */
+    async updateViolation(violationId, data) {
+        await db.collection('violations').doc(violationId).update({
+            ...data,
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+    },
+
+    /**
+     * Delete a violation report
+     */
+    async deleteViolation(violationId) {
+        await db.collection('violations').doc(violationId).delete();
+    },
+
+    /**
+     * Listen to real-time violation report updates
+     */
+    listenViolations(callback, onError = null) {
+        return db.collection('violations').onSnapshot(
+            (snapshot) => {
+                const violations = [];
+                snapshot.forEach((doc) => {
+                    violations.push({ id: doc.id, ...doc.data() });
+                });
+                violations.sort((a, b) => {
+                    const aTime = a.createdAt?.toDate?.()?.getTime() || 0;
+                    const bTime = b.createdAt?.toDate?.()?.getTime() || 0;
+                    return bTime - aTime;
+                });
+                callback(violations, snapshot.docChanges());
+            },
+            (error) => {
+                console.error('🔥 Firestore violations listener error:', error);
+                if (onError) onError(error);
+            }
+        );
+    },
+
+    // ===== HR HANDOFF =====
+    // A superadmin reviews each report and, when the violation is worth an
+    // incident report, hands it to HR by stamping `hrStatus: 'transferred'`
+    // on the SAME document. Nothing is copied and nothing is deleted: the
+    // report stays in the command center list and simply becomes readable by
+    // HR as well. That is why HR can still print the same PDF from their own
+    // dashboard.
+
+    /**
+     * Listen ONLY to the reports a superadmin has transferred to HR.
+     *
+     * ⚠️ The `where()` is REQUIRED, not an optimisation. firestore.rules grants
+     * HR read access per-document via `resource.data.hrStatus == 'transferred'`,
+     * and Firestore will only run a query whose constraints it can prove against
+     * the rule. An unfiltered query from HR is therefore DENIED — which is
+     * exactly the privacy guarantee we want.
+     *
+     * A single equality filter on one field needs no composite index, so this
+     * works on the Spark (free) plan.
+     */
+    listenTransferredViolations(callback, onError = null) {
+        return db.collection('violations')
+            .where('hrStatus', '==', 'transferred')
+            .onSnapshot(
+                (snapshot) => {
+                    const violations = [];
+                    snapshot.forEach((doc) => {
+                        violations.push({ id: doc.id, ...doc.data() });
+                    });
+                    // Newest transfer first when timestamps tie, then newest
+                    // filing date — the list is sorted again by the HR view.
+                    violations.sort((a, b) => {
+                        const aTime = a.createdAt?.toDate?.()?.getTime() || 0;
+                        const bTime = b.createdAt?.toDate?.()?.getTime() || 0;
+                        return bTime - aTime;
+                    });
+                    callback(violations, snapshot.docChanges());
+                },
+                (error) => {
+                    console.error('🔥 Firestore transferred-violations listener error:', error);
+                    if (onError) onError(error);
+                }
+            );
+    },
+
+    /**
+     * Hand one report to HR. Superadmin-only in practice (firestore.rules
+     * allows update only to a superadmin or the reporting operator).
+     */
+    async transferViolationToHr(violationId, byEmail, byName) {
+        await db.collection('violations').doc(violationId).update({
+            hrStatus: 'transferred',
+            transferredAt: firebase.firestore.FieldValue.serverTimestamp(),
+            transferredBy: byEmail || null,
+            transferredByName: byName || null,
+            // Cleared so a later re-transfer does not show a stale revert time.
+            revertedAt: firebase.firestore.FieldValue.delete(),
+            revertedBy: firebase.firestore.FieldValue.delete(),
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+    },
+
+    /**
+     * Take a report back off HR's list. `hrStatus` is DELETED rather than set
+     * to some other value so the document matches its original shape again and
+     * the rules treat it exactly like every pre-handoff report.
+     */
+    async revertViolationTransfer(violationId, byEmail, byName) {
+        await db.collection('violations').doc(violationId).update({
+            hrStatus: firebase.firestore.FieldValue.delete(),
+            transferredAt: firebase.firestore.FieldValue.delete(),
+            transferredBy: firebase.firestore.FieldValue.delete(),
+            transferredByName: firebase.firestore.FieldValue.delete(),
+            revertedAt: firebase.firestore.FieldValue.serverTimestamp(),
+            revertedBy: byEmail || null,
+            revertedByName: byName || null,
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+    },
+
+    /**
+     * Generate the next violation report number (VIO-0001 format).
+     * Uses a Firestore transaction on the shared `counters/violations`
+     * document so concurrent submissions can never receive the same number.
+     */
+    async generateViolationNumber() {
+        const counterRef = db.collection('counters').doc('violations');
+        let allocated = 0;
+        await db.runTransaction(async (transaction) => {
+            const snap = await transaction.get(counterRef);
+            const current = snap.exists ? (Number(snap.data().count) || 0) : 0;
+            allocated = current + 1;
+            await transaction.set(counterRef, {
+                count: allocated,
+                updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+        });
+        return `VIO-${String(allocated).padStart(4, '0')}`;
+    },
+
+    /**
+     * Generate the next ticket number for a branch.
+     *
+     * Uses a Firestore transaction + a per-branch counter document
+     * (`counters/tickets-<prefix>`) so concurrent submissions can never
+     * receive the same ticket number (the old client-side count was racy).
+     *
+     * Lazy seeding: the first time a branch's counter is missing, the current
+     * highest existing ticket number for that branch is used as the baseline,
+     * so ID numbering stays contiguous with legacy tickets.
+     */
+    async generateTicketNumber(branch) {
+        const prefix = branchToPrefix(branch);
+        const counterId = 'tickets-' + prefix;
+        const counterRef = db.collection('counters').doc(counterId);
+
+        // Only scan existing tickets while this branch has no counter yet.
+        let seed = 0;
+        try {
+            const pre = await counterRef.get();
+            if (!pre.exists) {
+                const snapshot = await db.collection('tickets').get();
+                let maxNum = 0;
+                snapshot.forEach((doc) => {
+                    const id = doc.id;
+                    if (id.indexOf(prefix + '-tix') === 0) {
+                        const n = parseInt(id.slice((prefix + '-tix').length), 10);
+                        if (!isNaN(n) && n > maxNum) maxNum = n;
+                    }
+                });
+                seed = maxNum;
+            }
+        } catch (e) {
+            console.warn('Ticket counter pre-roll skipped:', e && e.message ? e.message : e);
+        }
+
+        let allocated = 0;
+        await db.runTransaction(async (transaction) => {
+            const snap = await transaction.get(counterRef);
+            const current = snap.exists ? (Number(snap.data().count) || 0) : seed;
+            allocated = Math.max(current, seed) + 1;
+            await transaction.set(counterRef, {
+                prefix,
+                count: allocated,
+                updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+        });
+
+        return `${prefix}-tix${String(allocated).padStart(3, '0')}`;
+    }
+};
+
+// Roles are managed in Firestore user documents; hardcoded emails are intentionally not used here.
+window.SUPERADMIN_EMAILS = [];
+
+window.normalizeUserEmail = function(value) {
+    return String(value || '').trim().toLowerCase();
+};
+
+window.getUserProfile = async function(email) {
+    const normalized = window.normalizeUserEmail(email);
+    if (!normalized) return null;
+    try {
+        const snap = await db.collection('users').doc(normalized).get();
+        if (snap.exists) return { id: snap.id, ...snap.data() };
+
+        const querySnap = await db.collection('users').where('email', '==', normalized).limit(1).get();
+        if (!querySnap.empty) {
+            const doc = querySnap.docs[0];
+            return { id: doc.id, ...doc.data() };
+        }
+
+        return null;
+    } catch (error) {
+        console.warn('Failed to load user profile from Firestore:', error && error.message ? error.message : error);
+        return null;
+    }
+};
+
+// ==============================================================
+//  2-DAY TRACKING ACCESS WINDOW (approved tickets)
+//  After the superadmin approves a resolution, the manager/store may
+//  view the report + footage through the public "Track Ticket Status"
+//  lookup for exactly 2 days. Once the window lapses the ticket is
+//  shown as EXPIRED (viewing blocked) until a superadmin RESENDS it,
+//  which starts a fresh 2-day window. Nothing is ever deleted — this
+//  only gates viewing; operators/owners/superadmins keep full access.
+// ==============================================================
+//  ⚠️⚠️ TIER-2 TIME-COMPRESSION (TESTING ONLY) ⚠️⚠️
+//  The window below is temporarily 1 MINUTE so the full
+//  approve → expire → resend flow can be observed live without waiting
+//  2 days or hand-editing Firestore.
+//  >>> REVERT TO `2 * 24 * 60 * 60 * 1000` BEFORE DEPLOYING. <<<
+//  (npm test prints a loud warning while this is active.)
+window.TRACKING_ACCESS_WINDOW_MS = 60 * 1000; // TESTING — revert to 2 * 24 * 60 * 60 * 1000
+
+/** Coerce Firestore Timestamps / Date / ISO strings into a real Date (or null). */
+window.toTrackingDate = function(value) {
+    if (!value) return null;
+    if (typeof value.toDate === 'function') return value.toDate();
+    const d = value instanceof Date ? value : new Date(value);
+    return isNaN(d.getTime()) ? null : d;
+};
+
+/**
+ * Moment (Date) when the manager/store loses viewing access, or null when the
+ * ticket is not approved / has no derivable window.
+ * Priority: stored `accessExpiresAt` (written on approval + every resend),
+ * else legacy fallback `approvedAt + 2 days` for tickets approved before this
+ * feature existed.
+ */
+window.getTrackingAccessExpiry = function(ticket) {
+    if (!ticket) return null;
+    if ((ticket.approvalStatus || 'pending') !== 'approved') return null;
+
+    const stored = window.toTrackingDate(ticket.accessExpiresAt);
+    if (stored) return stored;
+
+    const approved = window.toTrackingDate(ticket.approvedAt);
+    if (!approved) return null;
+    return new Date(approved.getTime() + window.TRACKING_ACCESS_WINDOW_MS);
+};
+
+/** True when an approved ticket's viewing window has already lapsed. */
+window.isTrackingAccessExpired = function(ticket, now) {
+    const expiresAt = window.getTrackingAccessExpiry(ticket);
+    if (!expiresAt) return false;
+    const reference = now ? window.toTrackingDate(now) : new Date();
+    return expiresAt.getTime() <= (reference ? reference.getTime() : Date.now());
+};
+
+/**
+ * Human-readable length of the current window ("1 minute", "2 days").
+ * Every place that USED to hardcode "2 days" (track-page hint, Resend
+ * confirmation, success toast, button label) reads this instead, so the UI
+ * stays truthful while the window is time-compressed for testing.
+ */
+window.formatTrackingAccessWindow = function(ms) {
+    const value = Number(ms) > 0 ? Number(ms) : window.TRACKING_ACCESS_WINDOW_MS;
+    const minutes = Math.round(value / 60000);
+    if (minutes < 60) return minutes === 1 ? '1 minute' : minutes + ' minutes';
+    const hours = Math.round(value / 3600000);
+    if (hours < 48) return hours === 1 ? '1 hour' : hours + ' hours';
+    const days = Math.round(value / 86400000);
+    return days === 1 ? '1 day' : days + ' days';
+};
+
+// Make firestoreService globally accessible
+window.firestoreService = firestoreService;
+window.db = db;
+window.auth = auth;
+
