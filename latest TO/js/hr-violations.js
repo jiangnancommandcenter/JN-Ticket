@@ -58,16 +58,7 @@
     function toast(message, type) {
         if (typeof window.showToast === 'function') window.showToast(message, type || 'info');
         else console.log(message);
-    }
-
-    function formatFileSize(bytes) {
-        if (!bytes && bytes !== 0) return '';
-        if (bytes < 1024) return bytes + ' B';
-        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-        return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
-    }
-
-    function fmtDate(d) {
+    }    function fmtDate(d) {
         if (!d) return '—';
         return d.toLocaleDateString();
     }
@@ -207,35 +198,25 @@
     }
 
     // ===== Evidence (read-only) =====
-    // Simple file rows rather than the big preview grid: HR only needs to open
-    // the footage, and this avoids pulling the command center's thumbnail
-    // helpers onto a page that has no edit form to share them with.
+    // Uses the SHARED attachment card from js/attachment-viewer.js — the same
+    // .attachment-item card with a real thumbnail that the command center grids
+    // render. This used to be a hand-rolled icon row (owner-attachment-row) with
+    // no thumbnail at all, chosen deliberately to "avoid pulling the command
+    // center's thumbnail helpers onto a page". That left HR seeing CCTV footage as
+    // a grey icon chip while an operator saw the same clip as a poster frame.
+    // Clicking a card opens the shared viewer.
     function renderAttachments(attachments) {
         if (!attachmentsGrid) return;
-        const list = (Array.isArray(attachments) ? attachments : [])
-            .filter(a => a && (a.secure_url || a.url));
-        if (!list.length) {
-            attachmentsGrid.innerHTML = '<p style="color:var(--text-muted);font-size:0.85rem;">No attachments on this report.</p>';
+        const list = Array.isArray(attachments) ? attachments : [];
+        const view = window.AttachmentViewer;
+        if (!list.length || !view) {
+            attachmentsGrid.innerHTML = '<p class="u-section-sub">No attachments on this report.</p>';
             return;
         }
-        attachmentsGrid.innerHTML = list.map((att, i) => {
-            const url = att.secure_url || att.url;
-            const name = att.name || ('Attachment ' + (i + 1));
-            const isVideo = att.resource_type === 'video';
-            const isImage = att.resource_type === 'image';
-            const icon = isVideo ? 'fa-file-video' : isImage ? 'fa-file-image'
-                : (String(att.format || '').toLowerCase() === 'pdf' ? 'fa-file-pdf' : 'fa-file');
-            const size = formatFileSize(att.bytes);
-            return `
-                <a href="${esc(url)}" target="_blank" rel="noopener noreferrer" class="owner-attachment-row" title="${esc(name)}">
-                    <i class="fas ${icon}"></i>
-                    <span class="owner-attachment-name">${esc(name)}</span>
-                    ${size ? `<span class="owner-attachment-size">${esc(size)}</span>` : ''}
-                    <i class="fas fa-external-link-alt"></i>
-                </a>`;
+        attachmentsGrid.innerHTML = list.map(function (att, i) {
+            return view.buildAttachmentCard(att, { index: i });
         }).join('');
     }
-
     function detailsHtml(v) {
         const incident = incidentDate(v);
         const report = reportDate(v);

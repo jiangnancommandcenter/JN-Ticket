@@ -372,8 +372,10 @@ function setActiveUser(permissions, role = 'viewer') {
   // setActiveUser() call, so it is correct on first load and after a re-role.
   syncNewTicketButton();
 
-  // The approved-only + expiring-window sentence on the Tickets tab.
-  renderOwnerWindowNote();
+  // The approved-only + expiring-window sentence on the Tickets tab, plus the
+  // Access column / access filter, which only exist for a role that actually
+  // has a viewing window (the Area Manager).
+  applyViewerExpiryChrome();
 
   // ===== HR <-> Superadmin chat =====
   // This page serves Area Managers, HR and superadmins, but chat is for HR and
@@ -617,7 +619,39 @@ function isApprovedTicket(ticket) {
 }
 
 /**
- * True when an approved ticket's viewing window has already lapsed.
+ * ⚠️ DOES THE EXPIRING VIEWING WINDOW APPLY TO WHO IS LOOKING?
+ *
+ * The 2-day window is the REQUESTER's condition, not an employee's: it exists
+ * so a store manager reads a CCTV incident while it is fresh and then asks a
+ * superadmin to reopen it if they still need it. HR are staff who review these
+ * for a living, and a superadmin has permanent command-centre access anyway, so
+ * for both roles the window is enforced nowhere useful — it only withheld the
+ * report from someone whose job is to read it.
+ *
+ * ⚠️ IT IS DELIBERATELY NOT FOLDED INTO isOwnerTicketExpired(). That function
+ * answers a factual question about a TICKET ("has its window closed?") and is
+ * used by the row badges and the modal alike; mixing in "…and does the current
+ * person care" would make it untestable in isolation and would silently change
+ * what the pure-function tests assert. Keep the fact and the policy apart:
+ *   isOwnerTicketExpired(ticket)  → the fact
+ *   expiryAppliesToViewer()       → the policy
+ */
+function expiryAppliesToViewer() {
+  return activeUserRole === 'owner';
+}
+
+/**
+ * True when a approved ticket's viewing window has already lapsed FOR THE
+ * CURRENT VIEWER. This is the predicate every UI decision uses, so HR and
+ * superadmins never see an expiry — they simply get `false` here.
+ */
+function isOwnerTicketExpiredForViewer(ticket) {
+  if (!expiryAppliesToViewer()) return false;
+  return isOwnerTicketExpired(ticket);
+}
+
+/**
+ * True when a approved ticket's viewing window has already lapsed.
  *
  * Delegates to the single source of truth in firebase.js rather than
  * re-deriving the arithmetic here, so the Area Manager and the public track
@@ -744,7 +778,7 @@ function requestOwnerAccess(ticketId, reason) {
     // Re-check the gate on the FRESH document. The button was rendered from a
     // read that may be a minute old, and a ticket that was just resent must
     // not accept a stale request (or one for a ticket that is not approved).
-    if (!isOwnerTicketExpired(data)) {
+    if (!isOwnerTicketExpiredForViewer(data)) {
       throw new Error('not expired');
     }
     const note = {
@@ -797,9 +831,43 @@ function requestOwnerAccess(ticketId, reason) {
  * setActiveUser() rather than at load, so it is correct on first paint and
  * after the page's scripts finish wiring.
  */
+/**
+ * ⚠️ The "Access" column and its filter are about the VIEWING WINDOW, so for
+ * HR (and a superadmin) both are meaningless: nothing expires, so the column
+ * would be a permanent dash and the filter would match nothing.
+ *
+ * The column is hidden with CSS rather than by omitting the <th>/<td>, because
+ * test/owner-mobile.test.js requires the <th> count in the markup to equal the
+ * <td data-label> count in the renderer — and both are STATIC. Dropping a cell
+ * in one place and not the other renders an empty cell on a phone
+ * (`content: attr(data-label)` on a cell with no attribute is an empty string).
+ * "Access" is the 7th of 8 columns; see style in ownerdashboard.html.
+ */
+function applyViewerExpiryChrome() {
+  const showsWindow = expiryAppliesToViewer();
+
+  // The filter dropdown. Hidden rather than emptied: an <option> that can never
+  // match is a control that lies about what it does.
+  const accessFilterWrap = ownerTicketAccessFilter ? ownerTicketAccessFilter.closest('.filter-group') : null;
+  if (ownerTicketAccessFilter) ownerTicketAccessFilter.style.display = showsWindow ? '' : 'none';
+  if (accessFilterWrap) accessFilterWrap.style.display = showsWindow ? '' : 'none';
+
+  const table = document.getElementById('ownerTicketsTable');
+  if (table) table.classList.toggle('owner-hides-access', !showsWindow);
+
+  renderOwnerWindowNote();
+}
+
 function renderOwnerWindowNote() {
   if (!ownerWindowNote) return;
   try {
+    // ⚠️ Only the Area Manager has a window. Telling HR "each stays readable for
+    // 2 days" on a page where nothing expires would be a false statement, so the
+    // note is withheld rather than reworded.
+    if (!expiryAppliesToViewer()) {
+      ownerWindowNote.textContent = '';
+      return;
+    }
     ownerWindowNote.textContent =
       'Each stays readable for ' + ownerAccessWindowLabel() +
       ' after approval; after that the row remains but the report and evidence are withheld.';
@@ -864,61 +932,18 @@ window.openOwnerReport = function(reportId) {
     const rawData = snap.data();
     const data = normalizeTicketReport(rawData);
 
-    // Helper to get attachment icon color based on format
-    function getAttachmentColor(format) {
-      const lowerForm = (format || '').toLowerCase();
-      if (lowerForm.includes('mp4') || lowerForm.includes('mov') || lowerForm.includes('avi') || lowerForm.includes('webm')) return '#e53935';
-      if (lowerForm.includes('jpg') || lowerForm.includes('jpeg') || lowerForm.includes('png') || lowerForm.includes('gif') || lowerForm.includes('webp')) return '#388e3c';
-      return '#6c757d';
+    // Attachment cards come from the SHARED builder in js/attachment-viewer.js —
+    // the same .attachment-item card the five grids in script.js render. This
+    // used to be a local buildAttachmentRow() that emitted a bare icon chip
+    // (owner-attachment-row) with NO thumbnail, plus a third getAttachmentColor
+    // that disagreed with script.js's, so the same CCTV clip looked like a
+    // thumbnail card on one dashboard and a grey icon row on the other.
+    // Clicking a card opens the shared viewer.
+    function buildAttachmentRow(att, index) {
+        const v = window.AttachmentViewer;
+        if (!v) return '';
+        return v.buildAttachmentCard(att, { index: index || 0 });
     }
-
-    // Helper to render one attachment as a clean file row (icon + name + size).
-    // No large preview boxes — entries without a usable link are skipped so
-    // empty clickable grey boxes can never appear.
-    function buildAttachmentRow(att) {
-      const url = att.secure_url || att.url || '';
-      if (!url) return '';
-      const name = att.name || 'Attachment';
-      const resourceType = att.resource_type || '';
-      const format = String(att.format || '').toLowerCase();
-      const color = getAttachmentColor(format);
-
-      // Images get a visible inline preview (not just a clickable chip).
-      if (resourceType === 'image') {
-        return `
-          <a href="${escapeHTML(url)}" target="_blank" rel="noopener noreferrer" class="owner-attachment-image" title="Click to view full size: ${escapeHTML(name)}">
-            <img src="${escapeHTML(url)}" alt="${escapeHTML(name)}" loading="lazy"
-                 onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';">
-            <div class="owner-attachment-file-icon" style="display:none;"><i class="fas fa-file-image" style="color:${color}"></i></div>
-            <span class="owner-attachment-image-name"><i class="fas fa-expand-alt"></i> ${escapeHTML(name)}</span>
-          </a>
-        `;
-      }
-
-      let icon = 'fa-file';
-      if (resourceType === 'video') icon = 'fa-file-video';
-      else if (format === 'pdf') icon = 'fa-file-pdf';
-      else if (/^(xlsx?|csv)$/.test(format)) icon = 'fa-file-excel';
-      else if (/^(zip|rar|7z)$/.test(format)) icon = 'fa-file-archive';
-
-      const sizeText = att.bytes
-        ? (att.bytes < 1024
-            ? att.bytes + ' B'
-            : att.bytes < 1024 * 1024
-              ? (att.bytes / 1024).toFixed(1) + ' KB'
-              : (att.bytes / (1024 * 1024)).toFixed(2) + ' MB')
-        : '';
-
-      return `
-        <a href="${escapeHTML(url)}" target="_blank" rel="noopener noreferrer" class="owner-attachment-row" title="${escapeHTML(name)}">
-          <i class="fas ${icon}" style="color:${color}"></i>
-          <span class="owner-attachment-name">${escapeHTML(name)}</span>
-          ${sizeText ? `<span class="owner-attachment-size">${escapeHTML(sizeText)}</span>` : ''}
-          <i class="fas fa-external-link-alt"></i>
-        </a>
-      `;
-    }
-
     // Split the ticket's files into requester attachments vs operator footage
     const attachments = splitOwnerAttachments(rawData);
 
@@ -964,7 +989,7 @@ window.openOwnerReport = function(reportId) {
     // ⚠️ The withheld text must not leak through any other field: `resNotes`
     // and `data.description` are the two that carry findings, and both are only
     // interpolated inside the sections that this branch replaces wholesale.
-    const expired = isOwnerTicketExpired(rawData);
+    const expired = isOwnerTicketExpiredForViewer(rawData);
     const expiresAt = ownerTicketExpiry(rawData);
     const windowLabel = ownerAccessWindowLabel();
 
@@ -1234,8 +1259,8 @@ function renderOwnerTickets(allTickets) {
     // ⚠️ The EXPIRED predicate is the SAME helper the row badges use, so the
     // filter and the badge can never disagree about which rows are expired.
     const accessMatches = (t) => {
-      if (selectedAccess === 'active') return !isOwnerTicketExpired(t);
-      if (selectedAccess === 'expired') return isOwnerTicketExpired(t);
+      if (selectedAccess === 'active') return !isOwnerTicketExpiredForViewer(t);
+      if (selectedAccess === 'expired') return isOwnerTicketExpiredForViewer(t);
       return true;
     };
     tickets = tickets.filter(accessMatches);
@@ -1266,7 +1291,7 @@ function renderOwnerTickets(allTickets) {
       // than vanishing and looking like data loss. `.status-badge.expired`
       // already exists in style.css for the Approvals table, so this reuses
       // that exact treatment instead of inventing a second one.
-      const expired = isOwnerTicketExpired(t);
+      const expired = isOwnerTicketExpiredForViewer(t);
       const expiresAt = expired ? ownerTicketExpiry(t) : null;
       const expiryTitle = expired && expiresAt
         ? 'Viewing access closed ' + formatDate(expiresAt)
@@ -1300,7 +1325,7 @@ function renderOwnerTickets(allTickets) {
       // renaming it here would be a breaking change for code this page does
       // not own.
       let accessCell;
-      if (reopenPending) {
+      if (reopenPending && expiryAppliesToViewer()) {
         // The amber chip REPLACES the red one, as before — the manager asked,
         // so "expired" alone would be a downgrade in meaning.
         accessCell = `<span class="access-reopen-badge" title="${escapeHTML(reopenTitle)}">`
@@ -1325,7 +1350,7 @@ function renderOwnerTickets(allTickets) {
       // vertical room, so the detail is rendered as real text there. It stays
       // `display: none` on the desktop table, which must keep one line per row.
       let accessNote = '';
-      if (reopenPending && reopen && reopen.reason) {
+      if (reopenPending && reopen && reopen.reason && expiryAppliesToViewer()) {
         accessNote = '<div class="owner-access-note">' + escapeHTML(reopen.reason) + '</div>';
       } else if (expired && expiresAt) {
         accessNote = '<div class="owner-access-note">Viewing closed '

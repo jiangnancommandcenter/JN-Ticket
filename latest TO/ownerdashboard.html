@@ -867,6 +867,25 @@
         #ownerTicketsTable .ticket-link:hover { color: var(--owner-ticket-link-hover); text-decoration: underline; }
         #ownerTicketsTable .status-badge { box-shadow: var(--owner-elev-0); }
 
+        /* ------------------------------------------------------------
+           NO VIEWING WINDOW FOR THIS ROLE (HR / superadmin)
+
+           The 2-day window is the REQUESTER's condition, so for a role
+           without one the "Access" column is a permanent dash and its
+           filter matches nothing. Both are hidden instead.
+
+           ⚠️ The column is hidden by POSITION, not by deleting the <th>
+           /<td>. Both are static markup and test/owner-mobile.test.js
+           requires their counts to match; omitting one renders an empty
+           cell on a phone. "Access" is the 7th of the 8 columns, and the
+           class is toggled by applyViewerExpiryChrome() in
+           js/owner-dashboard.js. On desktop the row still has a <td>
+           for the count to stay equal — it is simply not displayed. */
+        #ownerTicketsTable.owner-hides-access th:nth-child(7),
+        #ownerTicketsTable.owner-hides-access td:nth-child(7) {
+            display: none;
+        }
+
         /* Pagination pill */
         #ownerTicketPagination .page-info { color: var(--text-secondary); font-weight: 600; }
 
@@ -1302,6 +1321,15 @@
     <script src="js/refresh-state.js"></script>
     <!-- Theme manager: dark/light toggle + notification bell -->
     <script src="js/theme.js"></script>
+    <!-- ===== In-app attachment viewer (image / video / PDF lightbox) =====
+         THE SAME dialog main.html uses. This page used to render every
+         attachment as a bare <a target="_blank">, so ticket files opened in
+         a new tab instead of this modal -- because neither the dialog NOR its
+         click handling existed here. The module injects the dialog, so this
+         page needs no markup for it. It also supplies the shared attachment
+         card builder, so this page renders the SAME .attachment-item tiles --
+         with real image/video thumbnails -- as main.html. -->
+    <script src="js/attachment-viewer.js"></script>
     <script src="js/owner-dashboard.js"></script>
     <!-- ===== Area Manager ticket submission form (full-screen modal) =====
          Loaded AFTER owner-dashboard.js on purpose: the dashboard installs the

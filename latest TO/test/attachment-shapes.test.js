@@ -30,6 +30,8 @@ const assert = require('assert');
 const ROOT = path.join(__dirname, '..');
 const scriptSrc = fs.readFileSync(path.join(ROOT, 'script.js'), 'utf8');
 const formSrc = fs.readFileSync(path.join(ROOT, 'js', 'owner-ticket-form.js'), 'utf8');
+// The click guard lives here since the viewer was shared with ownerdashboard.html.
+const viewerSrc = fs.readFileSync(path.join(ROOT, 'js', 'attachment-viewer.js'), 'utf8');
 
 console.log('Testing attachment rendering (both writer shapes + no empty href)...');
 
@@ -51,9 +53,12 @@ function extractFn(src, name) {
 const sandbox = { console, URL, encodeURI, decodeURI };
 sandbox.window = sandbox;
 vm.createContext(sandbox);
+// These normalisers moved to js/attachment-viewer.js so the Owner Dashboard could
+// share them; script.js now delegates. The logic is asserted where it LIVES,
+// which is the whole point of the move.
 vm.runInContext([
-    extractFn(scriptSrc, 'normalizeFileUrl'),
-    extractFn(scriptSrc, 'normalizeAttachment')
+    extractFn(viewerSrc, 'normalizeFileUrl'),
+    extractFn(viewerSrc, 'normalizeAttachment')
 ].join('\n'), sandbox);
 const norm = sandbox.normalizeAttachment;
 
@@ -111,13 +116,15 @@ console.log('  PASS  every ticket renderer gates its anchor on a real URL');
 // ============================================================================
 // 3. The click guard must preventDefault BEFORE bailing on an empty URL
 // ============================================================================
-const guardAt = scriptSrc.indexOf("a.attachment-preview, a.upload-file-preview");
-assert(guardAt > -1, 'the attachment click handler was not found');
-const guard = scriptSrc.slice(guardAt, guardAt + 1500);
-// Search FORWARD from guardAt: the same selector string appears a second time
-// further down (the querySelectorAll), and a bare indexOf could match either one.
-const preventAt = scriptSrc.indexOf('e.preventDefault()', guardAt);
-const bailAt = scriptSrc.indexOf("if (!url || url === '#') return;", guardAt);
+// The guard moved out of script.js when the viewer became a shared module, so it
+// is asserted against js/attachment-viewer.js. The selectors are a named
+// constant there, so the handler is located by its click BINDING rather than by
+// a selector string that only ever appeared inline.
+const guardAt = viewerSrc.indexOf("document.addEventListener('click'");
+assert(guardAt > -1, 'the attachment click handler was not found in js/attachment-viewer.js');
+// Search FORWARD from guardAt so a bare indexOf cannot match an earlier spot.
+const preventAt = viewerSrc.indexOf('e.preventDefault()', guardAt);
+const bailAt = viewerSrc.indexOf("if (!url || url === '#') return;", guardAt);
 assert(preventAt > -1, 'the click handler must call e.preventDefault()');
 assert(bailAt > -1, 'the click handler must still guard on an empty URL');
 assert(preventAt < bailAt,

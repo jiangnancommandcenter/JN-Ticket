@@ -134,6 +134,105 @@ assert(
     'isOwnerTicketExpired() must delegate to window.isTrackingAccessExpired() — re-deriving the ' +
     'arithmetic here is how the two surfaces would drift apart'
 );
+
+// ============================================================================
+// 8. ONLY THE AREA MANAGER HAS A VIEWING WINDOW
+// ============================================================================
+// THE REQUIREMENT: "modify the tickets without expiration — only area manager
+// has expirations". HR shares this dashboard and was being held to the
+// REQUESTER's 2-day window, which only ever withheld a report from someone whose
+// job is to read it.
+//
+// The policy is deliberately SEPARATE from the fact: isOwnerTicketExpired()
+// answers "has this ticket's window closed?", expiryAppliesToViewer() answers
+// "does that window apply to the person looking?". Folding the two together
+// would make the arithmetic untestable on its own.
+const policySandbox = { console: { log() {}, warn() {}, error() {}, info() {} } };
+policySandbox.window = policySandbox;
+vm.createContext(policySandbox);
+vm.runInContext("var activeUserRole = 'viewer';", policySandbox);
+// The expiry helpers DELEGATE to window.isTrackingAccessExpired /
+// getTrackingAccessExpiry, so the same stand-ins the rest of this suite uses
+// are supplied here. Without them isOwnerTicketExpired() returns false for
+// everything and the test would pass for the wrong reason.
+vm.runInContext([
+    'var TRACKING_ACCESS_WINDOW_MS = ' + HOUR + ';',
+    'function toDate(v){ if(!v) return null; if(typeof v.toDate==="function") return v.toDate();',
+    '  var d = v instanceof Date ? v : new Date(v); return isNaN(d.getTime()) ? null : d; }',
+    'function getTrackingAccessExpiry(t){',
+    '  if(!t) return null;',
+    '  if((t.approvalStatus || "pending") !== "approved") return null;',
+    '  var stored = toDate(t.accessExpiresAt); if(stored) return stored;',
+    '  var approved = toDate(t.approvedAt); if(!approved) return null;',
+    '  return new Date(approved.getTime() + TRACKING_ACCESS_WINDOW_MS); }',
+    'function isTrackingAccessExpired(t){',
+    '  var e = getTrackingAccessExpiry(t); if(!e) return false;',
+    '  return e.getTime() <= Date.now(); }',
+    'window.isTrackingAccessExpired = isTrackingAccessExpired;',
+    'window.getTrackingAccessExpiry = getTrackingAccessExpiry;'
+].join('\n'), policySandbox);
+vm.runInContext(extractFn('expiryAppliesToViewer'), policySandbox);
+vm.runInContext(extractFn('isOwnerTicketExpired'), policySandbox);
+vm.runInContext(extractFn('isOwnerTicketExpiredForViewer'), policySandbox);
+
+const EXPIRED_TICKET = {
+    approvalStatus: 'approved',
+    approvedAt: new Date(Date.now() - 5 * HOUR),      // long past the window
+    accessExpiresAt: new Date(Date.now() - 1 * HOUR)
+};
+
+function viewerAs(role) {
+    policySandbox.activeUserRole = role;
+    return {
+        applies: policySandbox.expiryAppliesToViewer(),
+        expired: policySandbox.isOwnerTicketExpiredForViewer(EXPIRED_TICKET)
+    };
+}
+
+// The FACT is unchanged for every role — the ticket really did lapse.
+assert.strictEqual(viewerAs('owner').expired, true,
+    'the FACT must still hold: this ticket window closed an hour ago');
+// The raw, unwrapped predicate stays role-independent — that is the whole
+// reason the policy was split out of it rather than folded in.
+policySandbox.activeUserRole = 'hr';
+assert.strictEqual(policySandbox.isOwnerTicketExpired(EXPIRED_TICKET), true,
+    'the raw fact is role-independent — the ticket window really is closed, whatever the viewer is');
+
+// The POLICY is what differs.
+assert.strictEqual(viewerAs('owner').applies, true, 'the AREA MANAGER keeps the viewing window');
+assert.strictEqual(viewerAs('hr').applies, false, '⚠️ HR must NOT have a viewing window');
+assert.strictEqual(viewerAs('superadmin').applies, false,
+    '⚠️ a superadmin must NOT have one either — they have permanent access on main.html');
+assert.strictEqual(viewerAs('owner').expired, true, 'an Area Manager still sees it as expired');
+assert.strictEqual(viewerAs('hr').expired, false,
+    '⚠️ HR must never see a lapsed ticket as expired — that is what restored their full report');
+assert.strictEqual(viewerAs('superadmin').expired, false,
+    'a superadmin on this page must never see the withheld shell either');
+console.log('  PASS  only the Area Manager has a viewing window; HR and superadmin always get the full report');
+
+// The Access column + filter must be hidden for a role without a window, and
+// the hiding must be by CSS POSITION — the <th>/<td> counts are static and
+// test/owner-mobile.test.js requires them to match.
+assert(
+    /#ownerTicketsTable\.owner-hides-access th:nth-child\(7\)/.test(ownerHtml) &&
+    /#ownerTicketsTable\.owner-hides-access td:nth-child\(7\)/.test(ownerHtml),
+    'ownerdashboard.html must hide the 7th (Access) column via CSS for a role with no window'
+);
+assert(
+    /classList\.toggle\('owner-hides-access'/.test(ownerJs),
+    'the class must be toggled from JS when the role resolves'
+);
+assert(
+    /ownerTicketAccessFilter\.style\.display = showsWindow/.test(ownerJs),
+    'the Access FILTER must be hidden too — an <option> that can never match is a control that lies'
+);
+// And the explanatory sentence must not claim a 2-day window to someone without one.
+assert(
+    /if \(!expiryAppliesToViewer\(\)\) \{\s*ownerWindowNote\.textContent = '';/.test(ownerJs),
+    'the "readable for 2 days" sentence must be withheld for a role with no window — telling HR a '
+    + 'window exists when none does is simply false'
+);
+console.log('  PASS  the Access column, its filter and the window sentence all follow the role');
 assert(
     /window\.getTrackingAccessExpiry\(ticket\)/.test(extractFn('ownerTicketExpiry')),
     'ownerTicketExpiry() must delegate to window.getTrackingAccessExpiry()'
@@ -188,8 +287,23 @@ assert(
     'renderOwnerTickets() must filter the Area Manager list through isApprovedTicket()'
 );
 assert(
-    /isOwnerTicketExpired\(t\)/.test(listSrc),
-    'renderOwnerTickets() must compute the expiry per row so the badge can be rendered'
+    /isOwnerTicketExpiredForViewer\(t\)/.test(listSrc),
+    'renderOwnerTickets() must compute the expiry per row so the badge can be rendered — and it '
+    + 'must go through the VIEWER-AWARE predicate, so HR and a superadmin (who have no viewing '
+    + 'window) never see an Access-closed badge'
+);
+// ⚠️ It must NOT reach for the raw fact directly. isOwnerTicketExpired() answers
+// "has this ticket's window closed?"; isOwnerTicketExpiredForViewer() answers
+// "…for the person looking". Only the latter belongs in a UI decision, and
+// bypassing it is exactly how the badge came back for HR after the exemption.
+assert(
+    !/[^A-Za-z]isOwnerTicketExpired\(/.test(listSrc),
+    'the list renderer must not call the raw isOwnerTicketExpired() — use the viewer-aware variant'
+);
+assert(
+    /expiryAppliesToViewer\(\)/.test(listSrc),
+    'the "Reopen requested" chip must be gated on expiryAppliesToViewer(): it means nothing to a '
+    + 'role whose tickets never expire'
 );
 assert(
     /status-badge expired/.test(listSrc),
@@ -229,8 +343,9 @@ assert(
     'time, not only in the list, because a ticket can lapse while the page is open'
 );
 assert(
-    /isOwnerTicketExpired\(rawData\)/.test(modalSrc),
-    'openOwnerReport() must test the freshly-read document, not a cached list row'
+    /isOwnerTicketExpiredForViewer\(rawData\)/.test(modalSrc),
+    'openOwnerReport() must test the freshly-read document, not a cached list row — and through the '
+    + 'VIEWER-AWARE predicate, so HR always gets the full report instead of the withheld shell'
 );
 // The expired branch must NOT interpolate the withheld fields. This is the
 // assertion that catches a future edit that renders the evidence anyway.
@@ -291,11 +406,20 @@ assert(/<p>Approved tickets/.test(ticketsIntro),
     'shortened (the old sentence pushed the h2 to three lines and crowded the toolbar), so this ' +
     'asserts the meaning, not the old wording. Found: ' + ticketsIntro);
 assert(
-    /renderOwnerWindowNote\(\);/.test(ownerJs.slice(
+    /applyViewerExpiryChrome\(\);/.test(ownerJs.slice(
         ownerJs.indexOf('function setActiveUser('),
         ownerJs.indexOf('function switchOwnerTab(')
     )),
-    'renderOwnerWindowNote() must be called from setActiveUser() so the sentence is filled on load'
+    'applyViewerExpiryChrome() must be called from setActiveUser() so the window sentence AND the '
+    + 'Access column / access filter are settled the moment the role resolves'
+);
+// applyViewerExpiryChrome() is what calls renderOwnerWindowNote(), so the note
+// still runs on load — through the wrapper that also hides the Access chrome for
+// any role without a viewing window (HR, superadmin).
+assert(
+    /applyViewerExpiryChrome[\s\S]{0,900}?renderOwnerWindowNote\(\)/.test(ownerJs),
+    'applyViewerExpiryChrome() must still call renderOwnerWindowNote() so the Area Manager keeps '
+    + 'the explanatory sentence'
 );
 console.log('  PASS  the dead Reports code is gone and the rule is documented in the UI');
 
@@ -403,17 +527,18 @@ assert(
 // Each bucket filters on the RIGHT thing, via the SAME helper the row badges
 // use, so the filter and the badge can never disagree about what is expired.
 [
-    ["if (selectedAccess === 'active') return !isOwnerTicketExpired(t);",
-        'the "Not expired" bucket must exclude expired rows'],
-    ["if (selectedAccess === 'expired') return isOwnerTicketExpired(t);",
-        'the "Expired" bucket must include ONLY expired rows']
+    ["if (selectedAccess === 'active') return !isOwnerTicketExpiredForViewer(t);",
+        'the "Not expired" bucket must exclude expired rows (via the viewer-aware predicate, so it is '
+        + 'meaningless for a role with no viewing window)'],
+    ["if (selectedAccess === 'expired') return isOwnerTicketExpiredForViewer(t);",
+        'the "Expired" bucket must include ONLY expired rows — likewise viewer-aware']
 ].forEach(([token, why]) => {
     assert(listFn.indexOf(token) > -1, `renderOwnerTickets() must implement ${why} — missing: ${token}`);
 });
 // ...and an unknown value must fall through to "show everything" rather than
 // silently emptying the list.
 assert(
-    /if \(selectedAccess === 'expired'\) return isOwnerTicketExpired\(t\);\s*return true;/.test(listFn),
+    /if \(selectedAccess === 'expired'\) return isOwnerTicketExpiredForViewer\(t\);\s*return true;/.test(listFn),
     'an unrecognised access value must fall through to showing everything — an <option> added to the ' +
     'markup before the JS is updated must not blank the list'
 );
@@ -502,9 +627,10 @@ const requestSrc = extractFn('requestOwnerAccess');
     ['requestedByEmail: requestedByEmail',
         'requestedByEmail must be the ACCOUNT email: resolveReopenRecipient() emails the ' +
         'requester first, and a manager is usually not the original reporter'],
-    ['isOwnerTicketExpired(data)',
+    ['isOwnerTicketExpiredForViewer(data)',
         'the request must RE-CHECK expiry on the freshly-read document — a ticket resent a ' +
-        'second ago must not accept a stale request']
+        'second ago must not accept a stale request, and the check is viewer-aware so a role ' +
+        'without a viewing window never raises one'],
 ].forEach(([token, why]) => {
     assert(requestSrc.indexOf(token) > -1, `requestOwnerAccess() must include ${token} — ${why}`);
 });
