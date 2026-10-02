@@ -661,11 +661,19 @@ const deep = deepSandbox;
 });
 console.log('  PASS  a hostile ?ticket= cannot reach openOwnerReport()');
 
-// 7b. The gate itself. Each row is what the manager's FILTERED list contains,
-//     so "in the list" and "allowed to open" cannot drift apart.
+// 7b. The gate itself.
+// ⚠️ CORRECTED 2026-02: this used to require the ticket to be in the manager's
+// branch-scoped LIST and called that a security control. It was not one —
+// firestore.rules already reads
+//     allow read: if isSignedIn() || resource.data.approvalStatus == 'approved'
+// so any signed-in user can already read any APPROVED ticket. Requiring it to
+// also pass a UI branch filter blocked nothing; it only stopped the legitimate
+// recipient of an approval email from opening their own ticket whenever their
+// branch list was empty (the approveUser branches:[] bug) or a name differed by
+// case. The gate is now exactly what the rules enforce.
 const ROWS = [
     { id: 'BNW-TIX007', branch: 'Banawe', approvalStatus: 'approved' },   // mine, approved
-    { id: 'MAB-TIX002', branch: 'Mabini', approvalStatus: 'approved' },   // NOT my branch
+    { id: 'MAB-TIX002', branch: 'Mabini', approvalStatus: 'approved' },   // other branch, approved
     { id: 'BNW-TIX009', branch: 'Banawe', approvalStatus: 'pending_approval' } // not approved
 ];
 
@@ -688,29 +696,118 @@ function tryOpen(ticketId, rows) {
     };
 }
 
+// 7b assertions.
+// ⚠️ ownerBranchKey is an ARROW const, not a `function` declaration, so the
+// extractFn() helper cannot reach it — it is loaded from source directly.
+const branchKeySrc = ownerJs.slice(
+    ownerJs.indexOf('const ownerBranchKey ='),
+    ownerJs.indexOf('\n', ownerJs.indexOf('const ownerBranchKey ='))
+);
+vm.runInContext(branchKeySrc, deepSandbox);
+
 let r = tryOpen('BNW-TIX007', ROWS);
 assert.deepStrictEqual(r.opened, ['BNW-TIX007'],
-    'an approved ticket in the manager\'s OWN branch must open');
+    'an approved ticket must open — this is the whole point of the email link');
 assert.deepStrictEqual(r.tabs, ['tickets'],
     'the manager must land on the Tickets tab, not a popup over Overview');
 assert.deepStrictEqual(r.toasts, [], 'a successful deep link must not warn');
 
 r = tryOpen('MAB-TIX002', ROWS);
-assert.deepStrictEqual(r.opened, [],
-    '⚠️ SECURITY: a ticket from a branch the manager does NOT own must NOT open — ' +
-    'the deep link must resolve through the same branch filter as the visible list');
-assert.strictEqual(r.toasts.length, 1,
-    'a refused deep link must say so, not fail silently');
+assert.deepStrictEqual(r.opened, ['MAB-TIX002'],
+    'an APPROVED ticket opens even from another branch: firestore.rules already permits any '
+    + 'signed-in user to read it, so a branch veto here blocked the email link without '
+    + 'protecting anything');
+assert.deepStrictEqual(r.toasts, [],
+    'opening out-of-scope is informational (console.warn), never a user-facing error');
 
 r = tryOpen('BNW-TIX009', ROWS);
 assert.deepStrictEqual(r.opened, [],
-    '⚠️ SECURITY: an UNAPPROVED ticket must NOT open through the deep link — the ' +
-    'whole point of the approval gate is that the manager cannot read it early');
-console.log('  PASS  the deep link is gated by approval status AND branch (no bypass)');
+    'an UNAPPROVED ticket must NOT open — the approval gate is the one the rules do enforce, '
+    + 'and a link must never be what reveals unapproved work');
+assert.strictEqual(r.toasts.length, 1, 'a refused deep link must say so, not fail silently');
+assert(/not been approved yet/i.test(r.toasts[0]),
+    'the refusal must name the REAL reason ("not approved yet"), not a generic message: the '
+    + 'old single toast covered three different causes and cost hours of debugging. Got: '
+    + r.toasts[0]);
+
+r = tryOpen('BNW-TIX999', ROWS);
+assert.deepStrictEqual(r.opened, [], 'a ticket id that does not exist must not open');
+assert(/could not be found/i.test(r.toasts[0]),
+    'a missing ticket must say so distinctly from an unapproved one. Got: ' + r.toasts[0]);
+console.log('  PASS  the deep link gates on APPROVAL (as firestore.rules does) and names the real reason');
 
 // 7c. ONE-SHOT. The ticket listener fires on every snapshot, so a link left
 //     pending would re-open the report modal over and over, trapping the
 //     manager in a ticket they already closed.
+// 7e. BRANCH NAMES MUST COMPARE NORMALLY, NOT BY RAW STRING.
+// THE BUG: `activeUserPermissions.branches.includes(branchName)` is an exact,
+// case- and whitespace-sensitive match. A user document holding 'banawe' against
+// a branch named 'Banawe' silently produced an EMPTY assigned list — the
+// dashboard said "No branch access assigned yet" and every ticket link was
+// refused, with nothing in any log. Branch names are typed by hand in several
+// places, so this had to stop being load-bearing.
+const branchSandbox = { console: { log() {}, warn() {}, error() {}, info() {} } };
+branchSandbox.window = branchSandbox;
+vm.createContext(branchSandbox);
+vm.runInContext(branchKeySrc.replace('const ', 'var '), branchSandbox);
+vm.runInContext('var activeUserIsSuperAdmin = false; var ownerAllBranches = [];', branchSandbox);
+vm.runInContext(extractFn('applyAssignedBranches'), branchSandbox);
+// Stub the six renderers applyAssignedBranches() calls after assigning.
+vm.runInContext([
+    'var ownerAssignedBranches = [];',
+    'var activeUserPermissions = { branches: [], permissions: {} };',
+    'function populateBranchDropdowns() {} function renderBranchAccessList() {}',
+    'function renderPermissionSummary() {} function renderKpiCards() {}',
+    'function loadOwnerTickets() {}',
+    'var tabs = []; function switchOwnerTab(t){ tabs.push(t); }'
+].join('\n'), branchSandbox);
+
+function assignedFor(userBranches, allBranches) {
+    branchSandbox.activeUserPermissions = { branches: userBranches, permissions: {} };
+    branchSandbox.ownerAllBranches = allBranches;
+    branchSandbox.applyAssignedBranches();
+    return Array.from(branchSandbox.ownerAssignedBranches);
+}
+
+assert.deepStrictEqual(assignedFor(['Banawe'], ['Banawe', 'Mabini']), ['Banawe'],
+    'an exact match must still work');
+assert.deepStrictEqual(assignedFor(['banawe'], ['Banawe']), ['Banawe'],
+    '⚠️ a LOWERCASE grant must still match the cased branch name — this case mismatch silently '
+    + 'emptied the branch list and refused every ticket link');
+assert.deepStrictEqual(assignedFor(['  Banawe  '], ['Banawe']), ['Banawe'],
+    'surrounding whitespace must not change the match');
+assert.deepStrictEqual(assignedFor(['Mabini'], ['Banawe']), [],
+    'a genuinely different branch must still NOT match');
+console.log('  PASS  branch matching is case- and whitespace-insensitive');
+
+// 7f. approveUser() must REFUSE to write an empty branch list. It used to write
+//     `branches: []` silently and report success, which is how real accounts lost
+//     every branch at once.
+// ⚠️ approveUser/updateUserPermissions live in SCRIPT.JS (the Command Center),
+// not in owner-dashboard.js — the superadmin acts from main.html.
+function extractFrom(src, name) {
+    const start = src.indexOf('async function ' + name + '(');
+    assert(start > -1, name + '() not found');
+    let depth = 0;
+    for (let j = src.indexOf('{', start); j < src.length; j++) {
+        if (src[j] === '{') depth++;
+        else if (src[j] === '}') { depth--; if (depth === 0) return src.slice(start, j + 1); }
+    }
+    throw new Error('could not find the end of ' + name + '()');
+}
+const scriptJsSrc = fs.readFileSync(path.join(ROOT, 'script.js'), 'utf8');
+const approveFn = extractFrom(scriptJsSrc, 'approveUser');
+assert(/detail\.branches\.length === 0/.test(approveFn) || /!Array\.isArray\(detail\.branches\)/.test(approveFn),
+    'approveUser() must refuse to approve with zero branches');
+assert(/return;/.test(approveFn.slice(approveFn.indexOf('detail.branches'))),
+    'approveUser() must RETURN rather than fall through to the write');
+assert(/Cannot approve/.test(approveFn),
+    'approveUser() must tell the operator WHY it refused, naming the real cause');
+// Same for the "save permissions" path.
+const updateFn = extractFrom(scriptJsSrc, 'updateUserPermissions');
+assert(/detail\.branches\.length === 0/.test(updateFn) || /!Array\.isArray\(detail\.branches\)/.test(updateFn),
+    'updateUserPermissions() must refuse to save an empty branch list too');
+console.log('  PASS  approve/save refuse to strip a user\'s branch access silently');
 r = tryOpen('BNW-TIX007', ROWS);
 assert.deepStrictEqual(r.opened, ['BNW-TIX007'], 'the first call opens');
 deep.applyOwnerDeepLink(ROWS);

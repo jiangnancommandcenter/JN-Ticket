@@ -1308,7 +1308,26 @@ async function loadBranchData() {
         allLogs = await firestoreService.getAllLogs();
 
         if (branches.length === 0) {
-            await seedDefaultBranches();
+            // ⚠️ THE AUTO-SEED CAN FAIL SILENTLY, AND IT DID.
+            // seedDefaultBranches() writes through the web SDK, and `branches`
+            // create is `allow create: if isSuperAdmin()`. A denied write threw,
+            // the one broad catch below swallowed it, and `branches` stayed []
+            // — so the Branch Monitor was empty AND every Branch Access checkbox
+            // in User Approvals rendered "No branches loaded.", which then let
+            // approveUser() write `branches: []` onto real accounts.
+            //
+            // It is separated out here so the failure is reported and the branch
+            // dropdowns still get rebuilt, instead of the whole page believing
+            // the database genuinely has no branches.
+            try {
+                await seedDefaultBranches();
+            } catch (seedError) {
+                console.error('Default branch seeding failed:', seedError);
+                if (typeof showToast === 'function') {
+                    showToast('Could not create the default branches. Seed the database (npm run seed), '
+                        + 'or a branch must be added manually.', 'error');
+                }
+            }
             branches = await firestoreService.getBranches();
         }
 
@@ -1613,6 +1632,27 @@ function refreshChatDirectory() {
 async function approveUser(email) {
     const lower = getUserEmailLower(email);
     const detail = getUserDetailData(email);
+
+    // ⚠️ REFUSE TO APPROVE WITH NO BRANCHES. This used to write `branches: []`
+    // silently and report success. The consequence was invisible until much
+    // later: the approved manager saw an empty dashboard, "No branch access
+    // assigned yet", and every ticket link emailed to them was refused — with
+    // no record of who removed their access or when.
+    //
+    // It happens whenever the Branch Access checkboxes render empty — see
+    // renderDetailBranchCheckboxes(), which shows "No branches loaded." when the
+    // `branches` collection read returns nothing — and there is then nothing to
+    // tick. So this guard is the last line of defence, and it must LOUDLY fail
+    // rather than silently strip access.
+    if (!Array.isArray(detail.branches) || detail.branches.length === 0) {
+        showToast(
+            'Cannot approve: assign at least one branch first. '
+            + 'If none are listed, the branch list has not loaded — reload this page.',
+            'error'
+        );
+        return;
+    }
+
     try {
         await db.collection('users').doc(lower).update({
             // The role comes from the "Set Role" dropdown (Owner / HR).
@@ -1636,6 +1676,18 @@ async function approveUser(email) {
 async function updateUserPermissions(email) {
     const lower = getUserEmailLower(email);
     const detail = getUserDetailData(email);
+
+    // Same reasoning as approveUser(): saving with an empty branch list silently
+    // strips the user's access. Refuse rather than write it.
+    if (!Array.isArray(detail.branches) || detail.branches.length === 0) {
+        showToast(
+            'Cannot save: assign at least one branch first. '
+            + 'If none are listed, the branch list has not loaded — reload this page.',
+            'error'
+        );
+        return;
+    }
+
     try {
         await db.collection('users').doc(lower).update({
             // Saving an existing user can also CHANGE their role, so this

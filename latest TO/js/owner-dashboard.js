@@ -136,28 +136,42 @@ function applyOwnerDeepLink(allTickets) {
     ownerDeepLinkTicket = '';
 
     const rows = (Array.isArray(allTickets) ? allTickets : []).map((doc) => normalizeTicketReport(doc));
-    const allowedBranches = activeUserIsSuperAdmin ? ownerAllBranches : ownerAssignedBranches;
 
-    // ⚠️ The approval filter and the branch filter MUST stay in step with
-    // renderOwnerTickets(). If they drift, the deep link silently becomes
-    // either a no-op or a bypass.
+    // ⚠️ WHY THIS GATE IS "APPROVED", NOT "IN MY BRANCH LIST".
     //
-    // The approval gate is applied UNCONDITIONALLY here, even for a superadmin
-    // (who sees unapproved tickets in the list). The email is only ever sent
-    // after an approval, and a link should never be the thing that reveals
-    // unapproved work — being stricter than the list is the safe direction.
-    let visible = rows.filter((t) => isApprovedTicket(t));
-    visible = visible.filter((t) => {
-        const branch = String(t.branch || t.branchName || '').trim();
-        return allowedBranches.includes(branch);
-    });
-
-    const match = visible.find((t) => String(t.id || '') === ticketId);
+    // The original version required the ticket to appear in the manager's
+    // branch-scoped LIST, and called that a security control. It was not one:
+    // firestore.rules already reads
+    //     allow read: if isSignedIn() || resource.data.approvalStatus == 'approved'
+    // so ANY signed-in user can already read ANY approved ticket straight from
+    // Firestore. Requiring it to pass a UI branch filter blocked nothing — it
+    // just stopped the legitimate recipient of an approval email from opening
+    // the ticket they had been emailed about, whenever their branch list was
+    // empty (see the approveUser() branches:[] bug) or a name differed by case.
+    //
+    // So the gate is now exactly what the rules enforce: signed in + approved.
+    // The branch list still scopes the visible TICKETS, which is where scoping
+    // belongs; the deep link reports a branch mismatch as information.
+    const match = rows.find((t) => String(t.id || '') === ticketId);
     if (!match) {
-        // Not silently nothing: the manager followed a link from an email and
-        // deserves to be told why no ticket opened.
-        ownerToast('That ticket is not available on your dashboard.', 'error');
+        ownerToast('Ticket ' + ticketId + ' could not be found.', 'error');
         return;
+    }
+
+    if (!isApprovedTicket(match)) {
+        ownerToast('Ticket ' + ticketId + ' has not been approved yet.', 'error');
+        return;
+    }
+
+    // Informational only — it opens regardless. Branch scoping lives in the list.
+    const allowedBranches = activeUserIsSuperAdmin ? ownerAllBranches : ownerAssignedBranches;
+    const ticketBranch = ownerBranchKey(match.branch || match.branchName || '');
+    const inScope = activeUserIsSuperAdmin
+        || allowedBranches.some((b) => ownerBranchKey(b) === ticketBranch);
+    if (!inScope) {
+        console.warn('[Deep link] ' + ticketId + ' is outside this manager\'s branch list (' +
+            (match.branch || match.branchName || 'unknown') + '). Opening it anyway: firestore.rules '
+            + 'already permits any signed-in user to read an approved ticket.');
     }
 
     // Land on the Tickets tab first - the report modal renders over whatever
@@ -450,16 +464,30 @@ function renderKpiCards() {
   if (kpiAccessLevel) kpiAccessLevel.textContent = accessLabel;
 }
 
+/**
+ * ⚠️ THE COMPARISON KEY FOR A BRANCH NAME.
+ *
+ * Branch names are written in several places by several people: picked from a
+ * dropdown, typed into the Manage Branches form, seeded by scripts/seed.js, and
+ * entered by hand in the Firestore console. Comparing them with `===` means a
+ * single stray space or a lowercase 'banawe' against 'Banawe' silently yields
+ * an EMPTY branch list — and the dashboard then shows "No branch access
+ * assigned yet" and refuses every ticket deep link, with no error anywhere.
+ *
+ * Both sides now go through this, so the name that is displayed is still the
+ * name that is matched; only the comparison is normalised.
+ */
+const ownerBranchKey = (name) => String(name === null || name === undefined ? '' : name).trim().toLowerCase();
+
 function applyAssignedBranches() {
   if (!ownerAllBranches.length) {
     ownerAssignedBranches = [];
   } else if (activeUserIsSuperAdmin) {
     ownerAssignedBranches = [...ownerAllBranches];
   } else {
-    ownerAssignedBranches = ownerAllBranches.filter((branch) => {
-      const branchName = String(branch).trim();
-      return activeUserPermissions.branches.includes(branchName);
-    });
+    // Compare on the normalised key, not the raw string.
+    const granted = new Set((activeUserPermissions.branches || []).map(ownerBranchKey).filter(Boolean));
+    ownerAssignedBranches = ownerAllBranches.filter((branch) => granted.has(ownerBranchKey(branch)));
   }
 
   populateBranchDropdowns();
@@ -483,12 +511,16 @@ async function loadBranches() {
 
     applyAssignedBranches();
   } catch (error) {
+    // ⚠️ WAS SILENT. An empty branch list makes every ticket deep link fail and
+    // the "+Ticket" form show no branch dropdown, but nothing said why — so a
+    // permission error looked identical to "this manager has no branches".
     console.error('Failed to load branches:', error);
     ownerAllBranches = [];
     ownerAssignedBranches = [];
     populateBranchDropdowns();
     renderBranchAccessList();
     renderPermissionSummary();
+    ownerToast('Could not load branches — ticket links and branch filters may not work.', 'error');
   }
 }
 
