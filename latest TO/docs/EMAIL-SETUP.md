@@ -128,11 +128,11 @@ fine because the Apps Script checks the caller's superadmin ID token server-side
 >
 > | Setting | Page | Which email sends it |
 > |---|---|---|
-> | `ownerDashboardUrl` | `ownerdashboard.html` (**login-gated**) | the **approval** email — *"your request was done"* |
-> | `portalUrl` | `submit-ticket.html` (**login-free**) | the **re-access** email — *"you can view this ticket again"* |
+> | `ownerDashboardUrl` | `ownerdashboard.html` (**login-gated**) | **BOTH** the approval mail and the re-access mail |
+> | `portalUrl` | `submit-ticket.html` (**login-free**) | nothing — kept only because `submit-ticket.html` itself uses `?track=` |
 >
 > The approval email is the one most people notice, so **`ownerDashboardUrl` is
-> the setting that matters day to day**. Both are checked by
+> the setting that matters**. Both keys are still checked by
 > `test/email-config-deploy.test.js`, and leaving either empty is fine locally.
 
 Neither link is for a colleague. It is emailed to an **Area Manager on their own
@@ -238,8 +238,9 @@ await sendTestAccessEmail('jiangnancommandcenter@gmail.com')
 ```
 
 Same expectations, but the mail reads *"Your request to view this ticket again has been
-approved."* and links to `submit-ticket.html?track=TIX-TEST` — clicking it must open the
-Track modal with `TIX-TEST` already filled in.
+approved."* ⚠️ It sends the **same Owner Dashboard deep link** as the approval mail
+(`ownerdashboard.html?ticket=TIX-TEST`), not the old Track page — clicking it must
+take you to the same report modal.
 
 **C2. Real approval test.**
 1. Sign in as an **Area Manager**, open `ownerdashboard.html` and press **+Ticket**. Fill

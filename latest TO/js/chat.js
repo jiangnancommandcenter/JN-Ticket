@@ -971,10 +971,16 @@
             });
         }
 
-        // The typing indicator follows the composer's draft, not keypresses,
-        // so it stays up while unsent text remains in the field.
-        els.input.addEventListener('input', syncDraftPresence);
-        els.input.addEventListener('paste', syncDraftPresence);
+        // ⚠️ DUPLICATE REGISTRATION REMOVED. This used to read:
+        //     els.input.addEventListener('input', syncDraftPresence);
+        //     els.input.addEventListener('paste', syncDraftPresence);
+        // directly in addition to the pair above, so ONE keystroke published TWO
+        // presence writes and started TWO heartbeats. It was harmless-looking in
+        // 1:1 (the extra write was simply idempotent), but it doubles the write
+        // traffic for a feature that now also runs in the group room, where every
+        // member is publishing. The listeners above already call
+        // syncDraftPresence() on input and on paste, so this pair was pure
+        // duplication.
 
         document.addEventListener('keydown', function (event) {
             if (event.key === 'Escape' && els.overlay.classList.contains('active')) {
@@ -4385,11 +4391,13 @@
     /** Publish (or refresh) our "composing" presence. */
     function publishPresence() {
         if (!isMounted || !currentUserEmail) return;
-        // The GROUP chat is role-gated, not membership-gated, and a presence
-        // doc is a per-room membership write — so it would be refused. Staying
-        // quiet is not a compromise: the rules would deny it, and a permanent
-        // "typing indicators DISABLED" warning is far worse than no indicator.
-        if (isGroupRoom()) return;
+        // ⚠️ THE GROUP CHAT USES PRESENCE TOO. It used to be skipped here
+        // because presence is an `isChatMember` write and the group room is
+        // role-gated with no members array, so the write was refused. The rules
+        // now allow publishing presence in that room on the ROLE instead (see
+        // canPublishPresence() in firestore.rules), which is what makes typing
+        // work for everyone rather than only in 1:1. A person still may only
+        // ever write THEIR OWN presence doc.
         const ref = typingDocRef();
         // No conversation open (or the read-only archive), so there is no
         // presence doc to publish to.
@@ -4554,12 +4562,8 @@
 
     function startTypingListener() {
         if (typingUnsub) return;
-        // The GROUP chat: nobody can publish presence there (see
-        // publishPresence), so listening would only ever show an empty bar.
-        if (isGroupRoom()) {
-            if (els.typingBar) els.typingBar.hidden = true;
-            return;
-        }
+        // ⚠️ The group room is subscribed to like every other thread. It was
+        // skipped while its presence writes were refused (see publishPresence).
         const presence = presenceRef();
         if (!presence) return;
         try {
@@ -4644,6 +4648,28 @@
      * retrying) every single time. See writeMessageBatch().
      */
     var messageWritesMinimal = false;
+
+    /**
+     * ⚠️ WHY THE REPLY RE-PROBE EXISTS.
+     *
+     * A cached `minimal` send-shape is a LIE the UI acts on forever: it drops
+     * `payload.replyTo`, so a reply is stored as an ordinary message and
+     * `renderReplyQuote()` returns '' — it renders with NO quote block, looking
+     * exactly like a normal message. And because the retry ladder is only built
+     * when the flag is false, the one warning that explains this never fires.
+     * The user had no way to tell a real reply from a stripped one.
+     *
+     * So: while a reply is pending, a cached `minimal` is no longer trusted. The
+     * full payload is probed once per session. If the deployed rules have since
+     * been updated it succeeds, the stale flag is CLEARED for good, and replies
+     * work again. If they have not, the user is told exactly that — which is the
+     * message that was missing entirely before.
+     *
+     * Once per SESSION, not per reply: if the rules genuinely still refuse, a
+     * probe on every reply would cost an extra refused write each time without
+     * ever reaching a different conclusion.
+     */
+    var replyShapeReprobed = false;
 
     /**
      * The write shape the deployed rules accept, REMEMBERED per account.
@@ -4968,6 +4994,43 @@
             }
 
             stage = 'message';
+
+            // ⚠️ A pending REPLY must not silently lose its target. A cached
+            // `minimal` shape drops `replyTo`, so the probe below tries the full
+            // payload once before falling back — see replyShapeReprobed.
+            const reprobingForReply = messageWritesMinimal && !!replyingToId && !replyShapeReprobed;
+            if (reprobingForReply) {
+                replyShapeReprobed = true;
+                try {
+                    await writeMessageBatch(
+                        text,
+                        me,
+                        roomSummary,
+                        false,                               // force the FULL payload
+                        roomPreviewInBatch && !isGroupRoom()
+                    );
+                    // It worked: the deployed rules accept the full shape again,
+                    // so the stale cached flag is dropped for good.
+                    messageWritesMinimal = false;
+                    saveSendShape();
+                    console.log('[Chat] Reply stored WITH its target — the deployed rules accept the '
+                        + 'full message payload again, and the stale minimal-shape cache was cleared.');
+                    finishSentMessage(text, me);
+                    return;
+                } catch (probeError) {
+                    if (!isPermissionError(probeError)) throw probeError;
+                    // The rules genuinely still refuse it. Say so, because
+                    // without this the reply is stored as a plain message and
+                    // looks identical to one that was never a reply.
+                    console.warn(
+                        '[Chat] ⚠️ This reply will NOT be linked to the message it answers.\n'
+                        + '  The deployed rules still refuse the full payload (replyTo).\n'
+                        + '  Run:  firebase deploy --only firestore:rules\n'
+                        + '  Then delete this browser\'s cached shape:\n'
+                        + '      localStorage.removeItem(\'' + sendShapeKey() + '\')');
+                }
+            }
+
             // The group channel's pinned row needs no preview, and the room
             // update would be refused anyway — so it is never even attempted.
             await writeMessageBatch(

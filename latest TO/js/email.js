@@ -56,12 +56,12 @@ function resolveTrackUrl(label) {
     }
 }
 
-// ===== OWNER DASHBOARD LINK (the approval email's real destination) =====
-// `resolveTrackUrl()` above still builds the login-free Track link, and it is
-// still used by the RE-ACCESS email. But the plain approval email now points at
-// the Area Manager's own dashboard, because that is where an approved ticket is
-// actually read — sending a manager to a public status portal they have no
-// account for was the reason the link felt useless.
+// ===== OWNER DASHBOARD LINK (the destination of BOTH emails) =====
+// `resolveTrackUrl()` above still builds the login-free Track link, which
+// `submit-ticket.html` itself consumes via `?track=`. No email sends it any
+// more: BOTH the approval email and the re-access email now point at the Area
+// Manager's own dashboard, because that is the single place an approved ticket
+// is read — one modal, one link, one set of instructions.
 //
 // The two resolvers are deliberately SEPARATE functions rather than one
 // parameterised one. They are allowed to point at different hosts (the portal
@@ -633,7 +633,15 @@ async function verifyOwnerDashboardLink() {
  */
 function buildAccessApprovedEmail(ticket, accessExpiresAt) {
     const label = ticketEmailLabel(ticket);
-    const trackUrl = resolveTrackUrl(label);
+    // ⚠️ SAME LINK AS THE APPROVAL EMAIL, ON PURPOSE.
+    // This used to point at the login-free Track portal (submit-ticket.html?track=)
+    // with "click Track Ticket Status". But an approved ticket is read in ONE
+    // place — the Owner Dashboard report modal — and the approval email already
+    // deep-links there. Sending a second email to a different page for the same
+    // ticket was simply inconsistent: the recipient had to learn two mechanisms
+    // for one modal. Both emails now resolve the identical deep link.
+    const ticketUrl = resolveOwnerTicketUrl(label);
+    const dashboardUrl = resolveOwnerDashboardUrl();
     const senderName = String(emailConfigValue('senderName', 'Jiangnan Command Center'));
 
     const expiry = accessExpiresAt
@@ -650,23 +658,35 @@ function buildAccessApprovedEmail(ticket, accessExpiresAt) {
         '',
         '   Ticket Number:  ' + label,
         '',
-        'View it in the portal:',
-        trackUrl,
-        '  -> click "Track Ticket Status"',
-        '  -> enter your Ticket Number and the email/contact you used.'
+        'View it on your Owner Dashboard:',
+        ticketUrl,
+        '',
+        '  -> sign in with your account',
+        '  -> ticket ' + label + ' will open automatically.'
     ];
     if (windowLine) lines.push('', windowLine);
     lines.push('', senderName);
     const text = lines.join('\n');
 
+    // Same padded green button as the approval email — see buildTicketApprovedEmail()
+    // for why a thin text link reads as "not clickable". The raw URL is repeated
+    // as a fallback anchor and, in the plain-text part above, on its own line so
+    // mail clients auto-linkify it.
     const html = [
         '<div style="font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:15px;color:#0f172a;line-height:1.6">',
         '<p style="margin:0 0 16px">' + escapeEmailHtml(ACCESS_EMAIL_HEADLINE) + '</p>',
         '<p style="margin:0 0 18px"><span style="display:inline-block;padding:10px 16px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc;font-size:18px;font-weight:700;letter-spacing:0.4px">',
         escapeEmailHtml(label),
         '</span></p>',
-        '<p style="margin:0 0 6px"><a href="' + escapeEmailHtml(trackUrl) + '" style="color:#15803d;font-weight:600">Open the portal &rarr; Track Ticket Status</a></p>',
-        '<p style="margin:0 0 6px;color:#475569">Enter your Ticket Number and the email/contact you used.</p>',
+        '<p style="margin:0 0 18px">',
+        '<a href="' + escapeEmailHtml(ticketUrl) + '" style="display:inline-block;background:#15803d;color:#ffffff;font-weight:700;font-size:16px;text-decoration:none;padding:14px 28px;border-radius:8px">',
+        'Open my Owner Dashboard &rarr;</a>',
+        '</p>',
+        '<p style="margin:0 0 6px;color:#475569">Sign in with your account and ticket <strong>'
+            + escapeEmailHtml(label) + '</strong> opens automatically.</p>',
+        '<p style="margin:0 0 6px;font-size:12px;color:#64748b">If the button does not work, paste this '
+            + 'into your browser:<br><a href="' + escapeEmailHtml(ticketUrl) + '" style="color:#15803d;word-break:break-all">'
+            + escapeEmailHtml(ticketUrl) + '</a></p>',
         windowLine ? '<p style="margin:0 0 6px;color:#475569">' + escapeEmailHtml(windowLine) + '</p>' : '',
         '<p style="margin:20px 0 0;color:#475569">' + escapeEmailHtml(senderName) + '</p>',
         '</div>'
@@ -679,7 +699,8 @@ function buildAccessApprovedEmail(ticket, accessExpiresAt) {
         html: html,
         ticketId: String((ticket && (ticket.id || ticket.ticketNumber)) || ''),
         ticketNumber: label,
-        portalUrl: trackUrl,
+        portalUrl: ticketUrl,
+        dashboardUrl: dashboardUrl,
         senderName: senderName
     };
 }

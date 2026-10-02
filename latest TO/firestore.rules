@@ -183,6 +183,27 @@ service cloud.firestore {
       return isChatMember(chatId) || isLegacyArchive(chatId);
     }
 
+    // ⚠️ Typing indicators now work in the GROUP chat as well as in 1:1.
+    //
+    // Presence is a per-room write, so it used to be gated on `isChatMember`
+    // — which can never be true in the legacy group room, because that room is
+    // ROLE-gated and has no `members` array to read. The result was that typing
+    // indicators worked for everyone EXCEPT the "All HR" group, where the client
+    // skipped them entirely (see publishPresence / startTypingListener in
+    // chat.js). `isLegacyArchive(chatId)` already means "this is that one room,
+    // AND the caller is HR or superadmin", so adding it here grants exactly the
+    // right people exactly the right room.
+    //
+    // ⚠️ IT DOES NOT WEAKEN 1:1 PRIVACY. For any private conversation
+    // `isLegacyArchive` is false (it requires chatId == 'owner-superadmin'), so
+    // `isChatMember` still has to hold — an HR still cannot broadcast a typing
+    // indicator into somebody else's private thread. Every rule using this
+    // helper still requires `email == selfEmail()`, so a person may only ever
+    // write, update or delete their OWN presence doc.
+    function canPublishPresence(chatId) {
+      return isChatMember(chatId) || isLegacyArchive(chatId);
+    }
+
     // ---------------- branches ----------------
     // Public read: the submit-ticket form and both dashboards show the list.
     // Only superadmins add/delete branches; any signed-in user may push the
@@ -421,16 +442,18 @@ service cloud.firestore {
       match /presence/{userKey} {
         allow read: if canReadChat(chatId);
 
-        // Anyone in the room may publish their OWN presence only.
-        allow create: if isChatMember(chatId)
+        // ⚠️ canPublishPresence (NOT isChatMember) so the ROLE-gated group room
+        // works too — see the helper's note above. `email == selfEmail()` is
+        // unchanged, so this still means "your own presence only".
+        allow create: if canPublishPresence(chatId)
           && request.resource.data.email == selfEmail();
 
-        allow update: if isChatMember(chatId)
+        allow update: if canPublishPresence(chatId)
           && resource.data.email == selfEmail();
 
         // Withdrawing a typing indicator deletes the doc, so the delete
         // must be restricted to the owner of that presence record.
-        allow delete: if isChatMember(chatId)
+        allow delete: if canPublishPresence(chatId)
           && resource.data.email == selfEmail();
       }
 

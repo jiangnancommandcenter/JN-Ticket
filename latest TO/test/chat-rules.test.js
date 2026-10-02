@@ -111,8 +111,26 @@ assert(
 const presenceCreate = (block.match(/match\s+\/presence\/[\s\S]*?allow\s+create\s*:[\s\S]*?;/g) || [])[0];
 assert(presenceCreate, 'presence must have an `allow create` rule');
 assert(
-    /isChatMember\(chatId\)/.test(presenceCreate),
-    'presence create must require room membership — otherwise any HR could broadcast typing into another HR\'s private thread'
+    /canPublishPresence\(chatId\)/.test(presenceCreate),
+    'presence create must be gated by canPublishPresence(chatId) — otherwise any HR could broadcast ' +
+    'typing into another HR\'s private thread'
+);
+// ⚠️ The helper replaced a bare `isChatMember(chatId)` so the ROLE-gated group
+// room works too. That is only safe because `isLegacyArchive(chatId)` is false
+// for every PRIVATE room, so membership still has to hold for 1:1. Assert that
+// property of the HELPER directly — otherwise widening it would silently open
+// every private thread to typing broadcasts, which is what this rule prevents.
+const presenceHelper = (rules.match(/function canPublishPresence\([\s\S]*?\n    \}/) || [])[0];
+assert(presenceHelper, 'a canPublishPresence(chatId) helper is required');
+assert(
+    /isChatMember\(chatId\)\s*\|\|\s*isLegacyArchive\(chatId\)/.test(presenceHelper),
+    'canPublishPresence must be isChatMember OR isLegacyArchive: the membership half is what keeps ' +
+    'private 1:1 threads private, and isLegacyArchive is scoped to the single group room id'
+);
+assert(
+    /isLegacyArchive/.test(rules) && /chatId\s*==\s*'owner-superadmin'/.test(rules),
+    'isLegacyArchive must stay scoped to exactly one room id, or canPublishPresence would grant ' +
+    'presence writes across every conversation'
 );
 assert(
     /request\.resource\.data\.email\s*==\s*selfEmail\(\)/.test(presenceCreate),
@@ -1098,14 +1116,27 @@ assert(
     'only the group chat may be opened with no peer: every other conversation is with one person'
 );
 assert(
-    /function writeReceipt\(\)[\s\S]{0,700}?if \(isGroupRoom\(\)\) return;/.test(clientSrc) &&
-    /function publishPresence\(\)[\s\S]{0,700}?if \(isGroupRoom\(\)\) return;/.test(clientSrc),
-    'read receipts and typing presence are PER-ROOM membership writes: the rules would refuse them ' +
-    'in a room with no member list, and a permanent console warning is worse than grey ticks'
+    /function writeReceipt\(\)[\s\S]{0,700}?if \(isGroupRoom\(\)\) return;/.test(clientSrc),
+    'read receipts REMAIN skipped in the group chat: they are still a per-room membership write the ' +
+    'rules refuse, and grey ticks beat a permanent console warning'
 );
 assert(
-    /function startTypingListener\(\)[\s\S]{0,700}?if \(isGroupRoom\(\)\) \{[\s\S]{0,200}?els\.typingBar\.hidden = true;/.test(clientSrc),
-    'the typing bar must be hidden (and never subscribed) in the group chat — nobody can publish there'
+    /function publishPresence\(\)/.test(clientSrc) &&
+    !/function publishPresence\(\)[\s\S]{0,700}?if \(isGroupRoom\(\)\) return;/.test(clientSrc),
+    '⚠️ typing presence must NO LONGER be skipped in the group chat. canPublishPresence() now allows ' +
+    'it there on the role, so the client-side opt-out would keep typing indicators silently missing ' +
+    'for everyone in the All HR group — the exact regression this assertion now guards'
+);
+assert(
+    /function startTypingListener\(\)[\s\S]{0,400}?if \(isGroupRoom\(\)\)/.test(clientSrc) === false,
+    'the group room must SUBSCRIBE to presence like every other thread, or an indicator raised there ' +
+    'would never be seen'
+);
+assert(
+    /function startTypingListener\(\)[\s\S]{0,700}?if \(isGroupRoom\(\)\) \{[\s\S]{0,200}?els\.typingBar\.hidden = true;/.test(clientSrc) === false,
+    '⚠️ the typing bar must NO LONGER be force-hidden in the group chat. Presence is now published ' +
+    'there on the role (canPublishPresence), so hiding it would keep typing invisible for every ' +
+    'member of the All HR group — the regression this now guards'
 );
 // The NAME in "X is typing…" has to be resolved the way every other name in
 // the chat is resolved: the published directory/roster name first. It used to
@@ -1114,8 +1145,18 @@ assert(
 // announced as "hotpotjiangnan is typing…" — one thread, two names for one
 // person. Both halves (the write and the label) are guarded.
 assert(
-    /function publishPresence\(\)[\s\S]{0,700}?if \(isGroupRoom\(\)\) return;[\s\S]*?name:\s*nameFor\(currentUserEmail\)/.test(clientSrc),
+    /function publishPresence\(\)[\s\S]*?name:\s*nameFor\(currentUserEmail\)/.test(clientSrc),
     'publishPresence() must publish the DIRECTORY name, not the email local part'
+);
+// ⚠️ It used to also require `if (isGroupRoom()) return;` inside
+// publishPresence(), because the group room could not publish presence at all.
+// That is no longer true — canPublishPresence() allows it on the role — and
+// keeping the assertion would have re-pinned the client-side opt-out that made
+// typing invisible for the whole group. The replacement assertion is above.
+assert(
+    /function publishPresence\(\)[\s\S]*?if \(isGroupRoom\(\)\) return;/.test(clientSrc) === false,
+    'publishPresence() must not opt out of the group room — that opt-out is what made typing ' +
+    'indicators disappear for every member of the All HR group'
 );
 assert(
     /function typingNameFor\(entry\)[\s\S]{0,400}?personProfileFor\(key\)\.displayName/.test(clientSrc) &&

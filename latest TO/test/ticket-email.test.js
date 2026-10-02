@@ -174,13 +174,24 @@ assert.strictEqual(accessMail.subject, 'Ticket Access Approved ' + DASH + ' BNW-
 assert(accessMail.text.indexOf('Your request to view this ticket again has been approved.') > -1,
     'the headline must say the access request was approved');
 assert(accessMail.text.indexOf('BNW-TIX007') > -1);
-assert(accessMail.text.indexOf('?track=BNW-TIX007') > -1,
-    'the body must link straight to the prefilled Track page');
+assert(accessMail.text.indexOf('?ticket=BNW-TIX007') > -1,
+    'the RE-ACCESS email must send the SAME Owner Dashboard deep link as the approval email');
+assert(accessMail.text.indexOf('submit-ticket.html') === -1,
+    'the re-access email must no longer point at the login-free Track portal');
+assert(accessMail.text.indexOf('Track Ticket Status') === -1,
+    'the old "click Track Ticket Status" instruction must be gone from the re-access email');
+assert(accessMail.html.indexOf('?ticket=BNW-TIX007') > -1);
+// Same clickable button as the approval email, not a thin text link.
+assert(/<a href="[^"]*ownerdashboard\.html\?ticket=BNW-TIX007"[^>]*>/.test(accessMail.html),
+    'the re-access email must use the dashboard deep link as its anchor');
+assert(/padding:\s*14px 28px/.test(accessMail.html),
+    'the re-access link must be the same padded button as the approval email');
+assert.strictEqual(accessMail.dashboardUrl, PUBLIC_DASHBOARD,
+    'the built message must expose dashboardUrl like the approval email does');
 assert(accessMail.text.indexOf('Viewing access is available until') > -1,
     'a fresh future window must be advertised');
 assert(accessMail.text.indexOf('reporter@jiangnanhotpot.com') === -1,
     'the reporter address must never leak into the manager\'s mail');
-assert(accessMail.html.indexOf('?track=BNW-TIX007') > -1);
 
 // A past/stale window must NOT be advertised — the caller passes the fresh one
 // precisely because the in-memory ticket still holds the expired date.
@@ -478,7 +489,8 @@ assert.strictEqual(w.EmailService.shouldMentionViewingWindow(
     assert.strictEqual(accessPayload.secret, 'test-secret',
         'it reuses the SAME bridge/secret as the approval email — no new deploy');
     assert.strictEqual(accessPayload.ticketId, 'bnw-tix007');
-    assert(accessPayload.text.indexOf('?track=BNW-TIX007') > -1);
+    assert(accessPayload.text.indexOf('?ticket=BNW-TIX007') > -1,
+        'the SENT re-access email carries the Owner Dashboard deep link, like the approval one');
 
     // 6h. Re-access mail with no usable address anywhere → nothing leaves.
     sends.length = 0;

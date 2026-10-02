@@ -753,22 +753,28 @@ try {
         'owner-superadmin',
         'the group thread must subscribe even before any summary has arrived, so it is never blank'
     );
-    // Nothing per-room may be attempted there: presence and receipts are
-    // membership writes the rules would refuse, and a permanent console
-    // warning is worse than the feature not existing. (Withdrawing the
-    // indicator is a DELETE and is harmless — only a publish is counted.)
+    // Typing now WORKS in the group chat too. It used to be skipped because
+    // presence was an `isChatMember` write and that room is role-gated with no
+    // members array; the rules now allow publishing presence there on the ROLE
+    // (canPublishPresence() in firestore.rules), so the client no longer opts
+    // out. This asserts the write actually HAPPENS — the regression that matters
+    // is the indicator going missing for everyone in the group again.
     const presenceSetsBefore = presenceWrites.filter((p) => p.op === 'set').length;
     const orderBeforeGroup = writeOrder.length;
-    // Typing in the composer is what publishes presence in a 1:1 thread, so
-    // this is the moment a group chat would leak a membership write.
     inputEl.value = 'hello everyone';
     inputEl.dispatch('input', {});
+    await new Promise((r) => realSetTimeout(r, 0));
     assert.strictEqual(
         presenceWrites.filter((p) => p.op === 'set').length,
-        presenceSetsBefore,
-        'typing in the GROUP chat must publish no presence — that write is gated on room membership ' +
-        'and would be refused, with a permanent console warning'
+        presenceSetsBefore + 1,
+        'typing in the GROUP chat MUST publish presence — the rules now allow it on the role, so ' +
+        'skipping it here is what made typing silently unavailable to everyone in the group'
     );
+    // Sending withdraws the indicator (a DELETE), so the PUBLISH count must not
+    // move across the send. This is compared against the count taken AFTER
+    // typing — the group chat now legitimately publishes while composing, so
+    // measuring against the pre-typing number would count that publish again.
+    const presenceSetsAfterTyping = presenceWrites.filter((p) => p.op === 'set').length;
     inputEl.dispatch('keydown', { key: 'Enter', shiftKey: false });
     await new Promise((r) => realSetTimeout(r, 0));
     await new Promise((r) => realSetTimeout(r, 0));
@@ -776,8 +782,9 @@ try {
     assert.strictEqual(groupMessage.length, 1, 'the group chat must actually save a message');
     assert.strictEqual(
         presenceWrites.filter((p) => p.op === 'set').length,
-        presenceSetsBefore,
-        'no typing presence may be published in the group chat — a membership write the rules refuse'
+        presenceSetsAfterTyping,
+        'sending must NOT publish another presence doc — the draft is gone, so the indicator is '
+        + 'withdrawn (a delete), not re-published'
     );
     assert(
         writeOrder.slice(orderBeforeGroup).indexOf('room-summary') === -1,

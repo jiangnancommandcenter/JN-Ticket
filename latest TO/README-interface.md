@@ -113,9 +113,14 @@ When a **superadmin approves a resolution** (`script.js → approveResolution()`
 
 | | Approval email | Re-access email |
 |---|---|---|
-| Page | `ownerdashboard.html` (**login-gated**) | `submit-ticket.html` (**login-free**) |
-| Config | `EMAIL_CONFIG.ownerDashboardUrl` | `EMAIL_CONFIG.portalUrl` |
+| Page | `ownerdashboard.html` (**login-gated**) | `ownerdashboard.html` (**login-gated**) |
+| Config | `EMAIL_CONFIG.ownerDashboardUrl` | `EMAIL_CONFIG.ownerDashboardUrl` |
 | Builder | `buildTicketApprovedEmail()` | `buildAccessApprovedEmail()` |
+| Deep link | `ownerdashboard.html?ticket=…` | `ownerdashboard.html?ticket=…` (**identical**) |
+
+⚠️ **Both emails now send the SAME deep link.** They previously differed — the approval mail went to the dashboard while the re-access mail still went to the login-free Track page (`submit-ticket.html?track=…`, *"click Track Ticket Status"*). That split was removed: an approved ticket is read in exactly one place (the Owner Dashboard report modal), so the recipient had to learn two mechanisms for one modal.
+
+* **`resolveTrackUrl()` still exists** and `submit-ticket.html` still consumes `?track=` — but **no email sends it any more**. `verifyPortalLink()` remains as a helper for that page's URL.
 
 * **Two resolvers, deliberately not merged** — `resolveOwnerDashboardUrl()` / `resolveOwnerTicketUrl()` alongside the original `resolvePortalUrl()` / `resolveTrackUrl()`. They are validated independently and may legitimately point at different hosts; merging them would make a change to one silently repoint the other. `verifyOwnerDashboardLink()` was added next to `verifyPortalLink()` for the same reason (the latter's return shape is asserted by tests and it still serves the re-access mail).
 * **⚠️ The deep link is a THREE-HOP chain, and each hop is a place it can break.** `ownerdashboard.html` is in `PROTECTED_PAGES`, so a signed-out manager is bounced to `login.html` and returned. `?ticket=` therefore has to survive that bounce (`js/auth.js`: `redirectToLogin()` appends it, `withTicketParam()` re-attaches it after login), and only *then* does `js/owner-dashboard.js` act on it. **A ticket number is only ever in the URL** — never the requester's email or contact, exactly as on the public `?track=` link, so nothing sensitive lands in browser history or a screenshot.
