@@ -1174,6 +1174,25 @@
     </div>
 
     <!-- ============================================================ -->
+    <!-- MODAL: ATTACHMENT VIEWER (in-app image / video / PDF viewer)  -->
+    <!-- ============================================================ -->
+    <div class="modal-overlay attachment-viewer-overlay" id="attachmentViewerModal">
+        <div class="modal-container modal-lg attachment-viewer-container">
+            <div class="modal-header attachment-viewer-header">
+                <h2><i class="fas fa-file" id="attachmentViewerIcon"></i> <span id="attachmentViewerTitle">Attachment</span></h2>
+                <div class="attachment-viewer-actions">
+                    <span class="attachment-viewer-count" id="attachmentViewerCount"></span>
+                    <button type="button" class="btn btn-sm btn-secondary" id="attachmentViewerPrev" title="Previous file (left arrow)"><i class="fas fa-chevron-left"></i></button>
+                    <button type="button" class="btn btn-sm btn-secondary" id="attachmentViewerNext" title="Next file (right arrow)"><i class="fas fa-chevron-right"></i></button>
+                    <button type="button" class="btn btn-sm btn-secondary" id="attachmentViewerOpen" title="Open in a new tab"><i class="fas fa-external-link-alt"></i> Open</button>
+                    <button class="modal-close" id="attachmentViewerClose">&times;</button>
+                </div>
+            </div>
+            <div class="modal-body attachment-viewer-body" id="attachmentViewerBody"></div>
+        </div>
+    </div>
+
+    <!-- ============================================================ -->
     <!-- MODAL: EDIT TICKET                                           -->
     <!-- ============================================================ -->
     <div class="modal-overlay" id="editTicketModal">
@@ -1668,12 +1687,6 @@
          Setup guide: docs/EMAIL-SETUP.md -->
     <script src="js/email-config.js"></script>
     <script src="js/email.js"></script>
-    <!-- ===== In-app attachment viewer (image / video / PDF lightbox) =====
-         Loaded BEFORE script.js: script.js calls window.AttachmentViewer
-         .openForRows() for the violations folder browser and .init() from
-         initApp(). The dialog markup is INJECTED by the module, so this
-         page deliberately has no <div> for it any more. -->
-    <script src="js/attachment-viewer.js"></script>
     <script src="script.js"></script>
     <!-- ===== Command palette + keyboard shortcuts (Ctrl/Cmd+K) =====
          Loaded LAST: it references window.switchTab and window.escapeHTML,

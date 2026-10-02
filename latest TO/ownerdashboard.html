@@ -1321,15 +1321,6 @@
     <script src="js/refresh-state.js"></script>
     <!-- Theme manager: dark/light toggle + notification bell -->
     <script src="js/theme.js"></script>
-    <!-- ===== In-app attachment viewer (image / video / PDF lightbox) =====
-         THE SAME dialog main.html uses. This page used to render every
-         attachment as a bare <a target="_blank">, so ticket files opened in
-         a new tab instead of this modal -- because neither the dialog NOR its
-         click handling existed here. The module injects the dialog, so this
-         page needs no markup for it. It also supplies the shared attachment
-         card builder, so this page renders the SAME .attachment-item tiles --
-         with real image/video thumbnails -- as main.html. -->
-    <script src="js/attachment-viewer.js"></script>
     <script src="js/owner-dashboard.js"></script>
     <!-- ===== Area Manager ticket submission form (full-screen modal) =====
          Loaded AFTER owner-dashboard.js on purpose: the dashboard installs the

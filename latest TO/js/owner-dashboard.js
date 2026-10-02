@@ -932,18 +932,61 @@ window.openOwnerReport = function(reportId) {
     const rawData = snap.data();
     const data = normalizeTicketReport(rawData);
 
-    // Attachment cards come from the SHARED builder in js/attachment-viewer.js —
-    // the same .attachment-item card the five grids in script.js render. This
-    // used to be a local buildAttachmentRow() that emitted a bare icon chip
-    // (owner-attachment-row) with NO thumbnail, plus a third getAttachmentColor
-    // that disagreed with script.js's, so the same CCTV clip looked like a
-    // thumbnail card on one dashboard and a grey icon row on the other.
-    // Clicking a card opens the shared viewer.
-    function buildAttachmentRow(att, index) {
-        const v = window.AttachmentViewer;
-        if (!v) return '';
-        return v.buildAttachmentCard(att, { index: index || 0 });
+    // Helper to get attachment icon color based on format
+    function getAttachmentColor(format) {
+      const lowerForm = (format || '').toLowerCase();
+      if (lowerForm.includes('mp4') || lowerForm.includes('mov') || lowerForm.includes('avi') || lowerForm.includes('webm')) return '#e53935';
+      if (lowerForm.includes('jpg') || lowerForm.includes('jpeg') || lowerForm.includes('png') || lowerForm.includes('gif') || lowerForm.includes('webp')) return '#388e3c';
+      return '#6c757d';
     }
+
+    // Helper to render one attachment as a clean file row (icon + name + size).
+    // No large preview boxes — entries without a usable link are skipped so
+    // empty clickable grey boxes can never appear.
+    function buildAttachmentRow(att) {
+      const url = att.secure_url || att.url || '';
+      if (!url) return '';
+      const name = att.name || 'Attachment';
+      const resourceType = att.resource_type || '';
+      const format = String(att.format || '').toLowerCase();
+      const color = getAttachmentColor(format);
+
+      // Images get a visible inline preview (not just a clickable chip).
+      if (resourceType === 'image') {
+        return `
+          <a href="${escapeHTML(url)}" target="_blank" rel="noopener noreferrer" class="owner-attachment-image" title="Click to view full size: ${escapeHTML(name)}">
+            <img src="${escapeHTML(url)}" alt="${escapeHTML(name)}" loading="lazy"
+                 onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';">
+            <div class="owner-attachment-file-icon" style="display:none;"><i class="fas fa-file-image" style="color:${color}"></i></div>
+            <span class="owner-attachment-image-name"><i class="fas fa-expand-alt"></i> ${escapeHTML(name)}</span>
+          </a>
+        `;
+      }
+
+      let icon = 'fa-file';
+      if (resourceType === 'video') icon = 'fa-file-video';
+      else if (format === 'pdf') icon = 'fa-file-pdf';
+      else if (/^(xlsx?|csv)$/.test(format)) icon = 'fa-file-excel';
+      else if (/^(zip|rar|7z)$/.test(format)) icon = 'fa-file-archive';
+
+      const sizeText = att.bytes
+        ? (att.bytes < 1024
+            ? att.bytes + ' B'
+            : att.bytes < 1024 * 1024
+              ? (att.bytes / 1024).toFixed(1) + ' KB'
+              : (att.bytes / (1024 * 1024)).toFixed(2) + ' MB')
+        : '';
+
+      return `
+        <a href="${escapeHTML(url)}" target="_blank" rel="noopener noreferrer" class="owner-attachment-row" title="${escapeHTML(name)}">
+          <i class="fas ${icon}" style="color:${color}"></i>
+          <span class="owner-attachment-name">${escapeHTML(name)}</span>
+          ${sizeText ? `<span class="owner-attachment-size">${escapeHTML(sizeText)}</span>` : ''}
+          <i class="fas fa-external-link-alt"></i>
+        </a>
+      `;
+    }
+
     // Split the ticket's files into requester attachments vs operator footage
     const attachments = splitOwnerAttachments(rawData);
 

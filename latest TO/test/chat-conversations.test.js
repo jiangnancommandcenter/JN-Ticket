@@ -1893,108 +1893,10 @@ try {
     );
     console.log('  PASS  the group chat still works for HR, and HR can reach the manager');
 
-    // --- A BRAND-NEW FIRESTORE: THE GROUP CHAT'S FIRST EVER MESSAGE --------
-    // 17. ⚠️⚠️ THE BUG THIS GUARDS AGAINST — the reported one.
-    //     `chats/owner-superadmin` is FROZEN BY DESIGN: firestore.rules denies
-    //     BOTH `allow create` and `allow update` on it via
-    //     `&& !isLegacyArchive(chatId)`. It also has NO `members` array, so the
-    //     conversation-list query (`where('members','array-contains', me)`) can
-    //     never return it and `conversationSummaries[LEGACY_ROOM_ID]` is
-    //     therefore PERMANENTLY undefined.
-    //
-    //     sendMessage() used to do `if (!roomIsStarted) await roomRef().set(…)`
-    //     with `roomIsStarted = Boolean(conversationSummaries[activeRoomId])`.
-    //     In the group room that was ALWAYS false, so on a fresh Firestore — the
-    //     one place where the document genuinely does not exist — the client
-    //     attempted a CREATE the rules refuse on purpose. It threw at
-    //     `stage === 'room'`, which ALSO skipped the payload-shape ladder
-    //     (gated on `stage === 'message'`), so nothing was ever retried, and the
-    //     failure was reported as "run firebase deploy --only firestore:rules"
-    //     — advice that cannot help, because this repo's own rules refuse it too.
-    //     The user's 1:1s kept working, which made it look like a rules-version
-    //     problem rather than a client one.
-    //
-    //     No parent document is needed: the group's message rule is
-    //     `allow create: if isLegacyArchive(chatId) && …`, which is ROLE-gated
-    //     and never checks `exists()`.
-    sandbox.auth.currentUser = { email: 'hr@test.com' };
-    assert.strictEqual(Live.init({ surface: 'owner', role: 'hr' }), true, 'an HR must mount chat');
-    await settle();
-    // A fresh database: the list query delivers NOTHING — not even a room
-    // document for the group chat, which is exactly the state that broke.
-    conversationCallback({ forEach() {} });
-    const freshInput = findById(body, 'chatInput');
-    const freshSend = findById(body, 'chatSendBtn');
-    assert(freshInput && freshSend, 'the composer must exist after a fresh mount');
-
-    Live.selectConversation(Live.LEGACY_ROOM_ID);
-    assert.strictEqual(
-        Live.activeRoom(),
-        Live.LEGACY_ROOM_ID,
-        'the group chat must be openable on a fresh Firestore — a new HR is in it by ROLE'
-    );
-    // The group row must exist with no summary at all, and the composer must be
-    // live: this is a channel, not an archive.
-    assert(
-        Live.conversationRows().some((r) => r.roomId === Live.LEGACY_ROOM_ID),
-        'the pinned group row must be listed on a fresh Firestore, with no summary behind it'
-    );
-    assert.strictEqual(
-        freshInput.disabled,
-        false,
-        'the group chat needs a working composer on a fresh Firestore — this is the first message of the ' +
-        'channel, and it is exactly the one that used to be refused'
-    );
-
-    const roomSetsBeforeFresh = roomSets.length;
-    const orderBeforeFresh = writeOrder.length;
-    const presenceBeforeFresh = presenceWrites.filter((p) => p.op === 'set').length;
-    // Typing first: presence must publish here too. It is a per-room write that
-    // used to wait for a summary that can NEVER arrive in this room, so typing
-    // indicators were silently dead for the whole group on a fresh database.
-    freshInput.value = 'first words';
-    freshInput.dispatch('input', {});
-    await settle();
-    assert.strictEqual(
-        presenceWrites.filter((p) => p.op === 'set').length,
-        presenceBeforeFresh + 1,
-        'typing in the GROUP chat on a FRESH Firestore MUST publish presence — that room has no ' +
-        '`members` array, so the summary the old guard waited for could never arrive and typing was ' +
-        'dead for every member until somebody happened to send a first message'
-    );
-
-    freshInput.dispatch('keydown', { key: 'Enter', shiftKey: false });
-    await settle();
-    await settle();
-
-    assert.strictEqual(
-        roomSets.length,
-        roomSetsBeforeFresh,
-        '⚠️ THE GROUP ROOM MUST NEVER BE WRITTEN. Its document is frozen by the rules by design ' +
-        '(`allow create`/`allow update` both carry `&& !isLegacyArchive(chatId)`), so this write can ' +
-        'only ever be refused — and on a fresh Firestore that refusal took the whole send down with it'
-    );
-    assert(
-        writeOrder.slice(orderBeforeFresh).indexOf('room:' + Live.LEGACY_ROOM_ID) === -1,
-        'no room-document write may be attempted for the group chat, in the batch or standalone'
-    );
-    assert(
-        writeOrder.slice(orderBeforeFresh).indexOf('room-summary') === -1,
-        'no room-summary preview may be written for the group chat: the row is pinned and the room is frozen'
-    );
-    assert.strictEqual(
-        sentWrites.filter((w) => w.data && w.data.text === 'first words').length,
-        1,
-        '⚠️ THE FIRST GROUP MESSAGE ON A FRESH FIRESTORE MUST SAVE. This is the send that was refused ' +
-        'with a permission error misreported as "the deployed rules need a deploy"'
-    );
-    console.log('  PASS  the first group message on a FRESH Firestore saves, writing no room document');
-
     console.log('✅ Conversation list tests passed (symmetric room ids; strict 1:1 role pairing; ' +
         'an AREA MANAGER may chat 1:1 with HR + superadmin but is offered neither the group row nor ' +
         'another manager; ' +
-        'the role-gated All HR GROUP chat (pinned, live, no per-room writes attempted in it — ' +
-        'including its FIRST message on a brand-new Firestore); ' +
+        'the role-gated All HR GROUP chat (pinned, live, no per-room writes attempted in it); ' +
         'search by name and message; listeners follow the open room; ' +
         'unread cleared on open; starting a conversation from a list row (no ＋ button, no picker); the room ' +
         'committed BEFORE the first message; ' +

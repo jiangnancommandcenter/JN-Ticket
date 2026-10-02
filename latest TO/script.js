@@ -563,8 +563,16 @@ const violationTreeCount = $('#violationTreeCount');
 const btnToggleViolationTree = $('#btnToggleViolationTree');
 const violationPagination = $('#violationPagination');
 
-// The in-app attachment viewer's elements are created and cached by
-// js/attachment-viewer.js, not here -- it is shared with ownerdashboard.html.
+// In-app attachment viewer (lightbox for images / videos / PDFs)
+const attachmentViewerModal = $('#attachmentViewerModal');
+const attachmentViewerBody = $('#attachmentViewerBody');
+const attachmentViewerTitle = $('#attachmentViewerTitle');
+const attachmentViewerIcon = $('#attachmentViewerIcon');
+const attachmentViewerOpen = $('#attachmentViewerOpen');
+const attachmentViewerClose = $('#attachmentViewerClose');
+const attachmentViewerPrev = $('#attachmentViewerPrev');
+const attachmentViewerNext = $('#attachmentViewerNext');
+const attachmentViewerCount = $('#attachmentViewerCount');
 
 // Approvals tab
 const approvalSearch = $('#approvalSearch');
@@ -3573,9 +3581,16 @@ function renderApprovalAttachments(ticket) {
         const color = norm ? getAttachmentColor(norm.format) : '#64748b';
         const isBroken = !url;
 
-        // One shared tile builder, so this grid matches every other grid.
-        // See buildAttachmentPreview() for what used to differ here.
-        const preview = buildAttachmentPreview(norm, index);
+        let preview;
+        if (isBroken) {
+            preview = '<div class="attachment-file-icon"><i class="fas fa-link-slash" style="color:#dc2626"></i></div>';
+        } else if (isImage) {
+            preview = `<img src="${getCloudinaryThumbUrl(url, 200, 200)}" alt="${escapeHTML(name)}" loading="lazy"
+                onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';">`;
+            preview += `<div class="attachment-file-icon" style="display:none;"><i class="fas ${icon}" style="color:${color}"></i></div>`;
+        } else {
+            preview = `<div class="attachment-file-icon"><i class="fas ${icon}" style="color:${color}"></i></div>`;
+        }
 
         const removeBtn = (isAdmin && norm && norm.publicId) ? `
             <button type="button" class="attachment-remove" data-tooltip="Remove"
@@ -5162,34 +5177,48 @@ function setAttachmentStatus(message, isError, statusElId) {
     else if (message) el.classList.add('success');
 }
 
-function formatFileSize(bytes) { return attachmentHelpers().formatFileSize(bytes); }
+function formatFileSize(bytes) {
+    if (!bytes && bytes !== 0) return '';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+}
 
-function getCloudinaryThumbUrl(secureUrl, width, height) { return attachmentHelpers().getCloudinaryThumbUrl(secureUrl, width, height); }
-/**
- * THE ONE attachment-tile builder. Every attachment grid in the app calls this,
- * so an identical file looks identical everywhere it appears.
- *
- * WHY IT IS SHARED. The five renderers each grew their own inline if/else and
- * drifted apart, which is why previews were inconsistent:
- *   - renderTicketAttachments() put the RAW url in the <img>, so a ticket tile
- *     downloaded the full-size file while every other grid asked Cloudinary for
- *     a 200x200 transform.
- *   - A video was a real inline <video> element in the ticket grid, a bare play
- *     icon in three other grids, and a plain file icon in the approval grid,
- *     which had no video branch at all. The same clip looked like three
- *     different things.
- *   - Only four of the five guarded a missing URL.
- *
- * getCloudinaryThumbUrl() ALREADY knows how to ask Cloudinary for a still frame
- * from a video (it rewrites /video/upload/ to a w_,h_,c_fill,f_jpg transform
- * ending in .jpg), so a video gets a real poster frame here for free. The
- * per-renderer copy-paste simply never called it.
- *
- * @param {object} norm  a record from normalizeAttachment()
- * @param {number} index position, used only for the fallback name
- * @returns {string} HTML for the tile body (NOT the anchor)
- */
-function buildAttachmentPreview(norm, index) { return window.AttachmentViewer.buildAttachmentPreview(norm, index); }
+function getCloudinaryThumbUrl(secureUrl, width, height) {
+    // Videos: Cloudinary renders a still poster frame when a clip is requested as an
+    // image, so a grid tile costs a few KB instead of the whole file. Everything else
+    // about the URL (folder path, spaces already encoded) is preserved as-is.
+    const videoMarker = '/video/upload/';
+    const videoIdx = secureUrl.indexOf(videoMarker);
+    if (videoIdx !== -1) {
+        const videoBase = secureUrl.slice(0, videoIdx + videoMarker.length);
+        const videoRest = secureUrl.slice(videoIdx + videoMarker.length);
+        const firstSlash = videoRest.indexOf('/');
+        // Cloudinary stamps "/v1234567/" before the folder path; a bare numeric
+        // segment after "v" is that stamp, anything else is a real folder name.
+        const videoPath = (firstSlash !== -1 && /^v\d+$/.test(videoRest.slice(0, firstSlash)))
+            ? videoRest.slice(firstSlash + 1)
+            : videoRest;
+        const pathSlash = videoPath.lastIndexOf('/');
+        const pathDot = videoPath.lastIndexOf('.');
+        const still = pathDot > pathSlash ? videoPath.slice(0, pathDot) + '.jpg' : videoPath + '.jpg';
+        return videoBase + `w_${width || 200},h_${height || 200},c_fill,q_auto,f_jpg/` + still;
+    }
+
+    // Insert transformation params before the file extension: /w_200,h_200,c_fill,q_auto,f_auto
+    const marker = '/image/upload/';
+    const idx = secureUrl.indexOf(marker);
+    if (idx !== -1) {
+        const base = secureUrl.slice(0, idx + marker.length);
+        const rest = secureUrl.slice(idx + marker.length);
+        const slash = rest.indexOf('/');
+        if (slash !== -1) {
+            return base + `w_${width || 200},h_${height || 200},c_fill,q_auto,f_auto/` + rest.slice(slash + 1);
+        }
+        return base + `w_${width || 200},h_${height || 200},c_fill,q_auto,f_auto/` + rest;
+    }
+    return secureUrl;
+}
 
 /**
  * ⚠️ NORMALISE AN ATTACHMENT — the two writers in this app save DIFFERENT shapes.
@@ -5208,7 +5237,37 @@ function buildAttachmentPreview(norm, index) { return window.AttachmentViewer.bu
  * This one helper is the single place that knows both shapes. Every renderer
  * calls it, so a third writer cannot silently reintroduce the drift.
  */
-function normalizeAttachment(att) { return attachmentHelpers().normalizeAttachment(att); }
+function normalizeAttachment(att) {
+    if (!att || typeof att !== 'object') return null;
+
+    const url = normalizeFileUrl(att.secure_url || att.url || '');
+    const name = att.name || att.fileName || att.original_filename || '';
+    const publicId = att.public_id || att.publicId || '';
+    const bytes = att.bytes || att.size || att.fileSize || 0;
+
+    // resource_type decides the whole rendering branch (image thumbnail, inline
+    // <video>, generic file icon), so it is derived from the mimeType the Area
+    // Manager form records rather than left undefined.
+    let resourceType = att.resource_type || '';
+    if (!resourceType) {
+        const mime = String(att.mimeType || att.mime_type || '').toLowerCase();
+        if (mime.indexOf('image/') === 0) resourceType = 'image';
+        else if (mime.indexOf('video/') === 0) resourceType = 'video';
+        else if (mime.indexOf('audio/') === 0) resourceType = 'audio';
+        else if (/\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name)) resourceType = 'image';
+        else if (/\.(mp4|webm|ogg|mov|avi)$/i.test(name)) resourceType = 'video';
+    }
+
+    // format picks the coloured file icon (pdf/doc/xls/...). Neither writer
+    // always supplies it, so fall back to the extension in the filename.
+    let format = att.format || '';
+    if (!format && name) {
+        const ext = String(name).match(/\.([A-Za-z0-9]+)$/);
+        if (ext) format = ext[1].toLowerCase();
+    }
+
+    return { url: url, name: name, publicId: publicId, bytes: bytes, resourceType: resourceType, format: format, raw: att };
+}
 
 /**
  * ⚠️ The URL of an attachment, ALWAYS as a string — never `undefined`.
@@ -5229,9 +5288,28 @@ function attachmentUrl(att) {
     return (norm && norm.url) || '';
 }
 
-function getAttachmentIcon(resourceType, format) { return attachmentHelpers().getAttachmentIcon(resourceType, format); }
+function getAttachmentIcon(resourceType, format) {
+    format = (format || '').toLowerCase();
+    if (resourceType === 'image') return 'fa-file-image';
+    if (resourceType === 'video') return 'fa-file-video';
+    if (['pdf'].includes(format)) return 'fa-file-pdf';
+    if (['doc', 'docx'].includes(format)) return 'fa-file-word';
+    if (['xls', 'xlsx', 'csv'].includes(format)) return 'fa-file-excel';
+    if (['ppt', 'pptx'].includes(format)) return 'fa-file-powerpoint';
+    if (['zip', 'rar', '7z'].includes(format)) return 'fa-file-archive';
+    if (['txt'].includes(format)) return 'fa-file-alt';
+    return 'fa-file';
+}
 
-function getAttachmentColor(format) { return attachmentHelpers().getAttachmentColor(format); }
+function getAttachmentColor(format) {
+    format = (format || '').toLowerCase();
+    if (['pdf'].includes(format)) return '#dc2626';
+    if (['doc', 'docx'].includes(format)) return '#2563eb';
+    if (['xls', 'xlsx', 'csv'].includes(format)) return '#16a34a';
+    if (['ppt', 'pptx'].includes(format)) return '#ea580c';
+    if (['zip', 'rar', '7z'].includes(format)) return '#ca8a04';
+    return '#64748b';
+}
 
 /**
  * Render a ticket's existing attachments into a given grid element, using the
@@ -5258,9 +5336,18 @@ function renderAttachmentsIntoGrid(grid, ticket) {
         const color = norm ? getAttachmentColor(norm.format) : '#64748b';
         const isBroken = !url;
 
-        // One shared tile builder, so this grid matches every other grid.
-        // See buildAttachmentPreview() for what used to differ here.
-        const preview = buildAttachmentPreview(norm, index);
+        let preview;
+        if (isBroken) {
+            preview = '<div class="attachment-file-icon"><i class="fas fa-link-slash" style="color:#dc2626"></i></div>';
+        } else if (isImage) {
+            preview = `<img src="${getCloudinaryThumbUrl(url, 200, 200)}" alt="${escapeHTML(name)}" loading="lazy"
+                onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';">`;
+            preview += `<div class="attachment-file-icon" style="display:none;"><i class="fas ${icon}" style="color:${color}"></i></div>`;
+        } else if (isVideo) {
+            preview = `<div class="attachment-file-icon"><i class="fas fa-play-circle" style="color:${color}"></i></div>`;
+        } else {
+            preview = `<div class="attachment-file-icon"><i class="fas ${icon}" style="color:${color}"></i></div>`;
+        }
 
         // No URL -> a div, never an empty anchor. See renderTicketAttachments().
         const body = isBroken
@@ -5318,9 +5405,18 @@ function renderRevisionAttachments(grid, ticket) {
         const color = norm ? getAttachmentColor(norm.format) : '#64748b';
         const isBroken = !url;
 
-        // One shared tile builder, so this grid matches every other grid.
-        // See buildAttachmentPreview() for what used to differ here.
-        const preview = buildAttachmentPreview(norm, index);
+        let preview;
+        if (isBroken) {
+            preview = '<div class="attachment-file-icon"><i class="fas fa-link-slash" style="color:#dc2626"></i></div>';
+        } else if (isImage) {
+            preview = `<img src="${getCloudinaryThumbUrl(url, 200, 200)}" alt="${escapeHTML(name)}" loading="lazy"
+                onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';">`;
+            preview += `<div class="attachment-file-icon" style="display:none;"><i class="fas ${icon}" style="color:${color}"></i></div>`;
+        } else if (isVideo) {
+            preview = `<div class="attachment-file-icon"><i class="fas fa-play-circle" style="color:${color}"></i></div>`;
+        } else {
+            preview = `<div class="attachment-file-icon"><i class="fas ${icon}" style="color:${color}"></i></div>`;
+        }
 
         // No URL -> a div, never an empty anchor. See renderTicketAttachments().
         const body = isBroken
@@ -5399,19 +5495,37 @@ function renderTicketAttachments(ticket) {
             </button>
         ` : '';
 
-        // NOTE: this renderer used to carry its own video branch that emitted an
-        // inline <video> element inside a <div> that was not an anchor — so it could
-        // never open the viewer — while the other four grids showed a bare play icon
-        // and the approval grid showed a plain file icon. All of that is gone. A video
-        // is now a normal tile with a real Cloudinary poster frame from the shared
-        // builder below, so it looks the same here as everywhere else. Clicking it
-        // opens the same viewer; the "Open full video" card link went with it, since
-        // the viewer's own Open button and ctrl-click still cover 'new tab'.
+        // ===== Video attachments: inline playable preview (no anchor wrapper) =====
+        if (isVideo && url) {
+            return `
+                <div class="attachment-item" data-public-id="${escapeHTML(publicId)}">
+                    <div class="attachment-preview" style="padding:0;">
+                        <video src="${url}" controls preload="metadata" class="attachment-video-preview"></video>
+                    </div>
+                    <div class="attachment-meta">
+                        <span class="attachment-name" title="${escapeHTML(name)}">${escapeHTML(name)}</span>
+                        ${sizeText ? `<span class="attachment-size">${escapeHTML(sizeText)}</span>` : ''}
+                        <a href="${url}" target="_blank" rel="noopener noreferrer" class="attachment-open-link" title="Open full video in new tab">
+                            <i class="fas fa-external-link-alt"></i> Open full video
+                        </a>
+                    </div>
+                    ${removeBtn}
+                </div>
+            `;
+        }
 
-
-        // One shared tile builder, so this grid matches every other grid.
-        // See buildAttachmentPreview() for what used to differ here.
-        const preview = buildAttachmentPreview(norm, index);
+        let preview;
+        if (isBroken) {
+            preview = '<div class="attachment-file-icon"><i class="fas fa-link-slash" style="color:#dc2626"></i></div>';
+        } else if (isImage) {
+            // Use the direct URL with CSS object-fit (more reliable than the
+            // transformation-based thumbnail, which can fail on some URLs).
+            preview = `<img src="${url}" alt="${escapeHTML(name)}" loading="lazy"
+                onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';">`;
+            preview += `<div class="attachment-file-icon" style="display:none;"><i class="fas ${icon}" style="color:${color}"></i></div>`;
+        } else {
+            preview = `<div class="attachment-file-icon"><i class="fas ${icon}" style="color:${color}"></i></div>`;
+        }
 
         // A broken record renders a div, NOT an anchor - see the isBroken note.
         const body = isBroken
@@ -5764,17 +5878,6 @@ const autoUploadTicketId = new WeakMap();
  * submitting the resolution.
  * @param {HTMLElement} widget  root `.upload-widget` element
  */
-            // ⚠️ NO loading="lazy" HERE, ON PURPOSE.
-            // Every one of these tiles is rendered into a modal that is display:none at
-            // render time, and Chrome defers a lazy image whose ancestor has no layout --
-            // then frequently never loads it at all. No error fires either, so the
-            // onerror fallback below cannot rescue it, and the result is a permanently
-            // BLANK tile that still opens the file correctly when clicked. That is exactly
-            // the "blank image icon, but the video plays on Cloudinary" report.
-            // These grids hold a handful of tiles, so lazy loading saved nothing anyway.
-            // decoding="async" keeps the decode off the main thread with none of that risk.
-            // (The REPORTS DATABASE tree in script.js DOES keep loading="lazy": it is a long
-            // scrollable list in a permanently visible panel, which is the case lazy is for.)
 function renderAutoUploadFileList(widget) {
     const dropzone = widget.querySelector('.upload-dropzone');
     const listEl = widget.querySelector('.upload-file-list');
@@ -5793,7 +5896,7 @@ function renderAutoUploadFileList(widget) {
 
         let preview;
         if (isImage) {
-            preview = `<img class="upload-file-thumb" src="${url}" alt="${escapeHTML(name)}" decoding="async"
+            preview = `<img class="upload-file-thumb" src="${url}" alt="${escapeHTML(name)}" loading="lazy"
                 onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';">`;
             preview += `<span class="upload-file-icon" style="display:none;"><i class="fas ${icon}" style="color:${color}"></i></span>`;
         } else if (isVideo) {
@@ -6616,21 +6719,21 @@ function isViolationCloudinaryConfigured() {
  * @param {string} rawUrl stored `secure_url`
  * @returns {string} a clickable URL ('' when no URL is available)
  */
-// The attachment helpers now live in js/attachment-viewer.js, which BOTH
-// main.html and ownerdashboard.html load. The Owner Dashboard used to keep its
-// own copies (a third getAttachmentColor, a second formatFileSize, and a
-// thumbnail-less icon row), so the same file rendered differently per page.
-// These are thin delegates: every existing call site keeps working by name,
-// but there is now exactly ONE implementation.
-function attachmentHelpers() {
-    const v = window.AttachmentViewer;
-    if (!v || !v.helpers) {
-        throw new Error('js/attachment-viewer.js must load before script.js — check the script tag order in main.html');
-    }
-    return v.helpers;
-}
+function normalizeFileUrl(rawUrl) {
+    const value = String(rawUrl || '').trim();
+    if (!value || value === '#') return '';
+    if (/^(blob:|data:)/i.test(value)) return value;
 
-function normalizeFileUrl(rawUrl) { return attachmentHelpers().normalizeFileUrl(rawUrl); }
+    let url = value;
+    for (let i = 0; i < 3; i++) {
+        if (!/%[0-9A-Fa-f]{2}/.test(url)) break;
+        let decoded;
+        try { decoded = decodeURI(url); } catch (e) { break; }
+        if (decoded === url) break;
+        url = decoded;
+    }
+    try { return encodeURI(url); } catch (e) { return url; }
+}
 
 /**
  * Sanitize a single folder / public-id path segment for Cloudinary.
@@ -7458,42 +7561,35 @@ function renderViolationAttachments(grid, attachments, editable) {
         return;
     }
     grid.innerHTML = list.map((att, index) => {
-        // ⚠️ normalizeAttachment() here too. This renderer used to read
-        // att.secure_url directly, so it understood ONE writer's shape only: an
-        // attachment stored as `url` / `fileName` / `mimeType` (the Area Manager
-        // form's shape) rendered as a dead card here, while the same file rendered
-        // correctly in the four ticket grids. Normalising is what makes the same
-        // file look the same in every grid.
-        const norm = normalizeAttachment(att);
-        const url = norm ? norm.url : '';
-        const name = (norm && norm.name) || ('Attachment ' + (index + 1));
-        const sizeText = (norm && norm.bytes) ? formatFileSize(norm.bytes) : '';
+        const url = normalizeFileUrl(att.secure_url);
+        const name = att.name || ('Attachment ' + (index + 1));
+        const sizeText = att.bytes ? formatFileSize(att.bytes) : '';
+        const isImage = att.resource_type === 'image';
+        const isVideo = att.resource_type === 'video';
+        const icon = getAttachmentIcon(att.resource_type, att.format);
+        const color = getAttachmentColor(att.format);
 
-        // ⚠️ WITHOUT A URL THERE IS NO ANCHOR AT ALL. This renderer had no such
-        // guard and emitted href="" unconditionally — `href=""` is a real link
-        // to the CURRENT PAGE, so clicking a URL-less violation attachment
-        // navigated the whole app to its own URL. That bug was already fixed in
-        // the other four grids; this one was simply missed.
-        const isBroken = !url;
+        let preview;
+        if (isImage) {
+            preview = `<img src="${getCloudinaryThumbUrl(url, 200, 200)}" alt="${escapeHTML(name)}" loading="lazy"
+                onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';">`;
+            preview += `<div class="attachment-file-icon" style="display:none;"><i class="fas ${icon}" style="color:${color}"></i></div>`;
+        } else if (isVideo) {
+            preview = `<div class="attachment-file-icon"><i class="fas fa-play-circle" style="color:${color}"></i></div>`;
+        } else {
+            preview = `<div class="attachment-file-icon"><i class="fas ${icon}" style="color:${color}"></i></div>`;
+        }
 
-        // One shared tile builder, so this grid matches every other grid.
-        // See buildAttachmentPreview() for what used to differ here.
-        const preview = buildAttachmentPreview(norm, index);
-
-        const publicId = (norm && norm.publicId) || '';
         const removeBtn = editable
-            ? `<button type="button" class="violation-att-remove" title="Remove attachment" data-public-id="${escapeHTML(publicId)}"><i class="fas fa-times"></i></button>`
+            ? `<button type="button" class="violation-att-remove" title="Remove attachment" data-public-id="${escapeHTML(att.public_id || '')}"><i class="fas fa-times"></i></button>`
             : '';
 
-        // A broken record renders a div, NOT an anchor - see the isBroken note.
-        const body = isBroken
-            ? `<div class="attachment-preview" title="Link unavailable">${preview}</div>`
-            : `<a href="${url}" target="_blank" rel="noopener noreferrer" class="attachment-preview" title="${escapeHTML(name)}">${preview}</a>`;
-
         return `
-            <div class="attachment-item" data-public-id="${escapeHTML(publicId)}">
+            <div class="attachment-item" data-public-id="${escapeHTML(att.public_id || '')}">
                 ${removeBtn}
-                ${body}
+                <a href="${url}" target="_blank" rel="noopener noreferrer" class="attachment-preview" title="${escapeHTML(name)}">
+                    ${preview}
+                </a>
                 <div class="attachment-meta">
                     <span class="attachment-name" title="${escapeHTML(name)}">${escapeHTML(name)}</span>
                     ${sizeText ? `<span class="attachment-size">${escapeHTML(sizeText)}</span>` : ''}
@@ -8410,30 +8506,200 @@ function bindViolationTreePanel() {
 }
 
 // ===== IN-APP ATTACHMENT VIEWER (lightbox) =====
-// The viewer itself now lives in js/attachment-viewer.js, so main.html and
-// ownerdashboard.html share ONE implementation and ONE injected dialog. See
-// that file's header for why duplicating it here was not an option.
-//
-// Two thin shims remain on this page:
-//
-//  * openAttachmentViewerForRow() feeds the viewer the violations folder-browser
-//    rows. Those are divs carrying `data-url`, not anchors, so the shared
-//    delegated click handler cannot see them. It passes #violationFolderBrowser
-//    explicitly because the module takes the root as a PARAMETER -- that is
-//    precisely so it never depends on a script.js-only global, which would be
-//    undefined on the Owner Dashboard.
-//  * bindAttachmentViewer() is now a no-op. It is kept so the call in initApp()
-//    (and any future caller) stays valid; the module self-binds on
-//    DOMContentLoaded. Calling init() twice is safe -- the module guards it.
+// One modal reused everywhere (folder browser, evidence grids, upload previews)
+// so files are reviewed without leaving the dashboard. Only ONE media element
+// exists at a time and the body is emptied on close, so flipping through many
+// videos never piles up hidden players (or their bandwidth).
 
-function openAttachmentViewerForRow(row) {
-    const viewer = window.AttachmentViewer;
-    if (viewer) viewer.openForRows(violationFolderBrowser || document, row);
+let viewerItems = [];
+let viewerIndex = 0;
+
+/** Guess the viewer type from the delivery URL's extension. */
+function attachmentViewerTypeFromUrl(url) {
+    let path = String(url || '');
+    const q = path.indexOf('?');
+    if (q !== -1) path = path.slice(0, q);
+    const m = path.match(/\.([a-z0-9]+)$/i);
+    const ext = m ? m[1].toLowerCase() : '';
+    if (['mp4', 'webm', 'mov', 'm4v', 'ogv'].indexOf(ext) !== -1) return 'video';
+    if (ext === 'pdf') return 'pdf';
+    if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].indexOf(ext) !== -1) return 'image';
+    return 'other';
 }
 
+/** Type for a preview anchor: sniff its media children / PDF icon, then URL. */
+function attachmentViewerTypeFor(anchor, url) {
+    if (anchor && anchor.querySelector) {
+        if (anchor.querySelector('video')) return 'video';
+        if (anchor.querySelector('img')) return 'image';
+        if (anchor.querySelector('.fa-file-pdf')) return 'pdf';
+    }
+    return attachmentViewerTypeFromUrl(url);
+}
+
+function attachmentViewerIconClass(type) {
+    if (type === 'video') return 'fa-file-video';
+    if (type === 'pdf') return 'fa-file-pdf';
+    if (type === 'image') return 'fa-file-image';
+    return 'fa-file';
+}
+
+function attachmentViewerNameFor(anchor) {
+    const nameEl = anchor.querySelector('.attachment-name, .upload-file-name');
+    return (nameEl && nameEl.textContent) || anchor.getAttribute('title') || 'Attachment';
+}
+
+/** Draw the media for the current item — exactly one element in the body. */
+function renderAttachmentViewerItem() {
+    const item = viewerItems[viewerIndex];
+    if (!item) { closeAttachmentViewer(); return; }
+
+    const type = item.type || attachmentViewerTypeFor(item.anchor, item.url);
+    if (attachmentViewerIcon) attachmentViewerIcon.className = 'fas ' + attachmentViewerIconClass(type);
+    if (attachmentViewerTitle) attachmentViewerTitle.textContent = item.name || 'Attachment';
+    if (attachmentViewerCount) {
+        attachmentViewerCount.textContent = viewerItems.length > 1
+            ? (viewerIndex + 1) + ' / ' + viewerItems.length
+            : '';
+    }
+    const hasPrevNext = viewerItems.length > 1;
+    if (attachmentViewerPrev) attachmentViewerPrev.style.display = hasPrevNext ? '' : 'none';
+    if (attachmentViewerNext) attachmentViewerNext.style.display = hasPrevNext ? '' : 'none';
+    if (attachmentViewerOpen) attachmentViewerOpen.disabled = !(item.url && item.url !== '#');
+
+    attachmentViewerBody.innerHTML = '';
+    if (!item.url || item.url === '#') {
+        attachmentViewerBody.innerHTML = '<div class="attachment-viewer-empty"><i class="fas fa-file"></i><br>No preview available for this file.</div>';
+        return;
+    }
+
+    if (type === 'image') {
+        const img = document.createElement('img');
+        img.className = 'attachment-viewer-media';
+        img.src = item.url;
+        img.alt = item.name || 'Attachment';
+        attachmentViewerBody.appendChild(img);
+    } else if (type === 'video') {
+        const video = document.createElement('video');
+        video.className = 'attachment-viewer-media';
+        video.src = item.url;
+        video.controls = true;
+        video.playsInline = true;
+        video.preload = 'metadata';
+        attachmentViewerBody.appendChild(video);
+        const p = video.play();
+        if (p && p.catch) p.catch(() => { /* autoplay blocked — controls still work */ });
+    } else if (type === 'pdf') {
+        // Browser-native PDF rendering. If Cloudinary PDF delivery is disabled
+        // the iframe stays blank — the "Open" button above is the fallback.
+        const frame = document.createElement('iframe');
+        frame.src = item.url;
+        frame.title = item.name || 'PDF preview';
+        attachmentViewerBody.appendChild(frame);
+    } else {
+        attachmentViewerBody.innerHTML = '<div class="attachment-viewer-empty"><i class="fas fa-file"></i><br>No inline preview for this file type — use the Open button above.</div>';
+    }
+}
+
+function showAttachmentViewerAt(index) {
+    if (!viewerItems.length) return;
+    viewerIndex = ((index % viewerItems.length) + viewerItems.length) % viewerItems.length;
+    renderAttachmentViewerItem();
+}
+
+function viewerStep(delta) {
+    showAttachmentViewerAt(viewerIndex + delta);
+}
+
+/** Open the viewer with a list of {url, name, anchor?} items. */
+function openAttachmentViewer(items, index) {
+    const list = (Array.isArray(items) ? items : []).filter(x => x && x.url);
+    if (!list.length) return;
+    viewerItems = list;
+    showAttachmentViewerAt(Math.max(0, Math.min(index || 0, list.length - 1)));
+    attachmentViewerModal.classList.add('active');
+    document.body.style.overflow = 'hidden';
+}
+
+function closeAttachmentViewer() {
+    if (!attachmentViewerModal) return;
+    attachmentViewerModal.classList.remove('active');
+    attachmentViewerBody.innerHTML = '';   // stops video playback + frees memory
+    document.body.style.overflow = '';
+    viewerItems = [];
+    viewerIndex = 0;
+}
+
+/** Viewer items from the folder browser's current file rows. */
+function openAttachmentViewerForRow(row) {
+    const url = row.dataset.url;
+    if (!url || url === '#') return;
+    const rows = Array.prototype.slice.call((violationFolderBrowser || document).querySelectorAll('.vdrive-row.file'));
+    const items = rows.map(r => ({
+        url: r.dataset.url || '',
+        name: (r.querySelector('.vdrive-name') || {}).textContent || 'Attachment'
+    }));
+    openAttachmentViewer(items, Math.max(0, rows.indexOf(row)));
+}
+
+/**
+ * Wire the viewer once: header buttons, Esc / arrow keys, backdrop click, and
+ * one delegated click handler that turns EVERY preview anchor in the app
+ * (ticket grids, violation evidence, upload previews) into a viewer opener.
+ * Middle-click / ctrl-click still fall through to the browser default.
+ */
 function bindAttachmentViewer() {
-    const viewer = window.AttachmentViewer;
-    if (viewer) viewer.init();
+    if (!attachmentViewerModal) return;
+    if (attachmentViewerClose) attachmentViewerClose.addEventListener('click', closeAttachmentViewer);
+    if (attachmentViewerPrev) attachmentViewerPrev.addEventListener('click', () => viewerStep(-1));
+    if (attachmentViewerNext) attachmentViewerNext.addEventListener('click', () => viewerStep(1));
+    if (attachmentViewerOpen) {
+        attachmentViewerOpen.addEventListener('click', () => {
+            const item = viewerItems[viewerIndex];
+            if (item && item.url && item.url !== '#') window.open(item.url, '_blank', 'noopener');
+        });
+    }
+    attachmentViewerModal.addEventListener('click', (e) => {
+        if (e.target === attachmentViewerModal) closeAttachmentViewer();
+    });
+    document.addEventListener('keydown', (e) => {
+        if (!attachmentViewerModal.classList.contains('active')) return;
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            closeAttachmentViewer();
+        } else if (e.key === 'ArrowLeft') {
+            e.preventDefault();
+            viewerStep(-1);
+        } else if (e.key === 'ArrowRight') {
+            e.preventDefault();
+            viewerStep(1);
+        }
+    });
+    document.addEventListener('click', (e) => {
+        if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        const a = e.target.closest('a.attachment-preview, a.upload-file-preview');
+        if (!a) return;
+
+        // ⚠️ preventDefault() MUST come before the URL check.
+        // An anchor with `href=""` (or `href="#"`) is a REAL link to the current
+        // page, so bailing out before this line let a dead attachment navigate the
+        // whole app to its own URL instead of opening the viewer — the reported
+        // "clicking the file takes me to main.html". The renderers no longer emit
+        // an empty href at all; this is the second line of defence for any markup
+        // that still has one.
+        e.preventDefault();
+
+        const url = a.getAttribute('href');
+        if (!url || url === '#') return;
+        const scope = a.closest('.attachments-grid, .upload-file-list, .modal-body, .modal-fields') || a.parentElement || document;
+        const anchors = Array.prototype.slice.call(scope.querySelectorAll('a.attachment-preview, a.upload-file-preview'));
+        const items = anchors.map(el => ({
+            url: el.getAttribute('href') || '',
+            name: attachmentViewerNameFor(el),
+            anchor: el
+        }));
+        openAttachmentViewer(items, Math.max(0, anchors.indexOf(a)));
+    });
 }
 
 // ===== VIOLATIONS: EVENT BINDINGS + GLOBAL EXPORTS =====
