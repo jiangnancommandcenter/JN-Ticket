@@ -220,9 +220,18 @@ const list = makeEl('div', { class: 'attachments-grid' });
 doc.body.appendChild(list);
 function chip(name, href, kind) {
     const a = makeEl('a', { class: 'attachment-preview', href: href, title: name });
-    if (kind === 'video') a.appendChild(makeEl('video', { src: href }));
-    else if (kind === 'image') a.appendChild(makeEl('img', { src: href }));
-    else a.appendChild(makeEl('div', { class: 'attachment-file-icon' }));
+    // A VIDEO card holds an <img> poster frame, NOT a <video> -- exactly what the
+    // shared builder emits. An earlier version of this fixture used a <video>
+    // child, which was the pre-consolidation markup; it kept passing while the
+    // real app was broken, because the fixture no longer matched reality.
+    if (kind === 'video' || kind === 'image') {
+        a.appendChild(makeEl('img', {
+            class: 'attachment-thumb attachment-thumb-' + kind,
+            src: kind === 'video' ? href.replace(/\.mp4$/, '.jpg') : href
+        }));
+    } else {
+        a.appendChild(makeEl('div', { class: 'attachment-file-icon' }));
+    }
     const label = makeEl('span', { class: 'attachment-name' });
     label.textContent = name;
     a.appendChild(label);
@@ -416,6 +425,7 @@ vm.createContext(box);
 vm.runInContext([
     extractFn(moduleSrc, 'escapeHTML'),
     extractFn(moduleSrc, 'getCloudinaryThumbUrl'),
+    extractFn(moduleSrc, 'cloudinaryPlainStillUrl'),
     extractFn(moduleSrc, 'getAttachmentIcon'),
     extractFn(moduleSrc, 'getAttachmentColor'),
     extractFn(moduleSrc, 'buildAttachmentPreview')
@@ -490,4 +500,73 @@ for (const [file, fn, src] of LAZY_HIDDEN) {
 const vdrive = spanOf2(scriptSrc, 'renderViolationBrowserLevel');
 assert(/loading="lazy"/.test(vdrive),
     'the REPORTS DATABASE tree KEEPS loading="lazy" -- it is a long scrollable list in a visible panel');
+// ============================================================================
+// 7. A tile must never show a BROKEN-image glyph
+// ============================================================================
+// The reported symptom: the thumbnail renders as the browser's broken-image
+// glyph, but clicking it opens the file perfectly on Cloudinary.
+//
+// That split is the tell. The anchor href is the UNTOUCHED delivery url, while
+// the <img> src is a DERIVED one (a Cloudinary transformation). So the original
+// is valid and the transformation is not -- an account/plan that refuses the
+// transform, a q_auto that cannot run, a codec Cloudinary cannot decode. With a
+// single attempt there was nowhere left to go, so the tile stayed broken-looking.
+//
+// The chain: full transform -> transform-free still -> play/file icon. The last
+// rung is a static <i>, so it cannot fail, and data-alt-src is cleared before the
+// retry so the chain cannot loop.
+assert(moduleSrc.includes('function cloudinaryPlainStillUrl('),
+    'a transform-free still helper must exist as the middle rung');
+const chBox = { console: console, document: escStub, encodeURI: encodeURI, decodeURI: decodeURI };
+vm.createContext(chBox);
+vm.runInContext([
+    'normalizeFileUrl', 'normalizeAttachment', 'getCloudinaryThumbUrl',
+    'cloudinaryPlainStillUrl', 'getAttachmentIcon', 'getAttachmentColor',
+    'escapeHTML', 'buildAttachmentPreview'
+].map(n => extractFn(moduleSrc, n)).join('\n'), chBox);
+
+const VURL = 'https://res.cloudinary.com/jlux07ne/video/upload/v1790945332/tickets/bnw-tix002/lynirpmgdttlnvdp1d55.mp4';
+const vrec = chBox.normalizeAttachment({ secure_url: VURL, name: '11am.mp4', resource_type: 'video', format: 'mp4' });
+const vhtml = chBox.buildAttachmentPreview(vrec, 0);
+assert(vhtml.indexOf('attachment-thumb-video') !== -1,
+    'a video thumbnail must be labelled attachment-thumb-video - typeFor() reads it FIRST, because the card holds an <img> poster and a plain img sniff would call every video an image');
+
+const src1 = vhtml.match(/<img[^>]*\ssrc="([^"]+)"/)[1];
+const alt = vhtml.match(/data-alt-src="([^"]+)"/);
+assert(alt, 'a video tile must carry data-alt-src -- that is the second chance when the transform is refused');
+assert(src1.indexOf('/w_200,h_200,c_fill') !== -1, 'rung 1 is the resized transform');
+assert(alt[1].indexOf('w_200') === -1 && alt[1].indexOf('/video/upload/') !== -1,
+    'rung 2 must be a transform-free still on the video delivery path');
+assert(alt[1] !== src1, 'the two rungs must differ, or the retry re-requests the same failing url');
+assert(vhtml.indexOf('fa-play-circle') !== -1, 'rung 3 is the play icon');
+// The version segment must be stripped on BOTH rungs, or Cloudinary 404s.
+assert(src1.indexOf('v1790945332') === -1 && alt[1].indexOf('v1790945332') === -1,
+    'the v<version> segment must be stripped from both rungs');
+
+// Fire the onerror chain against a fake element and prove it terminates.
+const handler = vhtml.match(/onerror="([^"]*)"/)[1].replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+const el = {
+    attrs: { 'data-alt-src': alt[1] }, style: {}, nextElementSibling: { style: {} }, _src: null,
+    getAttribute(k) { return this.attrs[k] || null; },
+    removeAttribute(k) { delete this.attrs[k]; },
+    set src(v) { this._src = v; }, get src() { return this._src; }
+};
+const fireErr = new Function('el', 'return (function(){' + handler + '}).call(el);');
+fireErr(el);
+assert.strictEqual(el.src, alt[1], 'rung 1 failure must retry with the plain still');
+assert.strictEqual(el.getAttribute('data-alt-src'), null,
+    'data-alt-src MUST be cleared before the retry, or the chain would loop forever on one failing url');
+fireErr(el);
+assert.strictEqual(el.style.display, 'none', 'rung 2 failure must hide the img');
+assert.strictEqual(el.nextElementSibling.style.display, 'flex', 'and show the icon instead');
+assert.strictEqual(el._src, alt[1], 'the retry must not fire again');
+
+// An image retried with its ORIGINAL url, which is always derivable.
+const ihtml = chBox.buildAttachmentPreview(
+    chBox.normalizeAttachment({ secure_url: 'https://res.cloudinary.com/x/image/upload/v1/pic.jpg', name: 'pic.jpg' }), 0);
+const ialt = ihtml.match(/data-alt-src="([^"]+)"/);
+assert(ialt, 'an image tile must carry data-alt-src too');
+assert(ialt[1] === 'https://res.cloudinary.com/x/image/upload/v1/pic.jpg',
+    'an image retries with its original url');
+console.log('  ok  a failed thumbnail retries, then falls back to an icon \u2014 never a broken glyph');
 console.log('\nAll attachment viewer tests passed.');

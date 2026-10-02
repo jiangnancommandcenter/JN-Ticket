@@ -613,9 +613,28 @@ assert(
     'reads the room, so a message sent in the same batch as its room is denied'
 );
 assert(
-    /if\s*\(!roomIsStarted\)\s*\{[\s\S]{0,240}?await roomRef\(\)\.set\(roomSummary/.test(clientSrc),
+    /if\s*\(!roomIsStarted\s*&&\s*!isGroupRoom\(\)\)\s*\{[\s\S]{0,240}?await roomRef\(\)\.set\(roomSummary/.test(clientSrc),
     'the standalone room write must be conditional on the conversation not being started yet, so an ' +
     'existing conversation keeps its message + summary in ONE atomic batch'
+);
+// ⚠️⚠️ AND IT MUST BE SKIPPED FOR THE GROUP ROOM — THE REGRESSION THIS GUARDS.
+// `chats/owner-superadmin` is FROZEN BY DESIGN: firestore.rules denies BOTH
+// `allow create` and `allow update` on it via `&& !isLegacyArchive(chatId)`.
+// It also has no `members` array, so `conversationSummaries` can never hold it
+// (the list query filters on `members`) and `roomIsStarted` was therefore ALWAYS
+// false there. On a FRESH Firestore, where that document does not exist, this
+// line attempted a CREATE the rules refuse on purpose; it threw at
+// `stage === 'room'`, which also skipped the payload ladder (gated on
+// `stage === 'message'`), and the failure was misreported as "run
+// `firebase deploy --only firestore:rules`" — which cannot fix it, because this
+// repo's own rules refuse the write too. No parent document is needed: the
+// group's message rule is ROLE-gated and never checks `exists()`.
+assert(
+    /if\s*\(!roomIsStarted\s*&&\s*!isGroupRoom\(\)\)\s*\{/.test(clientSrc),
+    'the standalone room write must NEVER run in the group chat: that room document is frozen by ' +
+    'design (firestore.rules denies create AND update on it with `!isLegacyArchive(chatId)`), so ' +
+    'writing it is refused forever — which made the FIRST group message on a fresh Firestore fail ' +
+    'with a permission error misreported as a stale-rules problem'
 );
 assert(
     /const\s+roomIsStarted\s*=\s*Boolean\(conversationSummaries\[activeRoomId\]\)/.test(clientSrc),
@@ -1157,6 +1176,19 @@ assert(
     /function publishPresence\(\)[\s\S]*?if \(isGroupRoom\(\)\) return;/.test(clientSrc) === false,
     'publishPresence() must not opt out of the group room — that opt-out is what made typing ' +
     'indicators disappear for every member of the All HR group'
+);
+// ⚠️ THE ROOM-EXISTENCE GUARD MUST ALSO EXEMPT THE GROUP ROOM. publishPresence()
+// used to stay silent until `conversationSummaries[activeRoomId]` existed, which
+// is right for a 1:1 (the presence create rule resolves membership by READING
+// the room) but is PERMANENTLY false for the group: that room has no `members`
+// array, so the `where('members','array-contains', me)` list query can never
+// return it and no summary is ever produced. On a FRESH Firestore that meant
+// typing indicators were silently dead for every member of the All HR group.
+// `canPublishPresence()` resolves on the ROLE with no exists() check.
+assert(
+    /if \(!conversationSummaries\[activeRoomId\] && !isGroupRoom\(\)\) return;/.test(clientSrc),
+    'publishPresence() must not require a room summary in the GROUP chat: that room is role-gated ' +
+    'with no `members` array, so the summary it waits for can never arrive and typing was dead there'
 );
 assert(
     /function typingNameFor\(entry\)[\s\S]{0,400}?personProfileFor\(key\)\.displayName/.test(clientSrc) &&

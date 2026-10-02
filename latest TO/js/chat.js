@@ -4410,7 +4410,17 @@
         // the normal state before the first message, not an edge case. Nothing
         // is lost by staying quiet: the other person has no thread to see the
         // indicator in until the room exists.
-        if (!conversationSummaries[activeRoomId]) return;
+        //
+        // ⚠️ THE GROUP ROOM IS THE EXCEPTION, AND ON A FRESH DATABASE IT IS THE
+        // ONLY ROOM THAT MATTERS. It has no `members` array and its document is
+        // frozen, so `conversationSummaries` can never hold it (the list query
+        // filters on `members`) — meaning this guard was permanently false
+        // there on a brand-new Firestore and typing indicators were silently
+        // dead for every member of the All HR group until somebody's first
+        // message happened to seed a local summary. `canPublishPresence()`
+        // resolves on the ROLE with no `exists()` check, so the write is
+        // allowed there with or without a room document.
+        if (!conversationSummaries[activeRoomId] && !isGroupRoom()) return;
         ref.set({
             email: currentUserEmail,
             // ⚠️ The name the OTHER person sees must be the name they see
@@ -4988,8 +4998,27 @@
             // already allow. `{ merge: true }` makes it idempotent, so it is
             // also harmless when the room DOES already exist and the
             // conversation list simply has not arrived yet.
+            //
+            // ⚠️⚠️ AND NEVER IN THE GROUP ROOM. That document is FROZEN BY
+            // DESIGN — `firestore.rules` denies both `allow create` and
+            // `allow update` on it with `&& !isLegacyArchive(chatId)` — so on
+            // a FRESH Firestore, where `chats/owner-superadmin` does not exist
+            // and `conversationSummaries` can never hold it (the list query is
+            // `where('members','array-contains', me)` and this room is
+            // role-gated with NO `members` array), `roomIsStarted` was always
+            // false here and this line attempted a CREATE of a room the rules
+            // refuse on purpose. That threw at `stage === 'room'`, which also
+            // SKIPPED the payload ladder below (it is gated on
+            // `stage === 'message'`), so nothing was ever retried and the
+            // failure was misreported as "the deployed rules need a deploy" —
+            // which fixes nothing, because this repo's own rules refuse it too.
+            //
+            // No parent document is needed for the group: its message rule is
+            // `allow create: if isLegacyArchive(chatId) && …`, which is
+            // ROLE-gated and never checks `exists()`. Firestore lets a
+            // subcollection document exist under a parent that does not.
             const roomIsStarted = Boolean(conversationSummaries[activeRoomId]);
-            if (!roomIsStarted) {
+            if (!roomIsStarted && !isGroupRoom()) {
                 await roomRef().set(roomSummary, { merge: true });
             }
 

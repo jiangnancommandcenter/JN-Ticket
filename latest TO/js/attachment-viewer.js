@@ -89,14 +89,37 @@
         return 'other';
     }
 
-    /** Type for a preview anchor: sniff its media children / PDF icon, then URL. */
+    /**
+     * Type for a preview anchor.
+     *
+     * ORDER MATTERS, and it used to be the other way round, which broke video
+     * playback entirely.
+     *
+     * The old version sniffed the anchor's children first. But a video card now
+     * holds an <img> POSTER FRAME (that is the whole point of the shared card),
+     * so every video was classified as an IMAGE. The viewer then built
+     * `<img src="....mp4">`, which of course renders nothing: the modal opened
+     * blank, and only the Open button -- which uses the raw url -- worked. That
+     * is the reported "click it, the video does not play, but Open in another tab
+     * plays fine" split.
+     *
+     * So: the delivery URL decides, because the href IS the file. The explicit
+     * .attachment-thumb-* class comes first so a signed or extensionless video
+     * url still resolves. Child sniffing is kept only as a last resort.
+     */
     function typeFor(anchor, url) {
+        if (anchor && anchor.querySelector) {
+            if (anchor.querySelector('.attachment-thumb-video')) return 'video';
+            if (anchor.querySelector('.attachment-thumb-image')) return 'image';
+        }
+        var byUrl = typeFromUrl(url);
+        if (byUrl !== 'other') return byUrl;
         if (anchor && anchor.querySelector) {
             if (anchor.querySelector('video')) return 'video';
             if (anchor.querySelector('img')) return 'image';
             if (anchor.querySelector('.fa-file-pdf')) return 'pdf';
         }
-        return typeFromUrl(url);
+        return 'other';
     }
 
     function iconClass(type) {
@@ -420,7 +443,7 @@
      * @param {number} index position, used only for the fallback name
      * @returns {string} HTML for the tile body (NOT the anchor)
      */
-                // ⚠️ NO loading="lazy" HERE, ON PURPOSE.
+        // ⚠️ NO loading="lazy" HERE, ON PURPOSE.
             // Every one of these tiles is rendered into a modal that is display:none at
             // render time, and Chrome defers a lazy image whose ancestor has no layout --
             // then frequently never loads it at all. No error fires either, so the
@@ -431,32 +454,73 @@
             // decoding="async" keeps the decode off the main thread with none of that risk.
             // (The REPORTS DATABASE tree in script.js DOES keep loading="lazy": it is a long
             // scrollable list in a permanently visible panel, which is the case lazy is for.)
-function buildAttachmentPreview(norm, index) {
-        const url = norm ? norm.url : '';
-        const name = (norm && norm.name) || ('Attachment ' + ((index || 0) + 1));
-        const type = norm ? norm.resourceType : '';
-        const icon = norm ? getAttachmentIcon(norm.resourceType, norm.format) : 'fa-file';
-        const color = norm ? getAttachmentColor(norm.format) : '#64748b';
-
-        // No URL: a link-slash tile. The caller MUST render this without an
-        // anchor, because href="" is a real link to the current page.
-        if (!url) {
-            return '<div class="attachment-file-icon"><i class="fas fa-link-slash" style="color:#dc2626"></i></div>';
-        }
-
-        // Images AND videos both get a real thumbnail. A video falls back to the
-        // play icon if Cloudinary cannot produce a still (a non-Cloudinary host,
-        // or a codec it cannot decode), so the tile is never blank either way.
-        if (type === 'image' || type === 'video') {
-            const fallbackIcon = (type === 'video') ? 'fa-play-circle' : icon;
-            return '<img src="' + escapeHTML(getCloudinaryThumbUrl(url, 200, 200)) + '" alt="' + escapeHTML(name) + '" decoding="async"'
-                + ' onerror="this.onerror=null;this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\';">'
-                + '<div class="attachment-file-icon" style="display:none;"><i class="fas ' + fallbackIcon + '" style="color:' + color + '"></i></div>';
-        }
-
-        // Documents, archives, audio: no inline preview exists, so show the icon.
-        return '<div class="attachment-file-icon"><i class="fas ' + icon + '" style="color:' + color + '"></i></div>';
+    /**
+     * A transform-FREE video still: just the public id with a .jpg extension.
+     *
+     * This is the middle rung of the tile's fallback chain. If the full
+     * transformation is refused -- an account or plan without the feature, a
+     * `q_auto` that cannot run, a codec Cloudinary cannot decode -- the still
+     * itself is usually still derivable, and this asks for it with nothing but a
+     * format change. Cheaper and far more widely available than the transform.
+     */
+    function cloudinaryPlainStillUrl(secureUrl) {
+        const marker = '/video/upload/';
+        const i = secureUrl.indexOf(marker);
+        if (i === -1) return '';
+        const base = secureUrl.slice(0, i + marker.length);
+        let rest = secureUrl.slice(i + marker.length);
+        const slash = rest.indexOf('/');
+        if (slash !== -1 && /^v\d+$/.test(rest.slice(0, slash))) rest = rest.slice(slash + 1);
+        const ds = rest.lastIndexOf('/');
+        const dd = rest.lastIndexOf('.');
+        return base + (dd > ds ? rest.slice(0, dd) + '.jpg' : rest + '.jpg');
     }
+function buildAttachmentPreview(norm, index) {
+    const url = norm ? norm.url : '';
+    const name = (norm && norm.name) || ('Attachment ' + ((index || 0) + 1));
+    const type = norm ? norm.resourceType : '';
+    const icon = norm ? getAttachmentIcon(norm.resourceType, norm.format) : 'fa-file';
+    const color = norm ? getAttachmentColor(norm.format) : '#64748b';
+
+    // No URL: a link-slash tile. The caller MUST render this without an
+    // anchor, because href="" is a real link to the current page.
+    if (!url) {
+        return '<div class="attachment-file-icon"><i class="fas fa-link-slash" style="color:#dc2626"></i></div>';
+    }
+
+    // Images AND videos both get a real thumbnail.
+    if (type === 'image' || type === 'video') {
+        const fallbackIcon = (type === 'video') ? 'fa-play-circle' : icon;
+
+        // THREE rungs, tried in order, and the last one is an icon that cannot
+        // fail: full transform -> transform-free still -> play/file icon.
+        //
+        // A single attempt is what produced the BROKEN-IMAGE glyph. The anchor
+        // href is the untouched file, so clicking always worked; only the
+        // thumbnail was derived, and a transformation the account or plan refuses
+        // had no second chance. The reported symptom -- "broken thumbnail, but it
+        // plays fine on Cloudinary when I open it" -- is exactly that split: the
+        // ORIGINAL url is valid while the DERIVED one is not.
+        //
+        // For an image the retry is the original url (always derivable); for a
+        // video it is the plain .jpg still, which needs no transformation support
+        // at all. data-alt-src is cleared before the retry so this can never loop.
+        const primary = getCloudinaryThumbUrl(url, 200, 200);
+        const alt = (type === 'video') ? cloudinaryPlainStillUrl(url) : url;
+        const onError =
+            "var a=this.getAttribute('data-alt-src');"
+          + "if(a){this.removeAttribute('data-alt-src');this.src=a;}"
+          + "else{this.style.display='none';this.nextElementSibling.style.display='flex';}";
+        return '<img class="attachment-thumb attachment-thumb-' + type + '" src="' + escapeHTML(primary) + '"'
+            + (alt && alt !== primary ? ' data-alt-src="' + escapeHTML(alt) + '"' : '')
+            + ' alt="' + escapeHTML(name) + '" decoding="async" onerror="' + onError + '">'
+            + '<div class="attachment-file-icon" style="display:none;"><i class="fas '
+            + fallbackIcon + '" style="color:' + color + '"></i></div>';
+    }
+
+    // Documents, archives, audio: no inline preview exists, so show the icon.
+    return '<div class="attachment-file-icon"><i class="fas ' + icon + '" style="color:' + color + '"></i></div>';
+}
 
     /**
      * THE WHOLE attachment card — the markup the Owner Dashboard and HR
