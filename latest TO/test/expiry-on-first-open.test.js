@@ -86,7 +86,12 @@ console.log('Testing that the viewing window starts on first open...');
 
         const at = new Date();
         const written = await w.markTrackingAccessOpened(unopened, at);
-        assert(written, 'opening an approved, unopened ticket must write a stamp');
+        assert(written && written.stamped === true,
+            'opening an approved, unopened ticket must write a stamp. It now returns a ' +
+            'RESULT OBJECT rather than a bare Date/null, so that "declined for reason X" is ' +
+            'distinguishable from "wrote it" — four different declines used to all return null.');
+        assert(written.at instanceof Date || written.at && typeof written.at.getTime === 'function',
+            'a successful stamp must carry back the Date it wrote');
         assert.strictEqual(writes.length, 1, 'exactly one write, not two');
         assert('accessOpenedAt' in writes[0], 'the stamp must be persisted');
         assert.strictEqual(writes[0].accessOpenedAt, 'SERVER_TS',
@@ -119,7 +124,9 @@ console.log('Testing that the viewing window starts on first open...');
         // not slide the deadline along, or the window could be renewed forever.
         writes = [];
         const again = await w.markTrackingAccessOpened(opened, new Date());
-        assert.strictEqual(again, null, 'a second open must NOT re-stamp the ticket');
+        assert.strictEqual(again.reason, 'already-stamped',
+            'a second open must NOT re-stamp the ticket — and must say WHY it declined');
+        assert.strictEqual(again.stamped, false);
         assert.strictEqual(writes.length, 0, 'a second open must not write at all');
 
         // Three windows after the first open, the ticket is lapsed. Nothing done
@@ -154,8 +161,9 @@ console.log('Testing that the viewing window starts on first open...');
         // Nothing to view yet, so no clock and no write.
         writes = [];
         const pending = { id: TICKET_ID, approvalStatus: 'pending_approval', accessWindowStartsOnOpen: true };
-        assert.strictEqual(await w.markTrackingAccessOpened(pending, new Date()), null,
-            'an unapproved ticket must never be stamped');
+        const pendingResult = await w.markTrackingAccessOpened(pending, new Date());
+        assert.strictEqual(pendingResult.reason, 'not-approved',
+            'an unapproved ticket must never be stamped, and must report that reason');
         assert.strictEqual(writes.length, 0);
         assert.strictEqual(w.getTrackingAccessExpiry(pending), null);
 
@@ -170,8 +178,10 @@ console.log('Testing that the viewing window starts on first open...');
         assert.strictEqual(w.isTrackingAccessExpired(legacyOld), true,
             'a pre-feature ticket whose window has passed must still read as expired');
         writes = [];
-        assert.strictEqual(await w.markTrackingAccessOpened(legacyOld, new Date()), null,
-            'a legacy ticket must not be stamped — its deadline is already running');
+        assert.strictEqual((await w.markTrackingAccessOpened(legacyOld, new Date())).reason,
+            'legacy-no-marker',
+            'a legacy ticket must not be stamped — its deadline is already running — and must ' +
+            'report that distinct reason rather than a bare null');
         assert.strictEqual(writes.length, 0);
 
         // A stored accessExpiresAt still wins: the only value written by a clock
@@ -199,15 +209,76 @@ console.log('Testing that the viewing window starts on first open...');
         vm.createContext(sandbox2);
         vm.runInContext(helperSrc, sandbox2);
         const t = ticket({ accessWindowStartsOnOpen: true });
-        assert.strictEqual(await sandbox2.window.markTrackingAccessOpened(t, new Date()), null,
-            'a rejected write returns null rather than throwing — an offline manager must ' +
-            'still be able to read the report they opened it from');
+        const failed = await sandbox2.window.markTrackingAccessOpened(t, new Date());
+        assert.strictEqual(failed.stamped, false,
+            'a rejected write must not report success');
+        assert.strictEqual(failed.reason, 'write-failed',
+            'a rejected write must be reported as write-failed and NOT throw — an offline ' +
+            'manager must still be able to read the report they opened it from');
+        assert(failed.error, 'a write failure must carry the underlying error for the console');
         assert.strictEqual(sandbox2.window.getTrackingAccessOpenedAt(t), null,
             'a failed write must not leave a local stamp behind — the ticket keeps its ' +
             'no-expiry state');
     }
 
-    console.log('\n× First-open tests passed (an approved ticket with no first-open stamp has a ' +
+    /**
+ * ⚠️ STRIP COMMENTS BEFORE ANY STRUCTURAL ASSERTION.
+ *
+ * These checks look for code patterns — "is the stamp gated on this typeof
+ * guard?" — and the source's own comments QUOTE the old code verbatim to explain
+ * why it was removed. So a naive regex matches the explanation and reports the
+ * bug as still present, on code that is correct. That is not hypothetical: it
+ * happened here, and to the "seeder" word in the no-demo-reseed suite.
+ *
+ * Only lines whose FIRST non-space characters are `//` are stripped. An inline
+ * `//` mid-line is left alone, which is what keeps URL strings intact — a naive
+ * `//.*$` would truncate `const u = 'https://…'` mid-literal.
+ */
+function stripComments(src) {
+    return src
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .split('\n')
+        .map(line => (/^\s*\/\//.test(line) ? '' : line))
+        .join('\n');
+}
+
+// ===========================================================================
+console.log('\n=== ⚠️ a missing helper must be LOUD, never a silent skip ===');
+// ===========================================================================
+{
+    // ⚠️ THE BUG. openOwnerReport() used to read:
+    //     if (expiryAppliesToViewer()
+    //         && typeof window.markTrackingAccessOpened === 'function') { … }
+    // That `typeof` guard turned "the expiry code is not loaded" — which a stale
+    // CACHED firebase.js causes, and which is the single most likely reason a
+    // manager's window never starts — into a silent no-op. No error, no toast,
+    // nothing in the console. The ticket simply never expires, which is
+    // indistinguishable from the feature working exactly as specified.
+    const ownerJs = stripComments(
+        fs.readFileSync(path.join(ROOT, 'js', 'owner-dashboard.js'), 'utf8')
+    );
+    const opener = ownerJs.slice(ownerJs.indexOf('window.openOwnerReport = function'));
+
+    assert(opener.length > 0, 'openOwnerReport() must exist');
+    assert(!/expiryAppliesToViewer\(\)\s*&&[\s\S]{0,40}typeof window\.markTrackingAccessOpened\s*===\s*'function'/.test(opener),
+        'the stamp must NOT be gated on `typeof window.markTrackingAccessOpened === ' +
+        "'function'`. That short-circuits to a silent no-op when firebase.js is stale, and a " +
+        'ticket that never expires is precisely what that looks like from the outside.');
+
+    // The helper itself must be announced when absent, because until it is fixed
+    // NO approved ticket on that page can ever expire.
+    assert(/markTrackingAccessOpened !== 'function'/.test(opener) && /console\.error/.test(opener),
+        'when window.markTrackingAccessOpened is missing, openOwnerReport() must log an error ' +
+        'naming the stale-cache cause. Silence here is what made this undiagnosable.');
+
+    // And a genuine write failure must reach the manager, not just the console.
+    assert(/write-failed/.test(opener),
+        'a write failure must be handled explicitly. Every OTHER reason (already-stamped, ' +
+        'legacy-no-marker, not-approved) is correct behaviour and must stay quiet — but a ' +
+        'rejected write means the window will not run, and the manager should be told.');
+}
+
+console.log('\n× First-open tests passed (an approved ticket with no first-open stamp has a ' +
         'NULL expiry and never expires, however far in the past it was approved; opening it ' +
         'writes ONE server-timestamped accessOpenedAt that is mirrored onto the local copy so ' +
         'the first render does not flash the withheld state; the deadline is anchored to the ' +
@@ -216,6 +287,9 @@ console.log('Testing that the viewing window starts on first open...');
         'HR or superadmin reading the ticket cannot burn the manager\'s window; unapproved and ' +
         'pre-feature legacy tickets are neither stamped nor expired, so existing tickets keep the ' +
         'approvedAt + window rule they were created under; a stored expiry still wins over a ' +
-        'stale stamp; and a failed write returns null instead of throwing, leaving the report ' +
-        'readable).');
+        'stale stamp; and a failed write reports write-failed with the underlying error instead of ' +
+        'throwing, leaving the report readable). Every refusal returns a DISTINGUISHABLE reason ' +
+        '— not-approved, legacy-no-marker, already-stamped, write-failed — because they used to ' +
+        'all return a bare null, which is how a stale cached firebase.js presented as "approved ' +
+        'tickets never expire" with nothing in the console to explain it).');
 })();

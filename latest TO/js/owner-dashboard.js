@@ -1193,9 +1193,43 @@ window.openOwnerReport = function(reportId) {
     // a living; stamping on THEIR behalf would silently start — and burn — the
     // manager's window during someone else's review, which is the exact failure
     // this feature exists to prevent.
-    if (expiryAppliesToViewer()
-        && typeof window.markTrackingAccessOpened === 'function') {
-        await window.markTrackingAccessOpened(rawData);
+    // ⚠️ NO SILENT SKIP. This block used to read
+    //     `expiryAppliesToViewer() && typeof window.markTrackingAccessOpened === 'function'`
+    // and simply do nothing when the helper was missing. That guard turned "the
+    // expiry code is not loaded" — a stale cached firebase.js, the most likely
+    // cause — into "this ticket never expires", with no error, no toast and
+    // nothing in the console. The symptom was indistinguishable from the
+    // feature working as designed.
+    //
+    // Both halves now report. A missing helper is a DEPLOYMENT problem and says
+    // so loudly, because until it is fixed no approved ticket on this page can
+    // ever expire. An expected decline (already stamped, legacy ticket) stays
+    // quiet — those are correct behaviour, not failures.
+    if (expiryAppliesToViewer()) {
+        if (typeof window.markTrackingAccessOpened !== 'function') {
+            // ⚠️ LOUD ON PURPOSE. This is the stale-cache case, and it silently
+            // disables the entire viewing window for every manager on this page.
+            console.error(
+                '[expiry] window.markTrackingAccessOpened is not defined — this page is ' +
+                'running a STALE firebase.js. Approved tickets will NEVER expire. Hard-refresh ' +
+                '(Ctrl+Shift+R) and confirm firebase.js has been re-fetched.'
+            );
+            if (typeof ownerToast === 'function') {
+                ownerToast('Viewing-access expiry is not active on this page — reload with Ctrl+Shift+R.', 'error');
+            }
+        } else {
+            const result = await window.markTrackingAccessOpened(rawData);
+            // ⚠️ ONLY 'write-failed' IS WORTH TELLING THE MANAGER ABOUT. Every
+            // other reason is correct behaviour: already-stamped is the normal
+            // second open, and legacy-no-marker means the ticket predates the
+            // feature and is handled by the approvedAt + window fallback.
+            if (result && result.stamped === false && result.reason === 'write-failed') {
+                console.error('[expiry] could not record the first-open moment:', result.error);
+                if (typeof ownerToast === 'function') {
+                    ownerToast('Could not start the viewing-access timer for this ticket.', 'error');
+                }
+            }
+        }
     }
 
     // Attachment cards come from the SHARED builder in js/attachment-viewer.js —

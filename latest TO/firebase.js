@@ -596,32 +596,36 @@ window.getTrackingAccessExpiry = function(ticket) {
 /**
  * ⚠️ THE ONLY PLACE `accessOpenedAt` IS EVER WRITTEN.
  *
- * Stamps the first-open moment on an approved ticket whose clock starts on
- * open. Deliberately a no-op in four cases, each of which would otherwise burn
- * the manager's window for nothing:
+ * ⚠️ RETURNS A REASON, NOT A BARE null. This used to return null for four
+ * completely different situations — not approved, no marker, already stamped,
+ * bad date — plus a fifth when the write itself failed. From outside, "already
+ * stamped" and "the helper isn't loaded" and "Firestore rejected the write" all
+ * looked identical: the ticket simply never expires, with no error anywhere.
+ * That is exactly how a stale cached firebase.js presented as "the expiry
+ * feature doesn't work". Each reason below is now distinguishable.
  *
- *   - the ticket is not approved (nothing to view yet)
- *   - the ticket is not on the new rule (legacy: its deadline is already set)
- *   - it already carries `accessOpenedAt` — the stamp is written ONCE, so
- *     closing and reopening the modal cannot slide the deadline along
- *   - the caller passes `now`, used by tests to make the write deterministic
+ * Returns { stamped: true, at: Date } when it wrote, or
+ *         { stamped: false, reason: '…' } when it did not.
  *
- * Returns the Date written, or null when nothing was written.
- *
- * ⚠️ CLIENT-SIDE BY NATURE. This runs in the manager's browser, so the window
- * is only as trustworthy as that client — the same caveat already documented
- * for the whole expiry gate in js/owner-dashboard.js (firestore.rules lets any
- * signed-in user read all tickets, so this is a display gate, not an
- * authorisation one). Making it authoritative needs a Cloud Function.
+ * Reason values:
+ *   'no-ticket'          — nothing was passed
+ *   'not-approved'       — nothing to view yet
+ *   'legacy-no-marker'   — approved before this feature; its deadline is already
+ *                          set by the approvedAt + window fallback, so it must
+ *                          NOT be stamped
+ *   'already-stamped'    — the stamp exists; closing/reopening cannot extend
+ *   'bad-date'           — the caller's `now` was unusable (tests inject one)
+ *   'write-failed'       — Firestore rejected it. NEVER blocks the report; the
+ *                          ticket keeps its no-expiry state until the next open.
  */
 window.markTrackingAccessOpened = async function(ticket, now) {
-    if (!ticket) return null;
-    if ((ticket.approvalStatus || 'pending') !== 'approved') return null;
-    if (!window.trackingAccessStartsOnOpen(ticket)) return null;
-    if (window.getTrackingAccessOpenedAt(ticket)) return null;
+    if (!ticket) return { stamped: false, reason: 'no-ticket' };
+    if ((ticket.approvalStatus || 'pending') !== 'approved') return { stamped: false, reason: 'not-approved' };
+    if (!window.trackingAccessStartsOnOpen(ticket)) return { stamped: false, reason: 'legacy-no-marker' };
+    if (window.getTrackingAccessOpenedAt(ticket)) return { stamped: false, reason: 'already-stamped' };
 
     const stamp = now ? window.toTrackingDate(now) : new Date();
-    if (!stamp || isNaN(stamp.getTime())) return null;
+    if (!stamp || isNaN(stamp.getTime())) return { stamped: false, reason: 'bad-date' };
 
     try {
         // `db` / `auth` are this file's own top-level consts, used directly
@@ -637,12 +641,11 @@ window.markTrackingAccessOpened = async function(ticket, now) {
         // stamp and would flash the "withheld" state at a manager whose access
         // is in fact open — then correct itself a beat later on the listener.
         ticket.accessOpenedAt = stamp;
-        return stamp;
+        return { stamped: true, at: stamp };
     } catch (e) {
-        // Never block the report on a bookkeeping write. If this fails the
-        // ticket simply keeps its no-expiry state until the next open.
+        // Never block the report on a bookkeeping write.
         console.warn('Could not stamp accessOpenedAt:', e);
-        return null;
+        return { stamped: false, reason: 'write-failed', error: e };
     }
 };
 
