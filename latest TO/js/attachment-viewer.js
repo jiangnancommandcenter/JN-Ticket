@@ -527,7 +527,7 @@ function buildAttachmentPreview(norm, index) {
      * violations grids now use, identical to the five grids in script.js.
      *
      * @param {object} att   a raw record (either writer's shape)
-     * @param {object} opts  { index, removeHtml }
+     * @param {object} opts  { index, removeHtml, added }
      * @returns {string} one .attachment-item card, or '' for a null record
      */
     function buildAttachmentCard(att, opts) {
@@ -544,8 +544,25 @@ function buildAttachmentPreview(norm, index) {
             ? '<div class="attachment-preview" title="Link unavailable">' + buildAttachmentPreview(norm, index) + '</div>'
             : '<a href="' + escapeHTML(norm.url) + '" target="_blank" rel="noopener noreferrer" class="attachment-preview" title="' + escapeHTML(name) + '">'
               + buildAttachmentPreview(norm, index) + '</a>';
-        return '<div class="attachment-item"'
+        // ⚠️ OPT-IN, AND TOP-LEFT. `added` marks a clip uploaded in response to a
+        // footage request, so it is never set by the other grids — the violation
+        // folders, the requester's own uploads and the operator's ticket modal all
+        // leave it off and render exactly as before. The banner sits top-LEFT
+        // because .attachment-remove already owns top-right; overlapping them would
+        // hide the Remove button on a superadmin card, which is the one place
+        // both can appear at once.
+        //
+        // ⚠️ THE WORD, NOT A GLYPH. This was a circular ➕ badge, which reads as a
+        // control — an "add" button — rather than as a state. The request was for
+        // a "NEW" banner: plain text says what it is, is translatable, and needs
+        // no icon font. `aria-label` too, because the word is inside a decorative
+        // banner whose full meaning is carried by the `title`.
+        const addedBadge = o.added
+            ? '<span class="attachment-added-badge" role="img" aria-label="Added footage" title="Added footage — uploaded in response to a request">NEW</span>'
+            : '';
+        return '<div class="attachment-item' + (o.added ? ' attachment-item--added' : '') + '"'
             + (norm.publicId ? ' data-public-id="' + escapeHTML(norm.publicId) + '"' : '') + '>'
+            + addedBadge
             + (o.removeHtml || '') + body
             + '<div class="attachment-meta">'
             + '<span class="attachment-name" title="' + escapeHTML(name) + '">' + escapeHTML(name) + '</span>'

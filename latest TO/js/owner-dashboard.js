@@ -62,6 +62,12 @@ let ownerActiveUserName = '';
 // Set by openOwnerReport(), cleared by closeOwnerReportModalFn() — never read
 // from the DOM, so a re-render mid-flight cannot redirect a request.
 let ownerReopenTicketId = '';
+// The same ticket the open modal is showing, for the delegated FOOTAGE submit.
+// Kept separate from ownerReopenTicketId rather than shared: the two forms are
+// mutually exclusive by branch (re-access only renders when expired, footage only
+// when it has not), so a shared id would be correct today and silently start
+// writing to the wrong flow the first time both could render.
+let ownerFootageTicketId = '';
 
 // One-shot flag: owner refresh state (saved tab/modal) is restored exactly once
 // per page load so a later auth callback (e.g. ID-token refresh) can never yank
@@ -823,6 +829,107 @@ function requestOwnerAccess(ticketId, reason) {
   });
 }
 
+// ==============================================================
+//  REQUEST ADDITIONAL FOOTAGE (Area Manager -> Operator hand-off)
+//
+//  ⚠️ THE OPERATOR HALF ALREADY EXISTS. The public Track page files the identical
+//  request from submit-ticket.html (submitFootageRequest), and the app already
+//  consumes it:
+//    js/notifications.js  countFootageRequests() -> the 🎥 desktop notification
+//    script.js            detects a prior footage_request on resolve, so the new
+//                         clips are filed under `resolvedAdditionalFootage`
+//    script.js            renders the request list in the operator's ticket modal
+//  So this does NOT invent a second workflow: it writes the identical two fields
+//  and the whole operator half works unchanged.
+//
+//  The write, deliberately identical to submit-ticket.html:
+//    comments[]   a { type: 'footage_request' } note, appended with arrayUnion
+//                 so REPEAT requests accumulate rather than overwrite
+//    status       'Insufficient Footage' + approvalStatus 'pending' — this
+//                 hands the ticket back to the operator AND un-approves it, so
+//                 the Area Manager's own approved-only list drops the row until
+//                 the operator re-resolves and a superadmin approves again.
+//  ⚠️ The note `type` string is load-bearing: countFootageRequests() filters on
+//  exactly 'footage_request', so a typo means the operator is never notified.
+// ==============================================================
+
+/** Every footage_request note on a ticket, oldest first. */
+function ownerFootageNotes(ticket) {
+  const comments = (ticket && Array.isArray(ticket.comments)) ? ticket.comments : [];
+  return comments.filter((c) => c && c.type === 'footage_request');
+}
+
+/**
+ * True while the ticket is sitting with the operator awaiting more footage.
+ *
+ * Count-based rather than "is there any note": an old, already-answered request
+ * must not lock the manager out of asking again, so what matters is whether the
+ * ticket is CURRENTLY parked in the footage-requested state.
+ */
+function ownerFootagePending(ticket) {
+  if (!ticket) return false;
+  const status = String(ticket.status || '').trim();
+  const approval = String(ticket.approvalStatus || 'pending').trim().toLowerCase();
+  return status === 'Insufficient Footage' && approval !== 'approved';
+}
+
+/**
+ * File an "additional footage" request against a ticket.
+ *
+ * Returns the promise so a caller can chain, and never throws: the UI reports a
+ * failure through `ownerToast`, not an unhandled rejection. Mirrors
+ * requestOwnerAccess() above.
+ */
+function requestOwnerFootage(ticketId, details) {
+  const clean = String(details || '').trim();
+  if (!ticketId) return Promise.resolve(false);
+  if (clean.replace(/\s+/g, '').length < 5) {
+    ownerToast('Please describe what footage you need (at least 5 characters).', 'error');
+    return Promise.resolve(false);
+  }
+  if (!db || typeof db.collection !== 'function') {
+    ownerToast('Could not send your request — try again.', 'error');
+    return Promise.resolve(false);
+  }
+
+  const requestedBy = activeUserDisplayName();
+  const when = new Date();
+  const note = {
+    type: 'footage_request',
+    text: clean,
+    requestedBy: requestedBy,
+    requestedAt: when
+  };
+
+  return db.collection('tickets').doc(ticketId).get().then((snap) => {
+    if (!snap || !snap.exists) throw new Error('ticket not found');
+    // Re-check on the FRESH document. The form was rendered from a read that may
+    // be a minute old, and a ticket the operator has just re-resolved must not
+    // accept a stale request that would undo their work.
+    const data = snap.data() || {};
+    if (!isApprovedTicket(data) && !ownerFootagePending(data)) {
+      throw new Error('not available');
+    }
+    return db.collection('tickets').doc(ticketId).update({
+      status: 'Insufficient Footage',
+      approvalStatus: 'pending',
+      comments: firebase.firestore.FieldValue.arrayUnion(note),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+  }).then(() => {
+    ownerToast('Footage requested — the operator has been notified.', 'success');
+    return true;
+  }).catch((error) => {
+    if (error && error.message === 'not available') {
+      ownerToast('This ticket is no longer awaiting footage.', 'info');
+    } else {
+      console.error('Footage request error:', error);
+      ownerToast('Failed to send your request. Please try again.', 'error');
+    }
+    return false;
+  });
+}
+
 /**
  * Fill in the Tickets-tab sentence.
  *
@@ -878,9 +985,22 @@ function renderOwnerWindowNote() {
  * Split a ticket's files into the requester's original attachments and the
  * operator's added footage so the two never blend into one list:
  *  - requester files: `requesterAttachments` (written when the ticket is created)
- *  - operator footage: `resolution.operatorFootage` / `resolvedAdditionalFootage`
+ *  - operator footage: everything else (`resolution.operatorFootage`,
+ *    `resolvedAdditionalFootage`)
  *  - legacy tickets that only carry a single merged list show it under the
  *    requester so nothing is hidden from the viewer.
+ *
+ * ⚠️ THE REQUESTER'S LIST IS AUTHORITATIVE. `requesterAttachments` is written
+ * once at ticket creation from the manager's own upload array, so it is an exact
+ * record of what THEY attached. This used to instead subtract `operatorFootage`
+ * out of the merged list and call the remainder the manager's — which silently
+ * re-attributed any clip missing from a truncated `operatorFootage` to the
+ * manager. A manager then saw the operator's CCTV filed under "Requester's
+ * Attachments". Reading the manager's list directly makes that unrepresentable,
+ * and repairs the already-damaged tickets for free.
+ *
+ * `addedKeys` marks the clips that arrived in response to a footage request, so
+ * the caller can ring them without splitting the list into two sections.
  */
 function splitOwnerAttachments(rawData) {
   const resolution = (rawData && rawData.resolution) || {};
@@ -905,16 +1025,28 @@ function splitOwnerAttachments(rawData) {
   const requester = (rawData && Array.isArray(rawData.requesterAttachments)) ? rawData.requesterAttachments.slice() : null;
   const keyOf = (a) => (a && (a.public_id || a.secure_url)) || '';
   const excludeKeys = (list) => new Set((list || []).map(keyOf).filter(Boolean));
+  // The clips added in response to a footage request — a SUBSET of the operator's
+  // footage, and the only thing that tells an added clip from an original one.
+  const addedKeys = excludeKeys(Array.isArray(rawData && rawData.resolvedAdditionalFootage)
+    ? rawData.resolvedAdditionalFootage : []);
 
-  if (footage.length > 0) {
-    const keys = excludeKeys(footage);
-    return { requester: merged.filter(a => !keys.has(keyOf(a))), operator: footage };
-  }
   if (requester && requester.length > 0) {
-    const keys = excludeKeys(requester);
-    return { requester: requester, operator: merged.filter(a => !keys.has(keyOf(a))) };
+    const requesterKeys = excludeKeys(requester);
+    return {
+      requester: requester,
+      operator: merged.filter(a => !requesterKeys.has(keyOf(a))),
+      addedKeys: addedKeys
+    };
   }
-  return { requester: merged, operator: [] };
+  if (footage.length > 0) {
+    const footageKeys = excludeKeys(footage);
+    return {
+      requester: merged.filter(a => !footageKeys.has(keyOf(a))),
+      operator: footage,
+      addedKeys: addedKeys
+    };
+  }
+  return { requester: merged, operator: [], addedKeys: addedKeys };
 }
 
 window.openOwnerReport = function(reportId) {
@@ -923,6 +1055,8 @@ window.openOwnerReport = function(reportId) {
   // rendered form's markup. Cleared when the modal closes so a stale id can
   // never be written to after a different ticket is opened.
   ownerReopenTicketId = reportId;
+  // Same for the footage form's delegated handler (see ownerFootageTicketId).
+  ownerFootageTicketId = reportId;
   try { if (window.RefreshState) window.RefreshState.capture('owner', { tab: 'reports', modal: 'report', id: reportId }); } catch (e) { /* ignore */ }
 
   db.collection('tickets').doc(reportId).get().then((snap) => {
@@ -932,61 +1066,21 @@ window.openOwnerReport = function(reportId) {
     const rawData = snap.data();
     const data = normalizeTicketReport(rawData);
 
-    // Helper to get attachment icon color based on format
-    function getAttachmentColor(format) {
-      const lowerForm = (format || '').toLowerCase();
-      if (lowerForm.includes('mp4') || lowerForm.includes('mov') || lowerForm.includes('avi') || lowerForm.includes('webm')) return '#e53935';
-      if (lowerForm.includes('jpg') || lowerForm.includes('jpeg') || lowerForm.includes('png') || lowerForm.includes('gif') || lowerForm.includes('webp')) return '#388e3c';
-      return '#6c757d';
+    // Attachment cards come from the SHARED builder in js/attachment-viewer.js —
+    // the same .attachment-item card the five grids in script.js render. This
+    // used to be a local buildAttachmentRow() that emitted a bare icon chip
+    // (owner-attachment-row) with NO thumbnail, plus a third getAttachmentColor
+    // that disagreed with script.js's, so the same CCTV clip looked like a
+    // thumbnail card on one dashboard and a grey icon row on the other.
+    // Clicking a card opens the shared viewer.
+    function buildAttachmentRow(att, index, added) {
+        const v = window.AttachmentViewer;
+        if (!v) return '';
+        // `added` rings the clip as footage that arrived in response to a
+        // request. The shared builder takes it as an OPT, so every other grid
+        // that calls this same function is unaffected.
+        return v.buildAttachmentCard(att, { index: index || 0, added: !!added });
     }
-
-    // Helper to render one attachment as a clean file row (icon + name + size).
-    // No large preview boxes — entries without a usable link are skipped so
-    // empty clickable grey boxes can never appear.
-    function buildAttachmentRow(att) {
-      const url = att.secure_url || att.url || '';
-      if (!url) return '';
-      const name = att.name || 'Attachment';
-      const resourceType = att.resource_type || '';
-      const format = String(att.format || '').toLowerCase();
-      const color = getAttachmentColor(format);
-
-      // Images get a visible inline preview (not just a clickable chip).
-      if (resourceType === 'image') {
-        return `
-          <a href="${escapeHTML(url)}" target="_blank" rel="noopener noreferrer" class="owner-attachment-image" title="Click to view full size: ${escapeHTML(name)}">
-            <img src="${escapeHTML(url)}" alt="${escapeHTML(name)}" loading="lazy"
-                 onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';">
-            <div class="owner-attachment-file-icon" style="display:none;"><i class="fas fa-file-image" style="color:${color}"></i></div>
-            <span class="owner-attachment-image-name"><i class="fas fa-expand-alt"></i> ${escapeHTML(name)}</span>
-          </a>
-        `;
-      }
-
-      let icon = 'fa-file';
-      if (resourceType === 'video') icon = 'fa-file-video';
-      else if (format === 'pdf') icon = 'fa-file-pdf';
-      else if (/^(xlsx?|csv)$/.test(format)) icon = 'fa-file-excel';
-      else if (/^(zip|rar|7z)$/.test(format)) icon = 'fa-file-archive';
-
-      const sizeText = att.bytes
-        ? (att.bytes < 1024
-            ? att.bytes + ' B'
-            : att.bytes < 1024 * 1024
-              ? (att.bytes / 1024).toFixed(1) + ' KB'
-              : (att.bytes / (1024 * 1024)).toFixed(2) + ' MB')
-        : '';
-
-      return `
-        <a href="${escapeHTML(url)}" target="_blank" rel="noopener noreferrer" class="owner-attachment-row" title="${escapeHTML(name)}">
-          <i class="fas ${icon}" style="color:${color}"></i>
-          <span class="owner-attachment-name">${escapeHTML(name)}</span>
-          ${sizeText ? `<span class="owner-attachment-size">${escapeHTML(sizeText)}</span>` : ''}
-          <i class="fas fa-external-link-alt"></i>
-        </a>
-      `;
-    }
-
     // Split the ticket's files into requester attachments vs operator footage
     const attachments = splitOwnerAttachments(rawData);
 
@@ -1009,11 +1103,17 @@ window.openOwnerReport = function(reportId) {
     // Render the file lists, skipping any broken entries (no link)
     const requesterFiles = attachments.requester.filter(a => a && (a.secure_url || a.url));
     const operatorFiles = attachments.operator.filter(a => a && (a.secure_url || a.url));
+    const addedKeys = attachments.addedKeys || new Set();
+    // ⚠️ `.map(fn)` would call fn(value, INDEX, THE WHOLE ARRAY) — and that third
+    // argument is a truthy Array, so passing buildAttachmentRow straight to map
+    // would ring EVERY clip as "added". Both groups are wrapped so the flag is
+    // a real decision. Only the operator group is ever marked: the manager's own
+    // uploads are the original request, never "added footage".
     const requesterAttHtml = requesterFiles.length > 0
-      ? requesterFiles.map(buildAttachmentRow).join('')
+      ? requesterFiles.map((a, i) => buildAttachmentRow(a, i, false)).join('')
       : '<p class="review-empty-files">No files available.</p>';
     const operatorAttHtml = operatorFiles.length > 0
-      ? operatorFiles.map(buildAttachmentRow).join('')
+      ? operatorFiles.map((a, i) => buildAttachmentRow(a, i, addedKeys.has(a.public_id || a.secure_url))).join('')
       : '<p class="review-empty-files">No files available.</p>';
 
     // ⚠️ THE EXPIRY GATE — the sensitive payload is withheld, not the row.
@@ -1088,6 +1188,53 @@ window.openOwnerReport = function(reportId) {
          </div>`
       : '';
 
+// ===== "Request Additional Footage" UI (NON-EXPIRED tickets only) =====
+    //
+    // TWO states, mirroring the re-access form above:
+    //   no pending request → the details form
+    //   pending            → "Awaiting additional footage" (the form is REPLACED,
+    //                        not disabled — a greyed button invites a double click
+    //                        and the operator gets asked for the same clip twice)
+    //
+    // ⚠️ Rendered in the NON-EXPIRED branch ONLY. On an expired ticket the whole
+    // payload is withheld, so there is nothing here the manager could have found
+    // insufficient; asking to see a closed ticket again is the re-access request's
+    // job above, and offering both at once would be two doors to one problem.
+    const footagePending = ownerFootagePending(rawData);
+    const footageFormHtml = footagePending
+      ? `<div class="owner-footage-status pending">
+           <i class="fas fa-hourglass-half"></i>
+           Awaiting additional footage — the operator has your request and will upload the missing clips.
+         </div>`
+      : `<form class="owner-footage-form" id="ownerFootageForm">
+           <label for="ownerFootageDetails"><i class="fas fa-video"></i> Request additional footage</label>
+           <textarea id="ownerFootageDetails" rows="3" maxlength="500"
+                     placeholder="What is missing? e.g. the 7:15 PM clip of the till counter, entrance camera"></textarea>
+           <div class="owner-footage-actions">
+             <span class="owner-footage-hint">The operator is notified straight away. You can request again once they respond.</span>
+             <button type="submit" class="btn btn-primary btn-sm" id="ownerFootageSubmit">
+               <i class="fas fa-paper-plane"></i> Request footage
+             </button>
+           </div>
+         </form>`;
+
+    // What they already asked for, so a manager does not re-type the same request
+    // after the operator responds. Independent of the pending state: an answered
+    // ask stays visible, which is the whole point of keeping a history.
+    const footageHistoryHtml = (function () {
+      const notes = ownerFootageNotes(rawData);
+      if (!notes.length) return '';
+      return `<div class="owner-footage-history">
+          <h4>Footage request history</h4>
+          ${notes.map((n) => `
+            <div class="owner-footage-item">
+              <div class="owner-footage-item-text">${escapeHTML(n.text || '\u2014')}</div>
+              <div class="owner-footage-item-meta">
+                ${escapeHTML(n.requestedBy || 'Area Manager')}${n.requestedAt ? ' \u00b7 ' + escapeHTML(formatDate(n.requestedAt)) : ''}
+              </div>
+            </div>`).join('')}
+        </div>`;
+    })();
     const html = expired ? `
       <!-- ===== EXPIRED: metadata only, no payload ===== -->
       <div class="owner-access-expired">
@@ -1159,8 +1306,21 @@ window.openOwnerReport = function(reportId) {
           <div class="review-meta"><label>Status</label><span>${escapeHTML(data.status || 'Resolved')}</span></div>
           <div class="review-meta full"><label>Action Taken / Findings</label><p class="review-note">${escapeHTML(resNotes)}</p></div>
         </div>
-        <div class="review-attachments-label"><i class="fas fa-film"></i> Operator's Added Footage <span>(${operatorFiles.length})</span></div>
+        <!-- ⚠️ WAS "Operator's Added Footage". Now that clips added in response to
+             a footage request carry their own ring + badge, calling the WHOLE list
+             "added" would contradict the marking inside it — the original clips
+             are not added. The manager's own heading is untouched. -->
+        <div class="review-attachments-label"><i class="fas fa-film"></i> Operator's Resolution Footage <span>(${operatorFiles.length})</span></div>
         <div class="owner-attachment-list">${operatorAttHtml}</div>
+      </div>
+
+      <!-- ===== SECTION 3: REQUEST ADDITIONAL FOOTAGE ===== -->
+      <div class="review-card owner-footage-card">
+        <div class="review-card-header">
+          <h3><i class="fas fa-video"></i> Need More Footage?</h3>
+        </div>
+        ${footageFormHtml}
+        ${footageHistoryHtml}
       </div>
     `;
 
@@ -1216,10 +1376,56 @@ function handleOwnerReopenSubmit(event) {
   });
 }
 
+/**
+ * Submit handler for the "Request additional footage" form.
+ *
+ * DELEGATED from the modal body and bound ONCE, for the same reason as
+ * handleOwnerReopenSubmit above: the body is re-rendered on every open, so a
+ * listener bound inside the render would stack up and file one request per open.
+ *
+ * The guard on the form id is load-bearing now that BOTH forms are delegated from
+ * the same element — without it, submitting the footage form would fall into the
+ * re-access handler (and vice versa) and write the wrong workflow.
+ */
+function handleOwnerFootageSubmit(event) {
+  event.preventDefault();
+  const form = event.target;
+  if (!form || form.id !== 'ownerFootageForm') return;
+
+  const detailsEl = $owner('ownerFootageDetails');
+  const details = detailsEl ? detailsEl.value : '';
+  const ticketId = ownerFootageTicketId;
+  if (!ticketId) {
+    ownerToast('Could not tell which ticket this is. Close and reopen it.', 'error');
+    return;
+  }
+
+  const btn = $owner('ownerFootageSubmit');
+  const originalHtml = btn ? btn.innerHTML : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sending...';
+  }
+
+  requestOwnerFootage(ticketId, details).then((ok) => {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = originalHtml;
+    }
+    if (ok) {
+      // Re-render from the fresh document so the "Awaiting additional footage"
+      // state is real data, not an optimistic guess.
+      window.openOwnerReport(ticketId);
+    }
+  });
+}
+
 function closeOwnerReportModalFn() {
   if (ownerReportModal) ownerReportModal.classList.remove('active');
   // The re-access form's ticket id is only valid while the modal is open.
   ownerReopenTicketId = '';
+  // Same for the footage form — a stale id must never outlive the modal.
+  ownerFootageTicketId = '';
   try { if (window.RefreshState) window.RefreshState.clearModal('owner'); } catch (e) { /* ignore */ }
 }
 
@@ -1515,6 +1721,10 @@ function bindOwnerEvents() {
   // render would attach a second listener each time the modal opened, firing
   // the request N times for N opens.
   ownerReportModalBody?.addEventListener('submit', handleOwnerReopenSubmit);
+  // The footage form is re-created on every modal open for the same reason, so it
+  // is delegated and bound once here too. Both handlers guard on their own form
+  // id, so sharing this one listener element is safe.
+  ownerReportModalBody?.addEventListener('submit', handleOwnerFootageSubmit);
 
   ownerReportModal?.addEventListener('click', (e) => {
     if (e.target === ownerReportModal) closeOwnerReportModalFn();

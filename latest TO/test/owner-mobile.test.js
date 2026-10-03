@@ -24,6 +24,18 @@
 //     main.html rules by specificity, not by being unscoped — an unscoped
 //     `.header-left` here would silently reformat the command centre too.
 //
+// ===========================================================================
+//  5. THE TICKET CARD IS COMPACT. The card conversion above was literal — all
+//     EIGHT columns became label/value pairs, so one ticket was an eight-line
+//     block. The card now shows two lines: the ticket number as the title, the
+//     branch sharing a line with the self-labelling badges, and the incident
+//     demoted to a single truncated line.
+//
+//  6. ⚠️ HIDING THE ACTIONS CELL MUST NOT HIDE THE EMPTY STATE. The empty-state
+//     cell is also `:last-child`, so the obvious selector for the Actions cell
+//     blanks "No tickets found for your branches." and leaves an empty bordered
+//     card. Asserted on both halves of the fix.
+//
 //  Run: npm test
 // ===========================================================================
 const fs = require('fs');
@@ -180,6 +192,91 @@ console.log('\n=== The tables become CARDS, and every cell is labelled ===');
 }
 
 // ===========================================================================
+console.log('\n=== The ticket card is COMPACT (not eight stacked label lines) ===');
+// ===========================================================================
+// THE BUG THIS LOCKS DOWN. The card conversion above was literal: it turned all
+// EIGHT columns into label/value pairs, so one ticket became an eight-line
+// block and a manager scrolled three or four tickets to reach the fourth. These
+// fail if the card ever silently grows back to the full column list — which is
+// exactly what happens if someone "tidies" the hiding rules away as redundant.
+{
+    // The three fields that were dropped, hidden BY SELECTOR (not deleted). The
+    // cells stay in the DOM: the <th>/<td> counts are static and asserted above,
+    // and the DESKTOP table still shows all eight columns.
+    ['Created', 'Reporter'].forEach((label) => {
+        // ⚠️ The gap allowance is generous because `phoneBlock` has comments
+        // STRIPPED: these two selectors share one declaration block, so between
+        // `...="Created"]` and `display:` sits the whole Reporter selector.
+        // A tight bound here would pass vacuously rather than fail loudly.
+        assert(
+            new RegExp('#ownerTicketsTable tbody td\\[data-label="' + label + '"\\][\\s\\S]{0,160}?display:\\s*none')
+                .test(phoneBlock),
+            'the ' + label + ' cell must be hidden on a phone — it is either the manager\'s own ' +
+            'data or one they can read in the modal, and it was making every card 8 lines tall'
+        );
+    });
+
+    // The ticket number is the card's TITLE, so it must lose its label and stop
+    // being a right-aligned label/value pair.
+    assert(
+        /#ownerTicketsTable tbody td\[data-label="Ticket"\][^{]*\{[^}]*display:\s*block/.test(phoneBlock),
+        'the ticket number must become the card title (a block, not a label/value row)'
+    );
+    assert(
+        /#ownerTicketsTable tbody td\[data-label="Ticket"\]::before\s*\{[^}]*content:\s*none/.test(phoneBlock),
+        'the ticket number must lose its "TICKET" label — as the title it needs no prefix'
+    );
+
+    // The badges share one line with the branch, and drop their labels: the
+    // badges are self-labelling, so a "STATUS:" prefix above "Resolved" is noise.
+    assert(
+        /#ownerTicketsTable tbody td\[data-label="Status"\][^{]*\{[^}]*margin-left:\s*auto/.test(phoneBlock),
+        'Status must be pushed to the right of the shared badge line with margin-left:auto — ' +
+        'without it the badges sit left under the branch and the row reads as one column'
+    );
+    assert(
+        /#ownerTicketsTable tbody td\[data-label="Branch"\]::before[\s\S]{0,200}?content:\s*none/.test(phoneBlock),
+        'Branch must keep its value but drop its label, to share the line with the badges'
+    );
+    // ⚠️ Branch must NOT be hidden. A manager may own several branches, so "which
+    // branch is this ticket at" is real information — it was only the LABEL that
+    // was costing a line.
+    assert(
+        !/#ownerTicketsTable tbody td\[data-label="Branch"\][^{]*\{[^}]*display:\s*none/.test(phoneBlock),
+        'Branch must stay visible on a phone — a manager can own more than one branch, so which ' +
+        'branch a ticket belongs to is real information, not filler'
+    );
+
+    // The incident is KEPT but demoted to one truncated line. It is the field
+    // that tells you whether you are looking at the right ticket at a glance,
+    // and it is the one that used to wrap to four lines.
+    assert(
+        /#ownerTicketsTable tbody td\[data-label="Incident"\][^{]*\{[^}]*text-overflow:\s*ellipsis/.test(phoneBlock),
+        'the incident must be ONE truncated line (nowrap + ellipsis), not a wrapped paragraph — ' +
+        'a long title wrapping is what made the old card four lines tall'
+    );
+
+    // ⚠️ THE EMPTY STATE MUST SURVIVE. This is the trap: the Actions cell is
+    // hidden to save a line, and the obvious selector for it is `:last-child` —
+    // but the empty-state row's single colspan cell is ALSO a last child, so
+    // that rule blanks "No tickets found for your branches." and leaves an empty
+    // bordered card. Asserted on both halves of the fix.
+    assert(
+        /#ownerTicketsTable tbody td:not\(\[data-label\]\):not\(\.empty-state\)/.test(phoneBlock),
+        'the Actions cell must be hidden WITHOUT hiding the empty state: the empty-state cell is ' +
+        'also :last-child, so a :last-child selector blanks "No tickets found for your branches." ' +
+        'and leaves an empty bordered card'
+    );
+    assert(
+        !/#ownerTicketsTable tbody td:last-child\s*\{[^}]*display:\s*none/.test(phoneBlock),
+        'no rule may hide the tickets table\'s :last-child outright — that cell is the empty ' +
+        'state as often as it is Actions'
+    );
+    console.log('  PASS  the ticket card is 2 lines: ticket + branch/badges, incident truncated');
+    console.log('  PASS  hiding the Actions cell cannot hide the empty state');
+}
+
+// ===========================================================================
 console.log('\n=== KPI row, branch list, and touch targets ===');
 // ===========================================================================
 {
@@ -245,5 +342,7 @@ console.log('\n× Owner dashboard phone layer tests passed (both tables render a
     'mistaken for the Actions cell; the header is two rows and every selector in the block is ' +
     'scoped to #ownerMainContent so main.html cannot be affected; four KPI cards go two-up ' +
     'with minmax(0,1fr) so a long label cannot blow out the grid; header targets are 44x44 ' +
-    'and clickable rows have active feedback; and the CSS comment-balance guard is kept, ' +
+    'and clickable rows have active feedback; the ticket card is COMPACT — two lines, ' +
+    'not eight stacked label/value pairs — and hiding its Actions cell cannot hide the empty ' +
+    'state; and the CSS comment-balance guard is kept, ' +
     'because a missing comment opener once deleted a whole block of rules in silence).');

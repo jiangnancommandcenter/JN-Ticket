@@ -563,16 +563,8 @@ const violationTreeCount = $('#violationTreeCount');
 const btnToggleViolationTree = $('#btnToggleViolationTree');
 const violationPagination = $('#violationPagination');
 
-// In-app attachment viewer (lightbox for images / videos / PDFs)
-const attachmentViewerModal = $('#attachmentViewerModal');
-const attachmentViewerBody = $('#attachmentViewerBody');
-const attachmentViewerTitle = $('#attachmentViewerTitle');
-const attachmentViewerIcon = $('#attachmentViewerIcon');
-const attachmentViewerOpen = $('#attachmentViewerOpen');
-const attachmentViewerClose = $('#attachmentViewerClose');
-const attachmentViewerPrev = $('#attachmentViewerPrev');
-const attachmentViewerNext = $('#attachmentViewerNext');
-const attachmentViewerCount = $('#attachmentViewerCount');
+// The in-app attachment viewer's elements are created and cached by
+// js/attachment-viewer.js, not here -- it is shared with ownerdashboard.html.
 
 // Approvals tab
 const approvalSearch = $('#approvalSearch');
@@ -3568,7 +3560,7 @@ function renderApprovalAttachments(ticket) {
     const split = splitApprovalAttachments(ticket);
     const isAdmin = currentUserIsSuperAdmin();
     const ticketId = ticket ? ticket.id : '';
-    const renderGroup = (atts) => atts.map((att, index) => {
+    const renderGroup = (atts, markAdded) => atts.map((att, index) => {
         // ⚠️ Both writers' shapes - see normalizeAttachment(). Without this the
         // approval modal showed the file SIZE but no link for anything uploaded
         // through the Area Manager form.
@@ -3581,16 +3573,20 @@ function renderApprovalAttachments(ticket) {
         const color = norm ? getAttachmentColor(norm.format) : '#64748b';
         const isBroken = !url;
 
-        let preview;
-        if (isBroken) {
-            preview = '<div class="attachment-file-icon"><i class="fas fa-link-slash" style="color:#dc2626"></i></div>';
-        } else if (isImage) {
-            preview = `<img src="${getCloudinaryThumbUrl(url, 200, 200)}" alt="${escapeHTML(name)}" loading="lazy"
-                onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';">`;
-            preview += `<div class="attachment-file-icon" style="display:none;"><i class="fas ${icon}" style="color:${color}"></i></div>`;
-        } else {
-            preview = `<div class="attachment-file-icon"><i class="fas ${icon}" style="color:${color}"></i></div>`;
-        }
+        // ⚠️ THIS GRID BUILDS ITS OWN CARD and does not go through the shared
+        // buildAttachmentCard(), because only a superadmin's cards carry the
+        // Remove button. So the "added footage" marking has to be applied HERE as
+        // well, or the same clip would be ringed on the Area Manager's dashboard
+        // and plain on the superadmin's — the exact drift the shared builder
+        // exists to prevent. Same class names, same top-left banner, on purpose.
+        const isAdded = !!(markAdded && norm && split.addedKeys && split.addedKeys.has(norm.publicId));
+        const addedBadge = isAdded
+            ? '<span class="attachment-added-badge" role="img" aria-label="Added footage" title="Added footage — uploaded in response to a request">NEW</span>'
+            : '';
+
+        // One shared tile builder, so this grid matches every other grid.
+        // See buildAttachmentPreview() for what used to differ here.
+        const preview = buildAttachmentPreview(norm, index);
 
         const removeBtn = (isAdmin && norm && norm.publicId) ? `
             <button type="button" class="attachment-remove" data-tooltip="Remove"
@@ -3605,7 +3601,8 @@ function renderApprovalAttachments(ticket) {
             : `<a href="${url}" target="_blank" rel="noopener noreferrer" class="attachment-preview" title="${escapeHTML(name)}">${preview}</a>`;
 
         return `
-            <div class="attachment-item" data-public-id="${escapeHTML(norm ? norm.publicId : '')}">
+            <div class="attachment-item${isAdded ? ' attachment-item--added' : ''}" data-public-id="${escapeHTML(norm ? norm.publicId : '')}">
+                ${addedBadge}
                 ${body}
                 <div class="attachment-meta">
                     <span class="attachment-name" title="${escapeHTML(name)}">${escapeHTML(name)}</span>
@@ -3617,8 +3614,11 @@ function renderApprovalAttachments(ticket) {
     }).join('');
 
     const emptyHtml = '<p class="review-empty-files">No files available.</p>';
-    managerGrid.innerHTML = split.manager.length > 0 ? renderGroup(split.manager) : emptyHtml;
-    operatorGrid.innerHTML = split.operator.length > 0 ? renderGroup(split.operator) : emptyHtml;
+    // ⚠️ markAdded is passed ONLY for the operator group. The manager's own
+    // uploads can never be "added footage" — they are the original request — and
+    // ringing them would invent a distinction that does not exist.
+    managerGrid.innerHTML = split.manager.length > 0 ? renderGroup(split.manager, false) : emptyHtml;
+    operatorGrid.innerHTML = split.operator.length > 0 ? renderGroup(split.operator, true) : emptyHtml;
 
     const managerCount = document.getElementById('approvalManagerAttCount');
     const operatorCount = document.getElementById('approvalOperatorAttCount');
@@ -3654,14 +3654,112 @@ function getApprovalOperatorFootage(ticket) {
     return [];
 }
 
+// A shared "nothing was removed" set. Module-level so the common path allocates
+// nothing on every write — mergeOperatorFootage() is called on every resolve,
+// revision and superadmin upload.
+const EMPTY_REMOVED_SET = new Set();
+
+/**
+ * Has anyone asked for more footage on this ticket?
+ *
+ * The marker for "added footage". Read from the ticket's `comments` notes
+ * (type: 'footage_request'), which is what both the public Track page and the
+ * Area Manager's own form append. Shared so the operator's Resolve and the
+ * superadmin's two upload paths cannot disagree about whether a ticket is in a
+ * footage-request cycle.
+ */
+function hasFootageRequestComment(ticket) {
+    const comments = (ticket && Array.isArray(ticket.comments)) ? ticket.comments : [];
+    return comments.some(c => c && c.type === 'footage_request');
+}
+
+/**
+ * ⚠️ THE ONE PLACE operatorFootage IS BUILT. Every writer goes through here.
+ *
+ * THE BUG THIS LOCKS DOWN. Four sites used to write this field and they
+ * disagreed. The operator's two sites (Resolve, Revise & Resubmit) wrote
+ * `operatorFootage: attachmentList` — the NEWLY uploaded clips ONLY — so every
+ * time an operator re-resolved after an "Insufficient Footage" request, the
+ * footage from their FIRST submission was thrown out of the field. The
+ * superadmin's two sites (approval-modal upload, edit-modal upload) correctly
+ * did `oldFootage.concat(uploaded)`, which is why a superadmin's own uploads
+ * survived and this went unnoticed.
+ *
+ * It did not merely HIDE the old clips, it MISCLASSIFIED them.
+ * splitApprovalAttachments() below computes the manager's half as "every
+ * attachment whose key is NOT in the operator list" — so the orphaned original
+ * clips fell through and were rendered under "Manager's Request". CCTV the
+ * operator captured appeared as if the manager had filed it.
+ *
+ * The rule, for every writer:
+ *     previous footage  -  explicitly removed  +  newly uploaded
+ *
+ * @param {object}  ticket       the ticket being written (may be a cache entry)
+ * @param {Array}   uploaded     clips uploaded in THIS submission
+ * @param {Set}     removedIds   optional public_ids the user deleted this round
+ * @returns {Array} the complete footage list, oldest first, de-duplicated
+ */
+function mergeOperatorFootage(ticket, uploaded, removedIds) {
+    // The legacy `resolvedAdditionalFootage` is a genuine FALLBACK, not a second
+    // source to merge: a pre-`operatorFootage` ticket may only have it, and
+    // seeding from it is what rescues those clips instead of starting empty.
+    const prior = getApprovalOperatorFootage(ticket);
+
+    // ⚠️ DUCK-TYPED, NOT `instanceof Set`. `instanceof` compares against THIS
+    // realm's Set constructor, so a Set built anywhere else — a test sandbox, an
+    // iframe, a vendored bundle — fails the check and silently degrades to
+    // "remove nothing", which is the destructive-looking half of the contract
+    // quietly not happening. Asking for the one method actually used is both
+    // realm-independent and tolerant of any Set-alike.
+    const removed = (removedIds && typeof removedIds.has === 'function') ? removedIds : EMPTY_REMOVED_SET;
+
+    const kept = prior.filter((a) => !(a && removed.has(a.public_id)));
+    const added = Array.isArray(uploaded) ? uploaded : [];
+    const merged = kept.concat(added);
+
+    // ⚠️ DE-DUPE BY public_id, KEEPING THE FIRST OCCURRENCE. Now that the list
+    // only ever grows, a repeated submission — a double-tap, a retry after a
+    // slow save, or the same file arriving via both the auto-upload dropzone and
+    // the file input — would otherwise list one clip twice, and the two
+    // superadmin concats this helper replaced had exactly that exposure.
+    // First-wins so the ORIGINAL entry (with its original ordering and any
+    // later edits) is the one that survives.
+    const seen = new Set();
+    const out = [];
+    for (const att of merged) {
+        const key = att && att.public_id;
+        if (key) {
+            if (seen.has(key)) continue;
+            seen.add(key);
+        }
+        out.push(att);
+    }
+    return out;
+}
+
 /**
  * Split a ticket's attachments into the manager's original request files and
- * the operator's resolution footage:
- *  - if operator footage is known, the manager's files are everything else;
- *  - otherwise, if the manager's request files are known (`requesterAttachments`,
- *    written at ticket creation), the operator's footage is everything else;
- *  - legacy tickets with only a single merged list show it under the Manager's
- *    Request so nothing is hidden from the reviewer.
+ * the operator's resolution footage.
+ *
+ * ⚠️ THE MANAGER'S LIST IS AUTHORITATIVE, AND THAT IS THE WHOLE POINT.
+ * `requesterAttachments` is written once, at ticket creation, from the
+ * manager's own upload array (js/owner-ticket-form.js writes it and
+ * `attachments` from the SAME array). It is therefore an exact record of what
+ * the manager attached and nothing else.
+ *
+ * This used to prioritise `operatorFootage` and DERIVE the manager's half by
+ * subtracting it from the merged list — "everything not in the operator list".
+ * That inverts the trust: any clip missing from `operatorFootage` was silently
+ * re-attributed to the manager. On a ticket whose operatorFootage had been
+ * truncated (the replacement bug), the operator's own CCTV appeared under
+ * "Manager's Attachments" as though they had filed it.
+ *
+ * Using the manager's list directly makes that unrepresentable, AND it repairs
+ * the already-damaged tickets for free: an orphaned clip is simply "not the
+ * manager's", so it lands back under the operator where it belongs.
+ *
+ * `addedKeys` is returned so the caller can mark the clips that arrived in
+ * response to a footage request — see resolvedAdditionalFootage.
  */
 function splitApprovalAttachments(ticket) {
     const all = getApprovalAllAttachments(ticket);
@@ -3673,21 +3771,29 @@ function splitApprovalAttachments(ticket) {
     const keyOf = (a) => String((a && (a.public_id || a.publicId || a.secure_url || a.url)) || '');
     const keySet = (list) => new Set((list || []).map(keyOf).filter(Boolean));
 
-    if (footage.length > 0) {
-        const keys = keySet(footage);
-        return {
-            manager: all.filter(a => !keys.has(keyOf(a))),
-            operator: footage.slice()
-        };
-    }
+    // The clips added in response to a footage request. Deliberately read
+    // straight off the ticket, NOT off `footage`: this is a SUBSET, and it is
+    // the only thing that distinguishes an added clip from an original one.
+    const addedKeys = keySet((ticket && Array.isArray(ticket.resolvedAdditionalFootage))
+        ? ticket.resolvedAdditionalFootage : []);
+
     if (requester && requester.length > 0) {
         const keys = keySet(requester);
         return {
             manager: requester.slice(),
-            operator: all.filter(a => !keys.has(keyOf(a)))
+            operator: all.filter(a => !keys.has(keyOf(a))),
+            addedKeys: addedKeys
         };
     }
-    return { manager: all.slice(), operator: [] };
+    if (footage.length > 0) {
+        const keys = keySet(footage);
+        return {
+            manager: all.filter(a => !keys.has(keyOf(a))),
+            operator: footage.slice(),
+            addedKeys: addedKeys
+        };
+    }
+    return { manager: all.slice(), operator: [], addedKeys: addedKeys };
 }
 
 /**
@@ -3839,7 +3945,11 @@ window.openApprovalDetails = function(id) {
                     <div class="review-meta full"><label>Action Taken / Findings</label><p class="review-note">${escapeHTML(notes)}</p></div>
                     ${rejectedReason ? `<div class="review-meta full"><label>Rejection Reason</label><p class="review-note review-rejection">${escapeHTML(rejectedReason)}</p></div>` : ''}
                 </div>
-                <div class="review-attachments-label"><i class="fas fa-film"></i> Operator's Added Footage <span id="approvalOperatorAttCount">(0)</span></div>
+                <!-- ⚠️ WAS "Operator's Added Footage". Now that clips added in response to
+                     a footage request carry their own ring + badge, calling the WHOLE
+                     list "added" would contradict the marking inside it — the original
+                     clips are not added. The manager's own heading is untouched. -->
+                <div class="review-attachments-label"><i class="fas fa-film"></i> Operator's Resolution Footage <span id="approvalOperatorAttCount">(0)</span></div>
                 <div class="attachments-grid" id="approvalOperatorAttachments"></div>
             </div>
             ${reopenCard}
@@ -3952,13 +4062,28 @@ if (!isCloudinaryConfigured()) {
             const existing = Array.isArray(data.attachments) ? data.attachments : [];
             const oldResolution = data.resolution || {};
             const oldResAtts = Array.isArray(oldResolution.attachments) ? oldResolution.attachments : [];
-            const oldResFootage = Array.isArray(oldResolution.operatorFootage) ? oldResolution.operatorFootage : [];
             const merged = existing.concat(uploaded);
             const mergedRes = oldResAtts.concat(uploaded);
-            const mergedFootage = oldResFootage.concat(uploaded);
+            // One shared rule for footage, so this superadmin upload and the
+            // operator's Resolve/Revise can never disagree about what "add a clip"
+            // means (see mergeOperatorFootage).
+            const mergedFootage = mergeOperatorFootage(data, uploaded);
+            // ⚠️ A SUPERADMIN'S OWN CLIP IS "ADDED FOOTAGE" TOO. The ring/badge
+            // marks clips that arrived in response to a footage request, and a
+            // superadmin adding a clip on a ticket that is in that cycle is
+            // exactly that. Without this the marking would be half-true: the
+            // operator's response would be ringed and the superadmin's not.
+            const mergedAdditional = hasFootageRequestComment(data)
+                ? mergeOperatorFootage(
+                    { resolvedAdditionalFootage: data.resolvedAdditionalFootage }, uploaded)
+                : null;
             await db.collection('tickets').doc(id).update({
                 attachments: merged,
                 resolutionAttachmentUrl: attachmentUrl(merged[0]),
+                // Only written when there is a request in play, so a ticket that
+                // never had one keeps NO resolvedAdditionalFootage field at all —
+                // the same shape the operator's Resolve produces.
+                ...(mergedAdditional ? { resolvedAdditionalFootage: mergedAdditional } : {}),
                 resolution: {
                     ...oldResolution,
                     attachments: mergedRes,
@@ -4063,13 +4188,22 @@ const input = editApprovalAttachmentInput;
             const existing = Array.isArray(data.attachments) ? data.attachments : [];
             const oldResolution = data.resolution || {};
             const oldResAtts = Array.isArray(oldResolution.attachments) ? oldResolution.attachments : [];
-            const oldResFootage = Array.isArray(oldResolution.operatorFootage) ? oldResolution.operatorFootage : [];
             const merged = existing.concat(uploaded);
             const mergedRes = oldResAtts.concat(uploaded);
-            const mergedFootage = oldResFootage.concat(uploaded);
+            // Same shared rule as the approval-modal upload above — one helper for
+            // every writer of this field (see mergeOperatorFootage).
+            const mergedFootage = mergeOperatorFootage(data, uploaded);
+            // Same rule as the approval-modal upload above: on a ticket in a
+            // footage-request cycle, the superadmin's own clip is added footage and
+            // must carry the marker too (see hasFootageRequestComment).
+            const mergedAdditional = hasFootageRequestComment(data)
+                ? mergeOperatorFootage(
+                    { resolvedAdditionalFootage: data.resolvedAdditionalFootage }, uploaded)
+                : null;
             await db.collection('tickets').doc(id).update({
                 attachments: merged,
                 resolutionAttachmentUrl: attachmentUrl(merged[0]),
+                ...(mergedAdditional ? { resolvedAdditionalFootage: mergedAdditional } : {}),
                 resolution: {
                     ...oldResolution,
                     attachments: mergedRes,
@@ -4871,6 +5005,20 @@ try {
             const comments = (ticket && Array.isArray(ticket.comments)) ? ticket.comments : [];
             const hasFootageRequest = comments.some(c => c && c.type === 'footage_request');
 
+            // ⚠️ FOOTAGE ACCUMULATES — it is never replaced. `operatorFootage` must
+            // hold EVERY clip the operator has ever submitted for this ticket, not
+            // just this round's: splitApprovalAttachments() derives the manager's
+            // half as "everything not in the operator list", so a short list does
+            // not merely hide old footage, it re-files it as the manager's own.
+            const operatorFootage = mergeOperatorFootage(ticket, attachmentList);
+            // The Track page's separate "Resolved Additional Footage" section is
+            // also cumulative — on a SECOND footage request the previous round's
+            // clips must still be listed there, so it carries the same rule.
+            const prevAdditional = Array.isArray(ticket && ticket.resolvedAdditionalFootage)
+                ? ticket.resolvedAdditionalFootage : [];
+            const additionalFootage = mergeOperatorFootage(
+                { resolvedAdditionalFootage: prevAdditional }, attachmentList);
+
             // 3) Mark Resolved + pending superadmin approval
             const updateData = {
                 status: 'Resolved',
@@ -4882,7 +5030,7 @@ try {
                 // Store newly uploaded attachments as "resolved additional footage"
                 // when the ticket was previously marked Insufficient Footage
                 resolvedAdditionalFootage: hasFootageRequest && attachmentList.length > 0
-                    ? attachmentList
+                    ? additionalFootage
                     : firebase.firestore.FieldValue.delete(),
                 // Clear any previous rejection data when resubmitting a For Revision ticket
                 rejectionReason: firebase.firestore.FieldValue.delete(),
@@ -4890,7 +5038,7 @@ try {
                 resolution: {
                     notes,
                     attachments: mergedAtt,
-                    operatorFootage: attachmentList,
+                    operatorFootage: operatorFootage,
                     resolvedAt: firebase.firestore.FieldValue.serverTimestamp(),
                     resolvedBy: (auth.currentUser && auth.currentUser.email) || 'unknown'
                 }
@@ -5025,10 +5173,26 @@ try {
 
             // 2) Merge with existing ticket attachments (keep prior evidence)
             const ticket = allTickets.find(t => t.id === id);
-            const existingAtt = (ticket && Array.isArray(ticket.attachments)) ? ticket.attachments : [];
+            // ⚠️ THE × BUTTONS IN THIS MODAL ARE ONLY HONOURED HERE. They record
+            // public_ids into `removedRevisionAttachmentIds` (see
+            // renderRevisionAttachments) and NOTHING between the click and this
+            // line ever read that set — so before this the operator could delete a
+            // wrong clip, watch it vanish from the grid, and have it written back
+            // anyway. Filtering here is what makes the removal real, and it is
+            // required now that footage accumulates rather than being replaced.
+            //
+            // Duck-typed for the same reason as inside mergeOperatorFootage():
+            // `instanceof Set` is realm-bound and would silently degrade to
+            // "remove nothing" for a Set from any other realm.
+            const removedIds = (removedRevisionAttachmentIds
+                && typeof removedRevisionAttachmentIds.has === 'function')
+                ? removedRevisionAttachmentIds : EMPTY_REMOVED_SET;
+            const priorAtt = (ticket && Array.isArray(ticket.attachments)) ? ticket.attachments : [];
+            const existingAtt = priorAtt.filter(a => !(a && removedIds.has(a.public_id)));
             const mergedAtt = existingAtt.concat(attachmentList);
 
             // 3) Mark Resolved + pending superadmin approval (re-enter the queue)
+            const operatorFootage = mergeOperatorFootage(ticket, attachmentList, removedIds);
             const updateData = {
                 status: 'Resolved',
                 approvalStatus: 'pending_approval',
@@ -5041,7 +5205,7 @@ try {
                 resolution: {
                     notes,
                     attachments: mergedAtt,
-                    operatorFootage: attachmentList,
+                    operatorFootage: operatorFootage,
                     resolvedAt: firebase.firestore.FieldValue.serverTimestamp(),
                     resolvedBy: (auth.currentUser && auth.currentUser.email) || 'unknown'
                 }
@@ -5177,48 +5341,34 @@ function setAttachmentStatus(message, isError, statusElId) {
     else if (message) el.classList.add('success');
 }
 
-function formatFileSize(bytes) {
-    if (!bytes && bytes !== 0) return '';
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
-}
+function formatFileSize(bytes) { return attachmentHelpers().formatFileSize(bytes); }
 
-function getCloudinaryThumbUrl(secureUrl, width, height) {
-    // Videos: Cloudinary renders a still poster frame when a clip is requested as an
-    // image, so a grid tile costs a few KB instead of the whole file. Everything else
-    // about the URL (folder path, spaces already encoded) is preserved as-is.
-    const videoMarker = '/video/upload/';
-    const videoIdx = secureUrl.indexOf(videoMarker);
-    if (videoIdx !== -1) {
-        const videoBase = secureUrl.slice(0, videoIdx + videoMarker.length);
-        const videoRest = secureUrl.slice(videoIdx + videoMarker.length);
-        const firstSlash = videoRest.indexOf('/');
-        // Cloudinary stamps "/v1234567/" before the folder path; a bare numeric
-        // segment after "v" is that stamp, anything else is a real folder name.
-        const videoPath = (firstSlash !== -1 && /^v\d+$/.test(videoRest.slice(0, firstSlash)))
-            ? videoRest.slice(firstSlash + 1)
-            : videoRest;
-        const pathSlash = videoPath.lastIndexOf('/');
-        const pathDot = videoPath.lastIndexOf('.');
-        const still = pathDot > pathSlash ? videoPath.slice(0, pathDot) + '.jpg' : videoPath + '.jpg';
-        return videoBase + `w_${width || 200},h_${height || 200},c_fill,q_auto,f_jpg/` + still;
-    }
-
-    // Insert transformation params before the file extension: /w_200,h_200,c_fill,q_auto,f_auto
-    const marker = '/image/upload/';
-    const idx = secureUrl.indexOf(marker);
-    if (idx !== -1) {
-        const base = secureUrl.slice(0, idx + marker.length);
-        const rest = secureUrl.slice(idx + marker.length);
-        const slash = rest.indexOf('/');
-        if (slash !== -1) {
-            return base + `w_${width || 200},h_${height || 200},c_fill,q_auto,f_auto/` + rest.slice(slash + 1);
-        }
-        return base + `w_${width || 200},h_${height || 200},c_fill,q_auto,f_auto/` + rest;
-    }
-    return secureUrl;
-}
+function getCloudinaryThumbUrl(secureUrl, width, height) { return attachmentHelpers().getCloudinaryThumbUrl(secureUrl, width, height); }
+/**
+ * THE ONE attachment-tile builder. Every attachment grid in the app calls this,
+ * so an identical file looks identical everywhere it appears.
+ *
+ * WHY IT IS SHARED. The five renderers each grew their own inline if/else and
+ * drifted apart, which is why previews were inconsistent:
+ *   - renderTicketAttachments() put the RAW url in the <img>, so a ticket tile
+ *     downloaded the full-size file while every other grid asked Cloudinary for
+ *     a 200x200 transform.
+ *   - A video was a real inline <video> element in the ticket grid, a bare play
+ *     icon in three other grids, and a plain file icon in the approval grid,
+ *     which had no video branch at all. The same clip looked like three
+ *     different things.
+ *   - Only four of the five guarded a missing URL.
+ *
+ * getCloudinaryThumbUrl() ALREADY knows how to ask Cloudinary for a still frame
+ * from a video (it rewrites /video/upload/ to a w_,h_,c_fill,f_jpg transform
+ * ending in .jpg), so a video gets a real poster frame here for free. The
+ * per-renderer copy-paste simply never called it.
+ *
+ * @param {object} norm  a record from normalizeAttachment()
+ * @param {number} index position, used only for the fallback name
+ * @returns {string} HTML for the tile body (NOT the anchor)
+ */
+function buildAttachmentPreview(norm, index) { return window.AttachmentViewer.buildAttachmentPreview(norm, index); }
 
 /**
  * ⚠️ NORMALISE AN ATTACHMENT — the two writers in this app save DIFFERENT shapes.
@@ -5237,37 +5387,7 @@ function getCloudinaryThumbUrl(secureUrl, width, height) {
  * This one helper is the single place that knows both shapes. Every renderer
  * calls it, so a third writer cannot silently reintroduce the drift.
  */
-function normalizeAttachment(att) {
-    if (!att || typeof att !== 'object') return null;
-
-    const url = normalizeFileUrl(att.secure_url || att.url || '');
-    const name = att.name || att.fileName || att.original_filename || '';
-    const publicId = att.public_id || att.publicId || '';
-    const bytes = att.bytes || att.size || att.fileSize || 0;
-
-    // resource_type decides the whole rendering branch (image thumbnail, inline
-    // <video>, generic file icon), so it is derived from the mimeType the Area
-    // Manager form records rather than left undefined.
-    let resourceType = att.resource_type || '';
-    if (!resourceType) {
-        const mime = String(att.mimeType || att.mime_type || '').toLowerCase();
-        if (mime.indexOf('image/') === 0) resourceType = 'image';
-        else if (mime.indexOf('video/') === 0) resourceType = 'video';
-        else if (mime.indexOf('audio/') === 0) resourceType = 'audio';
-        else if (/\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name)) resourceType = 'image';
-        else if (/\.(mp4|webm|ogg|mov|avi)$/i.test(name)) resourceType = 'video';
-    }
-
-    // format picks the coloured file icon (pdf/doc/xls/...). Neither writer
-    // always supplies it, so fall back to the extension in the filename.
-    let format = att.format || '';
-    if (!format && name) {
-        const ext = String(name).match(/\.([A-Za-z0-9]+)$/);
-        if (ext) format = ext[1].toLowerCase();
-    }
-
-    return { url: url, name: name, publicId: publicId, bytes: bytes, resourceType: resourceType, format: format, raw: att };
-}
+function normalizeAttachment(att) { return attachmentHelpers().normalizeAttachment(att); }
 
 /**
  * ⚠️ The URL of an attachment, ALWAYS as a string — never `undefined`.
@@ -5288,28 +5408,9 @@ function attachmentUrl(att) {
     return (norm && norm.url) || '';
 }
 
-function getAttachmentIcon(resourceType, format) {
-    format = (format || '').toLowerCase();
-    if (resourceType === 'image') return 'fa-file-image';
-    if (resourceType === 'video') return 'fa-file-video';
-    if (['pdf'].includes(format)) return 'fa-file-pdf';
-    if (['doc', 'docx'].includes(format)) return 'fa-file-word';
-    if (['xls', 'xlsx', 'csv'].includes(format)) return 'fa-file-excel';
-    if (['ppt', 'pptx'].includes(format)) return 'fa-file-powerpoint';
-    if (['zip', 'rar', '7z'].includes(format)) return 'fa-file-archive';
-    if (['txt'].includes(format)) return 'fa-file-alt';
-    return 'fa-file';
-}
+function getAttachmentIcon(resourceType, format) { return attachmentHelpers().getAttachmentIcon(resourceType, format); }
 
-function getAttachmentColor(format) {
-    format = (format || '').toLowerCase();
-    if (['pdf'].includes(format)) return '#dc2626';
-    if (['doc', 'docx'].includes(format)) return '#2563eb';
-    if (['xls', 'xlsx', 'csv'].includes(format)) return '#16a34a';
-    if (['ppt', 'pptx'].includes(format)) return '#ea580c';
-    if (['zip', 'rar', '7z'].includes(format)) return '#ca8a04';
-    return '#64748b';
-}
+function getAttachmentColor(format) { return attachmentHelpers().getAttachmentColor(format); }
 
 /**
  * Render a ticket's existing attachments into a given grid element, using the
@@ -5336,18 +5437,9 @@ function renderAttachmentsIntoGrid(grid, ticket) {
         const color = norm ? getAttachmentColor(norm.format) : '#64748b';
         const isBroken = !url;
 
-        let preview;
-        if (isBroken) {
-            preview = '<div class="attachment-file-icon"><i class="fas fa-link-slash" style="color:#dc2626"></i></div>';
-        } else if (isImage) {
-            preview = `<img src="${getCloudinaryThumbUrl(url, 200, 200)}" alt="${escapeHTML(name)}" loading="lazy"
-                onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';">`;
-            preview += `<div class="attachment-file-icon" style="display:none;"><i class="fas ${icon}" style="color:${color}"></i></div>`;
-        } else if (isVideo) {
-            preview = `<div class="attachment-file-icon"><i class="fas fa-play-circle" style="color:${color}"></i></div>`;
-        } else {
-            preview = `<div class="attachment-file-icon"><i class="fas ${icon}" style="color:${color}"></i></div>`;
-        }
+        // One shared tile builder, so this grid matches every other grid.
+        // See buildAttachmentPreview() for what used to differ here.
+        const preview = buildAttachmentPreview(norm, index);
 
         // No URL -> a div, never an empty anchor. See renderTicketAttachments().
         const body = isBroken
@@ -5405,18 +5497,9 @@ function renderRevisionAttachments(grid, ticket) {
         const color = norm ? getAttachmentColor(norm.format) : '#64748b';
         const isBroken = !url;
 
-        let preview;
-        if (isBroken) {
-            preview = '<div class="attachment-file-icon"><i class="fas fa-link-slash" style="color:#dc2626"></i></div>';
-        } else if (isImage) {
-            preview = `<img src="${getCloudinaryThumbUrl(url, 200, 200)}" alt="${escapeHTML(name)}" loading="lazy"
-                onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';">`;
-            preview += `<div class="attachment-file-icon" style="display:none;"><i class="fas ${icon}" style="color:${color}"></i></div>`;
-        } else if (isVideo) {
-            preview = `<div class="attachment-file-icon"><i class="fas fa-play-circle" style="color:${color}"></i></div>`;
-        } else {
-            preview = `<div class="attachment-file-icon"><i class="fas ${icon}" style="color:${color}"></i></div>`;
-        }
+        // One shared tile builder, so this grid matches every other grid.
+        // See buildAttachmentPreview() for what used to differ here.
+        const preview = buildAttachmentPreview(norm, index);
 
         // No URL -> a div, never an empty anchor. See renderTicketAttachments().
         const body = isBroken
@@ -5495,37 +5578,19 @@ function renderTicketAttachments(ticket) {
             </button>
         ` : '';
 
-        // ===== Video attachments: inline playable preview (no anchor wrapper) =====
-        if (isVideo && url) {
-            return `
-                <div class="attachment-item" data-public-id="${escapeHTML(publicId)}">
-                    <div class="attachment-preview" style="padding:0;">
-                        <video src="${url}" controls preload="metadata" class="attachment-video-preview"></video>
-                    </div>
-                    <div class="attachment-meta">
-                        <span class="attachment-name" title="${escapeHTML(name)}">${escapeHTML(name)}</span>
-                        ${sizeText ? `<span class="attachment-size">${escapeHTML(sizeText)}</span>` : ''}
-                        <a href="${url}" target="_blank" rel="noopener noreferrer" class="attachment-open-link" title="Open full video in new tab">
-                            <i class="fas fa-external-link-alt"></i> Open full video
-                        </a>
-                    </div>
-                    ${removeBtn}
-                </div>
-            `;
-        }
+        // NOTE: this renderer used to carry its own video branch that emitted an
+        // inline <video> element inside a <div> that was not an anchor — so it could
+        // never open the viewer — while the other four grids showed a bare play icon
+        // and the approval grid showed a plain file icon. All of that is gone. A video
+        // is now a normal tile with a real Cloudinary poster frame from the shared
+        // builder below, so it looks the same here as everywhere else. Clicking it
+        // opens the same viewer; the "Open full video" card link went with it, since
+        // the viewer's own Open button and ctrl-click still cover 'new tab'.
 
-        let preview;
-        if (isBroken) {
-            preview = '<div class="attachment-file-icon"><i class="fas fa-link-slash" style="color:#dc2626"></i></div>';
-        } else if (isImage) {
-            // Use the direct URL with CSS object-fit (more reliable than the
-            // transformation-based thumbnail, which can fail on some URLs).
-            preview = `<img src="${url}" alt="${escapeHTML(name)}" loading="lazy"
-                onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';">`;
-            preview += `<div class="attachment-file-icon" style="display:none;"><i class="fas ${icon}" style="color:${color}"></i></div>`;
-        } else {
-            preview = `<div class="attachment-file-icon"><i class="fas ${icon}" style="color:${color}"></i></div>`;
-        }
+
+        // One shared tile builder, so this grid matches every other grid.
+        // See buildAttachmentPreview() for what used to differ here.
+        const preview = buildAttachmentPreview(norm, index);
 
         // A broken record renders a div, NOT an anchor - see the isBroken note.
         const body = isBroken
@@ -5878,6 +5943,17 @@ const autoUploadTicketId = new WeakMap();
  * submitting the resolution.
  * @param {HTMLElement} widget  root `.upload-widget` element
  */
+            // ⚠️ NO loading="lazy" HERE, ON PURPOSE.
+            // Every one of these tiles is rendered into a modal that is display:none at
+            // render time, and Chrome defers a lazy image whose ancestor has no layout --
+            // then frequently never loads it at all. No error fires either, so the
+            // onerror fallback below cannot rescue it, and the result is a permanently
+            // BLANK tile that still opens the file correctly when clicked. That is exactly
+            // the "blank image icon, but the video plays on Cloudinary" report.
+            // These grids hold a handful of tiles, so lazy loading saved nothing anyway.
+            // decoding="async" keeps the decode off the main thread with none of that risk.
+            // (The REPORTS DATABASE tree in script.js DOES keep loading="lazy": it is a long
+            // scrollable list in a permanently visible panel, which is the case lazy is for.)
 function renderAutoUploadFileList(widget) {
     const dropzone = widget.querySelector('.upload-dropzone');
     const listEl = widget.querySelector('.upload-file-list');
@@ -5896,7 +5972,7 @@ function renderAutoUploadFileList(widget) {
 
         let preview;
         if (isImage) {
-            preview = `<img class="upload-file-thumb" src="${url}" alt="${escapeHTML(name)}" loading="lazy"
+            preview = `<img class="upload-file-thumb" src="${url}" alt="${escapeHTML(name)}" decoding="async"
                 onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';">`;
             preview += `<span class="upload-file-icon" style="display:none;"><i class="fas ${icon}" style="color:${color}"></i></span>`;
         } else if (isVideo) {
@@ -6164,8 +6240,18 @@ window.saveEditTicket = async function() {
         updatedData.rejectionReason = firebase.firestore.FieldValue.delete();
         updatedData.rejection = firebase.firestore.FieldValue.delete();
         updatedData.resolution = {
+            // ⚠️ SPREAD THE OLD RESOLUTION. This object used to be built from
+            // scratch with only notes/attachments/resolvedAt/resolvedBy, so every
+            // other key was DROPPED — `operatorFootage` above all. Re-submitting a
+            // ticket this way therefore erased the record of which clips the
+            // operator had actually captured, and splitApprovalAttachments() then
+            // fell back to re-filing all of that CCTV as the manager's own uploads.
+            ...oldResolution,
             notes: updatedData.resolutionNotes,
             attachments: existingResAtt.length > 0 ? existingResAtt : existingAtt,
+            // Carried forward explicitly, and through the shared helper, so the
+            // field survives this write with exactly the same content it had.
+            operatorFootage: mergeOperatorFootage(existingTicket, []),
             resolvedAt: firebase.firestore.FieldValue.serverTimestamp(),
             resolvedBy: (auth.currentUser && auth.currentUser.email) || 'unknown'
         };
@@ -6719,21 +6805,21 @@ function isViolationCloudinaryConfigured() {
  * @param {string} rawUrl stored `secure_url`
  * @returns {string} a clickable URL ('' when no URL is available)
  */
-function normalizeFileUrl(rawUrl) {
-    const value = String(rawUrl || '').trim();
-    if (!value || value === '#') return '';
-    if (/^(blob:|data:)/i.test(value)) return value;
-
-    let url = value;
-    for (let i = 0; i < 3; i++) {
-        if (!/%[0-9A-Fa-f]{2}/.test(url)) break;
-        let decoded;
-        try { decoded = decodeURI(url); } catch (e) { break; }
-        if (decoded === url) break;
-        url = decoded;
+// The attachment helpers now live in js/attachment-viewer.js, which BOTH
+// main.html and ownerdashboard.html load. The Owner Dashboard used to keep its
+// own copies (a third getAttachmentColor, a second formatFileSize, and a
+// thumbnail-less icon row), so the same file rendered differently per page.
+// These are thin delegates: every existing call site keeps working by name,
+// but there is now exactly ONE implementation.
+function attachmentHelpers() {
+    const v = window.AttachmentViewer;
+    if (!v || !v.helpers) {
+        throw new Error('js/attachment-viewer.js must load before script.js — check the script tag order in main.html');
     }
-    try { return encodeURI(url); } catch (e) { return url; }
+    return v.helpers;
 }
+
+function normalizeFileUrl(rawUrl) { return attachmentHelpers().normalizeFileUrl(rawUrl); }
 
 /**
  * Sanitize a single folder / public-id path segment for Cloudinary.
@@ -7561,35 +7647,42 @@ function renderViolationAttachments(grid, attachments, editable) {
         return;
     }
     grid.innerHTML = list.map((att, index) => {
-        const url = normalizeFileUrl(att.secure_url);
-        const name = att.name || ('Attachment ' + (index + 1));
-        const sizeText = att.bytes ? formatFileSize(att.bytes) : '';
-        const isImage = att.resource_type === 'image';
-        const isVideo = att.resource_type === 'video';
-        const icon = getAttachmentIcon(att.resource_type, att.format);
-        const color = getAttachmentColor(att.format);
+        // ⚠️ normalizeAttachment() here too. This renderer used to read
+        // att.secure_url directly, so it understood ONE writer's shape only: an
+        // attachment stored as `url` / `fileName` / `mimeType` (the Area Manager
+        // form's shape) rendered as a dead card here, while the same file rendered
+        // correctly in the four ticket grids. Normalising is what makes the same
+        // file look the same in every grid.
+        const norm = normalizeAttachment(att);
+        const url = norm ? norm.url : '';
+        const name = (norm && norm.name) || ('Attachment ' + (index + 1));
+        const sizeText = (norm && norm.bytes) ? formatFileSize(norm.bytes) : '';
 
-        let preview;
-        if (isImage) {
-            preview = `<img src="${getCloudinaryThumbUrl(url, 200, 200)}" alt="${escapeHTML(name)}" loading="lazy"
-                onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';">`;
-            preview += `<div class="attachment-file-icon" style="display:none;"><i class="fas ${icon}" style="color:${color}"></i></div>`;
-        } else if (isVideo) {
-            preview = `<div class="attachment-file-icon"><i class="fas fa-play-circle" style="color:${color}"></i></div>`;
-        } else {
-            preview = `<div class="attachment-file-icon"><i class="fas ${icon}" style="color:${color}"></i></div>`;
-        }
+        // ⚠️ WITHOUT A URL THERE IS NO ANCHOR AT ALL. This renderer had no such
+        // guard and emitted href="" unconditionally — `href=""` is a real link
+        // to the CURRENT PAGE, so clicking a URL-less violation attachment
+        // navigated the whole app to its own URL. That bug was already fixed in
+        // the other four grids; this one was simply missed.
+        const isBroken = !url;
 
+        // One shared tile builder, so this grid matches every other grid.
+        // See buildAttachmentPreview() for what used to differ here.
+        const preview = buildAttachmentPreview(norm, index);
+
+        const publicId = (norm && norm.publicId) || '';
         const removeBtn = editable
-            ? `<button type="button" class="violation-att-remove" title="Remove attachment" data-public-id="${escapeHTML(att.public_id || '')}"><i class="fas fa-times"></i></button>`
+            ? `<button type="button" class="violation-att-remove" title="Remove attachment" data-public-id="${escapeHTML(publicId)}"><i class="fas fa-times"></i></button>`
             : '';
 
+        // A broken record renders a div, NOT an anchor - see the isBroken note.
+        const body = isBroken
+            ? `<div class="attachment-preview" title="Link unavailable">${preview}</div>`
+            : `<a href="${url}" target="_blank" rel="noopener noreferrer" class="attachment-preview" title="${escapeHTML(name)}">${preview}</a>`;
+
         return `
-            <div class="attachment-item" data-public-id="${escapeHTML(att.public_id || '')}">
+            <div class="attachment-item" data-public-id="${escapeHTML(publicId)}">
                 ${removeBtn}
-                <a href="${url}" target="_blank" rel="noopener noreferrer" class="attachment-preview" title="${escapeHTML(name)}">
-                    ${preview}
-                </a>
+                ${body}
                 <div class="attachment-meta">
                     <span class="attachment-name" title="${escapeHTML(name)}">${escapeHTML(name)}</span>
                     ${sizeText ? `<span class="attachment-size">${escapeHTML(sizeText)}</span>` : ''}
@@ -8506,200 +8599,30 @@ function bindViolationTreePanel() {
 }
 
 // ===== IN-APP ATTACHMENT VIEWER (lightbox) =====
-// One modal reused everywhere (folder browser, evidence grids, upload previews)
-// so files are reviewed without leaving the dashboard. Only ONE media element
-// exists at a time and the body is emptied on close, so flipping through many
-// videos never piles up hidden players (or their bandwidth).
+// The viewer itself now lives in js/attachment-viewer.js, so main.html and
+// ownerdashboard.html share ONE implementation and ONE injected dialog. See
+// that file's header for why duplicating it here was not an option.
+//
+// Two thin shims remain on this page:
+//
+//  * openAttachmentViewerForRow() feeds the viewer the violations folder-browser
+//    rows. Those are divs carrying `data-url`, not anchors, so the shared
+//    delegated click handler cannot see them. It passes #violationFolderBrowser
+//    explicitly because the module takes the root as a PARAMETER -- that is
+//    precisely so it never depends on a script.js-only global, which would be
+//    undefined on the Owner Dashboard.
+//  * bindAttachmentViewer() is now a no-op. It is kept so the call in initApp()
+//    (and any future caller) stays valid; the module self-binds on
+//    DOMContentLoaded. Calling init() twice is safe -- the module guards it.
 
-let viewerItems = [];
-let viewerIndex = 0;
-
-/** Guess the viewer type from the delivery URL's extension. */
-function attachmentViewerTypeFromUrl(url) {
-    let path = String(url || '');
-    const q = path.indexOf('?');
-    if (q !== -1) path = path.slice(0, q);
-    const m = path.match(/\.([a-z0-9]+)$/i);
-    const ext = m ? m[1].toLowerCase() : '';
-    if (['mp4', 'webm', 'mov', 'm4v', 'ogv'].indexOf(ext) !== -1) return 'video';
-    if (ext === 'pdf') return 'pdf';
-    if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].indexOf(ext) !== -1) return 'image';
-    return 'other';
-}
-
-/** Type for a preview anchor: sniff its media children / PDF icon, then URL. */
-function attachmentViewerTypeFor(anchor, url) {
-    if (anchor && anchor.querySelector) {
-        if (anchor.querySelector('video')) return 'video';
-        if (anchor.querySelector('img')) return 'image';
-        if (anchor.querySelector('.fa-file-pdf')) return 'pdf';
-    }
-    return attachmentViewerTypeFromUrl(url);
-}
-
-function attachmentViewerIconClass(type) {
-    if (type === 'video') return 'fa-file-video';
-    if (type === 'pdf') return 'fa-file-pdf';
-    if (type === 'image') return 'fa-file-image';
-    return 'fa-file';
-}
-
-function attachmentViewerNameFor(anchor) {
-    const nameEl = anchor.querySelector('.attachment-name, .upload-file-name');
-    return (nameEl && nameEl.textContent) || anchor.getAttribute('title') || 'Attachment';
-}
-
-/** Draw the media for the current item — exactly one element in the body. */
-function renderAttachmentViewerItem() {
-    const item = viewerItems[viewerIndex];
-    if (!item) { closeAttachmentViewer(); return; }
-
-    const type = item.type || attachmentViewerTypeFor(item.anchor, item.url);
-    if (attachmentViewerIcon) attachmentViewerIcon.className = 'fas ' + attachmentViewerIconClass(type);
-    if (attachmentViewerTitle) attachmentViewerTitle.textContent = item.name || 'Attachment';
-    if (attachmentViewerCount) {
-        attachmentViewerCount.textContent = viewerItems.length > 1
-            ? (viewerIndex + 1) + ' / ' + viewerItems.length
-            : '';
-    }
-    const hasPrevNext = viewerItems.length > 1;
-    if (attachmentViewerPrev) attachmentViewerPrev.style.display = hasPrevNext ? '' : 'none';
-    if (attachmentViewerNext) attachmentViewerNext.style.display = hasPrevNext ? '' : 'none';
-    if (attachmentViewerOpen) attachmentViewerOpen.disabled = !(item.url && item.url !== '#');
-
-    attachmentViewerBody.innerHTML = '';
-    if (!item.url || item.url === '#') {
-        attachmentViewerBody.innerHTML = '<div class="attachment-viewer-empty"><i class="fas fa-file"></i><br>No preview available for this file.</div>';
-        return;
-    }
-
-    if (type === 'image') {
-        const img = document.createElement('img');
-        img.className = 'attachment-viewer-media';
-        img.src = item.url;
-        img.alt = item.name || 'Attachment';
-        attachmentViewerBody.appendChild(img);
-    } else if (type === 'video') {
-        const video = document.createElement('video');
-        video.className = 'attachment-viewer-media';
-        video.src = item.url;
-        video.controls = true;
-        video.playsInline = true;
-        video.preload = 'metadata';
-        attachmentViewerBody.appendChild(video);
-        const p = video.play();
-        if (p && p.catch) p.catch(() => { /* autoplay blocked — controls still work */ });
-    } else if (type === 'pdf') {
-        // Browser-native PDF rendering. If Cloudinary PDF delivery is disabled
-        // the iframe stays blank — the "Open" button above is the fallback.
-        const frame = document.createElement('iframe');
-        frame.src = item.url;
-        frame.title = item.name || 'PDF preview';
-        attachmentViewerBody.appendChild(frame);
-    } else {
-        attachmentViewerBody.innerHTML = '<div class="attachment-viewer-empty"><i class="fas fa-file"></i><br>No inline preview for this file type — use the Open button above.</div>';
-    }
-}
-
-function showAttachmentViewerAt(index) {
-    if (!viewerItems.length) return;
-    viewerIndex = ((index % viewerItems.length) + viewerItems.length) % viewerItems.length;
-    renderAttachmentViewerItem();
-}
-
-function viewerStep(delta) {
-    showAttachmentViewerAt(viewerIndex + delta);
-}
-
-/** Open the viewer with a list of {url, name, anchor?} items. */
-function openAttachmentViewer(items, index) {
-    const list = (Array.isArray(items) ? items : []).filter(x => x && x.url);
-    if (!list.length) return;
-    viewerItems = list;
-    showAttachmentViewerAt(Math.max(0, Math.min(index || 0, list.length - 1)));
-    attachmentViewerModal.classList.add('active');
-    document.body.style.overflow = 'hidden';
-}
-
-function closeAttachmentViewer() {
-    if (!attachmentViewerModal) return;
-    attachmentViewerModal.classList.remove('active');
-    attachmentViewerBody.innerHTML = '';   // stops video playback + frees memory
-    document.body.style.overflow = '';
-    viewerItems = [];
-    viewerIndex = 0;
-}
-
-/** Viewer items from the folder browser's current file rows. */
 function openAttachmentViewerForRow(row) {
-    const url = row.dataset.url;
-    if (!url || url === '#') return;
-    const rows = Array.prototype.slice.call((violationFolderBrowser || document).querySelectorAll('.vdrive-row.file'));
-    const items = rows.map(r => ({
-        url: r.dataset.url || '',
-        name: (r.querySelector('.vdrive-name') || {}).textContent || 'Attachment'
-    }));
-    openAttachmentViewer(items, Math.max(0, rows.indexOf(row)));
+    const viewer = window.AttachmentViewer;
+    if (viewer) viewer.openForRows(violationFolderBrowser || document, row);
 }
 
-/**
- * Wire the viewer once: header buttons, Esc / arrow keys, backdrop click, and
- * one delegated click handler that turns EVERY preview anchor in the app
- * (ticket grids, violation evidence, upload previews) into a viewer opener.
- * Middle-click / ctrl-click still fall through to the browser default.
- */
 function bindAttachmentViewer() {
-    if (!attachmentViewerModal) return;
-    if (attachmentViewerClose) attachmentViewerClose.addEventListener('click', closeAttachmentViewer);
-    if (attachmentViewerPrev) attachmentViewerPrev.addEventListener('click', () => viewerStep(-1));
-    if (attachmentViewerNext) attachmentViewerNext.addEventListener('click', () => viewerStep(1));
-    if (attachmentViewerOpen) {
-        attachmentViewerOpen.addEventListener('click', () => {
-            const item = viewerItems[viewerIndex];
-            if (item && item.url && item.url !== '#') window.open(item.url, '_blank', 'noopener');
-        });
-    }
-    attachmentViewerModal.addEventListener('click', (e) => {
-        if (e.target === attachmentViewerModal) closeAttachmentViewer();
-    });
-    document.addEventListener('keydown', (e) => {
-        if (!attachmentViewerModal.classList.contains('active')) return;
-        if (e.key === 'Escape') {
-            e.preventDefault();
-            closeAttachmentViewer();
-        } else if (e.key === 'ArrowLeft') {
-            e.preventDefault();
-            viewerStep(-1);
-        } else if (e.key === 'ArrowRight') {
-            e.preventDefault();
-            viewerStep(1);
-        }
-    });
-    document.addEventListener('click', (e) => {
-        if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-        const a = e.target.closest('a.attachment-preview, a.upload-file-preview');
-        if (!a) return;
-
-        // ⚠️ preventDefault() MUST come before the URL check.
-        // An anchor with `href=""` (or `href="#"`) is a REAL link to the current
-        // page, so bailing out before this line let a dead attachment navigate the
-        // whole app to its own URL instead of opening the viewer — the reported
-        // "clicking the file takes me to main.html". The renderers no longer emit
-        // an empty href at all; this is the second line of defence for any markup
-        // that still has one.
-        e.preventDefault();
-
-        const url = a.getAttribute('href');
-        if (!url || url === '#') return;
-        const scope = a.closest('.attachments-grid, .upload-file-list, .modal-body, .modal-fields') || a.parentElement || document;
-        const anchors = Array.prototype.slice.call(scope.querySelectorAll('a.attachment-preview, a.upload-file-preview'));
-        const items = anchors.map(el => ({
-            url: el.getAttribute('href') || '',
-            name: attachmentViewerNameFor(el),
-            anchor: el
-        }));
-        openAttachmentViewer(items, Math.max(0, anchors.indexOf(a)));
-    });
+    const viewer = window.AttachmentViewer;
+    if (viewer) viewer.init();
 }
 
 // ===== VIOLATIONS: EVENT BINDINGS + GLOBAL EXPORTS =====

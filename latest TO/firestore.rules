@@ -355,7 +355,21 @@ service cloud.firestore {
       //   is provable for an Area Manager too. Without it they could open a
       //   single thread but the LIST query would be refused, and the list is
       //   what finds their conversations at all.
-      allow read: if canReadChat(chatId)
+      // ⚠️ READ IS MEMBERSHIP, NOT ROLE — AND THAT MUST STAY THAT WAY.
+// The reset tool does NOT need a superadmin read here, because Firestore has no
+// "delete this collection" primitive: the ids are COMPUTED instead (room ids are
+// deterministic — `dm_` + the two sorted URL-encoded emails joined by `__`, see
+// dmRoomIdFor in chat.js — and the reset derives every candidate pair from the
+// `users` collection, which a superadmin already reads). `allow delete` does
+// not reference `resource`, so a delete is authorised without ever reading the
+// document. That is what lets the chats be wiped with this rule UNCHANGED.
+//
+// An earlier version of this grant added `isSuperAdmin() ||` here so the tool
+// could LIST the rooms. It worked, and it was wrong: a room doc carries
+// `lastMessage`, so the grant exposed the final line of every private 1:1
+// conversation to any superadmin — exactly what this rule exists to prevent.
+// test/chat-rules.test.js caught it.
+allow read: if canReadChat(chatId)
         || (isChatRole() && 'members' in resource.data
             && selfEmail() in resource.data.members);
 
@@ -406,8 +420,24 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys()
              .hasOnly(['type', 'title', 'lastMessage', 'lastMessageAt', 'lastSenderEmail']);
 
-      // Nothing is ever deleted: removing a room would orphan its messages.
-      allow delete: if false;
+      // Nothing is deleted by anyone in the app: removing a room would orphan
+      // its messages, which Firestore does NOT cascade — the room doc goes and
+      // the whole thread stays behind as unreachable garbage.
+      //
+      // ⚠️ SUPERADMIN DELETE — FOR THE RESET TOOL ONLY (docs/reset.html).
+      // This was `if false` because a room is meant to be permanent. A
+      // superadmin is the whole app's trust anchor (isSuperAdmin() gates branch
+      // creation, ticket deletion and user deletion already), so one more
+      // superadmin-gated delete does not widen the blast radius of a compromised
+      // superadmin by a meaningful amount.
+      //
+      // ⚠️ THE SUBCOLLECTIONS ARE DELIBERATELY NOT DELETABLE. messages/presence/
+      // reactions/readReceipts/profiles all stay locked to their existing rules,
+      // so this grant CANNOT be used to read or delete anything inside a private
+      // 1:1 thread — only the room doc. Deleting the room makes every subcollection
+      // unreachable (the conversation list queries `chats`), which is what makes
+      // it a full chat wipe without a single privacy regression.
+      allow delete: if isSuperAdmin();
 
       match /messages/{messageId} {
         allow read: if canReadChat(chatId);

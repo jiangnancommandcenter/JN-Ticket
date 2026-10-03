@@ -631,6 +631,103 @@
         }
         .owner-reopen-item-text { font-size: 0.8rem; color: var(--text-primary); }
         .owner-reopen-item-meta { font-size: 0.72rem; color: var(--text-muted); }
+
+        /* ---- Request additional footage (non-expired ticket modal) ----
+           Deliberately a SEPARATE set of rules from .owner-reopen-form above, not
+           a shared class. The two forms look alike on purpose (both are a normal,
+           expected action on a ticket, so neither may read as an error), but they
+           mean different things and only one ever renders per ticket — sharing the
+           selectors would make a change to one silently restyle the other. */
+        .owner-footage-card { margin-top: 16px; }
+        .owner-footage-form {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            padding: 14px;
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+            background: var(--bg-tertiary);
+        }
+        .owner-footage-form label {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            font-size: 0.85rem;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+        .owner-footage-form label i { color: var(--color-primary); }
+        .owner-footage-form textarea {
+            width: 100%;
+            min-height: 76px;
+            max-height: 200px;
+            padding: 10px 12px;
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            background: var(--bg-input);
+            color: var(--text-primary);
+            font-family: inherit;
+            font-size: 0.85rem;
+            line-height: 1.5;
+            resize: vertical;
+        }
+        .owner-footage-form textarea:focus {
+            outline: none;
+            border-color: var(--color-primary);
+            /* Bare token, no rgba() fallback — the focus-ring convention the app
+               uses elsewhere, and what test/owner-dark-mode.test.js enforces. */
+            box-shadow: 0 0 0 3px var(--color-primary-bg);
+        }
+        .owner-footage-actions {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-top: 8px;
+        }
+        .owner-footage-hint {
+            flex: 1;
+            min-width: 180px;
+            font-size: 0.75rem;
+            line-height: 1.4;
+            color: var(--text-muted);
+        }
+        .owner-footage-status {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            padding: 14px;
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+            background: var(--bg-tertiary);
+            font-size: 0.8rem;
+            font-weight: 700;
+        }
+        .owner-footage-status.pending { color: var(--color-warning); }
+        .owner-footage-history {
+            margin-top: 14px;
+            padding-top: 12px;
+            border-top: 1px solid var(--border-color);
+        }
+        .owner-footage-history h4 {
+            margin: 0 0 8px;
+            font-size: 0.8rem;
+            font-weight: 700;
+            color: var(--text-secondary);
+        }
+        .owner-footage-item {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            padding: 9px 11px;
+            margin-bottom: 6px;
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            background: var(--bg-tertiary);
+        }
+        .owner-footage-item-text { font-size: 0.8rem; color: var(--text-primary); }
+        .owner-footage-item-meta { font-size: 0.72rem; color: var(--text-muted); }
     </style>
     <!-- ============================================================ -->
     <!--  OWNER DASHBOARD PRESENTATION POLISH                         -->
@@ -1321,6 +1418,15 @@
     <script src="js/refresh-state.js"></script>
     <!-- Theme manager: dark/light toggle + notification bell -->
     <script src="js/theme.js"></script>
+    <!-- ===== In-app attachment viewer (image / video / PDF lightbox) =====
+         THE SAME dialog main.html uses. This page used to render every
+         attachment as a bare <a target="_blank">, so ticket files opened in
+         a new tab instead of this modal -- because neither the dialog NOR its
+         click handling existed here. The module injects the dialog, so this
+         page needs no markup for it. It also supplies the shared attachment
+         card builder, so this page renders the SAME .attachment-item tiles --
+         with real image/video thumbnails -- as main.html. -->
+    <script src="js/attachment-viewer.js"></script>
     <script src="js/owner-dashboard.js"></script>
     <!-- ===== Area Manager ticket submission form (full-screen modal) =====
          Loaded AFTER owner-dashboard.js on purpose: the dashboard installs the

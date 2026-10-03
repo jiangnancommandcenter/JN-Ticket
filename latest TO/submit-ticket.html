@@ -1676,10 +1676,16 @@
                 if (footage.length > 0) {
                     return footage.slice();
                 }
-                // Otherwise show the merged list minus the requester's own files.
+                // ⚠️ THE REQUESTER'S LIST IS AUTHORITATIVE, and is checked FIRST.
+                // This used to prefer `footage` and derive the operator's files by
+                // subtraction ("everything not in the footage list"), so any clip
+                // missing from a truncated footage array was silently re-attributed
+                // to the requester. `requesterAttachments` is written once at ticket
+                // creation from the manager's own upload array, so it is an exact
+                // record — using it directly repairs those tickets for free.
                 if (requester && requester.length > 0) {
-                    var keys = keySet(requester);
-                    return merged.filter(function(a) { return !keys.has(keyOf(a)); });
+                    var reqKeys = keySet(requester);
+                    return merged.filter(function(a) { return !reqKeys.has(keyOf(a)); });
                 }
                 return merged;
             }

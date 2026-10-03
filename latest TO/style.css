@@ -3898,6 +3898,7 @@ branch name, let alone pick one. */
     color: var(--text-muted);
 }
 
+
 /* Link below video attachments to open the full file */
 .attachment-open-link {
     display: inline-flex;
@@ -3940,6 +3941,63 @@ branch name, let alone pick one. */
     background: rgba(220,38,38,0.85);
 }
 
+/* =================================================================
+   ADDED FOOTAGE — a clip uploaded in response to a footage request.
+   Marks the FILE, not a section: the whole point is to distinguish the
+   added clips inside the operator's footage list without splitting it
+   into two headings the reader has to compare.
+
+   The outline is drawn with `outline` + `outline-offset` rather than
+   `border`, because .attachment-item already owns its border and an
+   `overflow: hidden` card cannot show a thicker one. It is also why the
+   ring sits OUTSIDE the card: it reads as an annotation on the clip
+   rather than as part of it.
+   ================================================================= */
+.attachment-item--added {
+    outline: 2px solid var(--color-primary);
+    outline-offset: -2px;
+    background: var(--color-primary-bg);
+}
+/* Hover must not repaint the card in a colour that erases the marking —
+   .attachment-item:hover above sets border-color only, so this is belt
+   and braces for any future theme that adds a background to :hover. */
+.attachment-item--added:hover {
+    border-color: var(--color-primary);
+}
+
+/* ⚠️ A BANNER, NOT A BADGE. This was a 22px circular ➕, which read as a CONTROL
+   — an "add" button sitting on the clip — rather than as a state the clip is in.
+   A small "NEW" ribbon states it in words: unambiguous at a glance, translatable,
+   and needing no icon font. Sized to hug the word rather than fixed, because a
+   22px circle cannot hold three letters legibly.
+
+   Flush to the corner (0,0), not inset: .attachment-item has `overflow: hidden`,
+   so the card's own rounded corner clips the banner into the corner shape for
+   free. Any inset would show the card's background behind it. */
+.attachment-added-badge {
+    position: absolute;
+    /* TOP-LEFT: .attachment-remove already owns top-right, and a superadmin's
+       added clip shows BOTH. */
+    top: 0;
+    left: 0;
+    z-index: 2;
+    padding: 3px 8px;
+    /* Rounded on the two INNER corners only — the outer two are cut by the card. */
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    background: var(--color-primary);
+    color: #fff;
+    font-size: 0.58rem;
+    font-weight: 800;
+    letter-spacing: 0.7px;
+    line-height: 1.4;
+    text-transform: uppercase;
+    text-shadow: 0 1px 1px rgba(0, 0, 0, 0.3);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.28);
+    /* Purely a marker: it must never swallow the click that opens the clip, or
+       the thumb under the banner would be a dead zone. */
+    pointer-events: none;
+}
+
 /* Track Ticket Attachments (Submit page) */
 .attachments-inline {
     display: flex;
@@ -3948,121 +4006,18 @@ branch name, let alone pick one. */
     padding: 6px 0;
 }
 
-/* Owner attachment area (Owner report modal) — items flow side by side */
+/* Owner attachment area (Owner report modal).
+   Mirrors .attachments-grid on purpose. The tiles inside are the SHARED
+   .attachment-item cards (js/attachment-viewer.js), not the local
+   owner-attachment-row / owner-attachment-image chips this block used to
+   style -- those renderers are gone, so those rules were deleted. Keeping it a
+   flex-wrap row would leave the cards content-sized; a grid gives them the
+   same 150px tracks every other attachment grid in the app uses. */
 .owner-attachment-list {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-start;
-    gap: 10px;
-}
-
-.owner-attachment-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 7px 11px;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-md);
-    color: var(--text-primary);
-    text-decoration: none;
-    transition: var(--transition);
-    max-width: 100%;
-}
-
-.owner-attachment-row:hover {
-    border-color: var(--color-primary);
-    background: var(--color-primary-bg);
-}
-
-.owner-attachment-row > i:first-child {
-    font-size: 0.95rem;
-    flex-shrink: 0;
-    width: 18px;
-    text-align: center;
-}
-
-.owner-attachment-name {
-    flex: 0 1 auto;
-    min-width: 0;
-    max-width: 220px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    font-size: 0.8rem;
-    font-weight: 500;
-}
-
-.owner-attachment-size {
-    font-size: 0.7rem;
-    color: var(--text-muted);
-    flex-shrink: 0;
-    white-space: nowrap;
-}
-
-.owner-attachment-row > .fa-external-link-alt {
-    font-size: 0.72rem;
-    color: var(--text-muted);
-    flex-shrink: 0;
-}
-
-/* Small image thumbnail tiles — sit side by side with the file chips */
-.owner-attachment-image {
-    display: flex;
-    flex-direction: column;
-    width: 130px;
-    padding: 6px;
-    background: var(--bg-card);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-md);
-    text-decoration: none;
-    color: var(--text-primary);
-    transition: var(--transition);
-}
-
-.owner-attachment-image:hover {
-    border-color: var(--color-primary);
-    box-shadow: var(--shadow-sm);
-}
-
-.owner-attachment-image img {
-    display: block;
-    width: 100%;
-    height: 92px;
-    object-fit: contain;
-    background: var(--bg-primary);
-    border-radius: 6px;
-}
-
-.owner-attachment-image .owner-attachment-file-icon {
-    display: none;
-    width: 100%;
-    height: 92px;
-    align-items: center;
-    justify-content: center;
-    font-size: 2rem;
-    background: var(--bg-tertiary);
-    border-radius: 6px;
-}
-
-.owner-attachment-image-name {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding-top: 6px;
-    font-size: 0.68rem;
-    font-weight: 500;
-    color: var(--text-secondary);
-    max-width: 100%;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.owner-attachment-image-name i {
-    color: var(--text-muted);
-    font-size: 0.65rem;
-    flex-shrink: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 12px;
+    padding: 4px 0;
 }
 
 /* ============================================================== */
@@ -5305,6 +5260,135 @@ WHAT WAS ACTUALLY BROKEN ON A PHONE, measured at 390px:
         font-size: 0.72rem;
         line-height: 1.4;
         color: var(--text-muted);
+    }
+
+    /*
+    ============================================================================
+    COMPACT CARD — 8 stacked label/value lines -> 2
+    ============================================================================
+    ⚠️ WHAT WAS ACTUALLY WRONG. The card conversion above was correct but
+    literal: it turned all EIGHT columns into label/value pairs, so one ticket
+    became an eight-line block (Ticket / Created / Branch / Reporter / Incident
+    / Status / Access / Actions) and a manager had to scroll three or four
+    tickets to reach the fourth. Every one of those lines is a place to stop
+    reading. What a manager scans a list FOR is "which ticket, and can I still
+    open it" — so that is all the card now shows:
+
+        BNW-TIX002 · Banawe              [Resolved] [Access closed]
+        Requesting clearer till-count footage
+
+    DROPPED, and why each is safe to drop:
+      Created   — the ticket number is the identifier people quote; the date is
+                  in the modal, which is one tap away and is where you go to
+                  act on it anyway.
+      Reporter  — this is the manager's OWN report. They filed it, or their
+                  branch did. It is the same value on every row they can see.
+      Incident  — the longest field in the table and the one that wraps most,
+                  which is what pushed rows from two lines to four. Kept, but
+                  demoted to a single truncated line UNDER the header instead
+                  of a labelled row of its own, because it is the only one of
+                  the three that tells you whether you are looking at the right
+                  ticket at a glance.
+
+    ⚠️ THE CELLS ARE NOT REMOVED — THEY ARE HIDDEN WITH CSS. The <th>/<td>
+    counts are static and test/owner-mobile.test.js requires them to agree with
+    the renderer's `data-label` count; the DESKTOP table still shows all eight
+    columns, and the modal still shows every field. This is a phone-only
+    presentation decision, so it belongs in the phone layer.
+    */
+    #ownerTicketsTable tbody td[data-label="Created"],
+    #ownerTicketsTable tbody td[data-label="Reporter"] {
+        display: none;
+    }
+
+    /* The ticket number becomes the card's TITLE: no label, left-aligned,
+       full width, and the only thing at a glance that says which row this is. */
+    #ownerTicketsTable tbody td[data-label="Ticket"] {
+        display: block;
+        padding: 0;
+        text-align: left;
+        font-size: 0.95rem;
+        font-weight: 700;
+        color: var(--text-primary);
+    }
+    #ownerTicketsTable tbody td[data-label="Ticket"]::before {
+        content: none;
+    }
+    #ownerTicketsTable tbody td[data-label="Ticket"] .ticket-link {
+        /* The whole card is already tappable (tr onclick), so this is a
+           pointer hint only — never underline it, which would imply a
+           separate link target that does not exist. */
+        color: inherit;
+        font-weight: 700;
+    }
+
+    /*
+    BRANCH + THE TWO BADGES SHARE ONE LINE. `justify-content: space-between`
+    is inherited from the label/value rule above; overriding it here is what
+    actually puts the branch on the left and the badges on the right. The
+    labels are dropped because the badges are self-labelling ("Resolved",
+    "Access closed") — a "Status:" prefix above a badge that says "Resolved"
+    is noise.
+    */
+    #ownerTicketsTable tbody td[data-label="Branch"],
+    #ownerTicketsTable tbody td[data-label="Status"],
+    #ownerTicketsTable tbody td[data-label="Access"] {
+        padding: 0;
+        justify-content: flex-start;
+        gap: 8px;
+    }
+    #ownerTicketsTable tbody td[data-label="Branch"]::before,
+    #ownerTicketsTable tbody td[data-label="Status"]::before,
+    #ownerTicketsTable tbody td[data-label="Access"]::before {
+        content: none;
+    }
+    #ownerTicketsTable tbody td[data-label="Status"] {
+        display: inline-flex;
+        margin-left: auto;
+    }
+
+    /*
+    ⚠️ THE INCIDENT LINE KEEPS ITS OWN data-label, so the phone layer can
+    restyle it — but it is rendered as ONE TRUNCATED LINE, not a wrapped
+    paragraph. `white-space: nowrap` + `text-overflow: ellipsis` is the whole
+    point: the full text is one tap away in the modal, and a title that wraps
+    to four lines is what made the old card tall.
+    */
+    #ownerTicketsTable tbody td[data-label="Incident"] {
+        display: block;
+        padding: 6px 0 0;
+        text-align: left;
+        font-size: 0.78rem;
+        color: var(--text-muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    #ownerTicketsTable tbody td[data-label="Incident"]::before {
+        content: none;
+    }
+
+    /*
+    THE ACTIONS FOOTER IS GONE. The card already carries `cursor: pointer` and
+    an :active state, and the eye button opened the same modal the row did —
+    so on a phone it was a 44px tap target duplicating the card itself, which
+    is a whole extra row of height per ticket for no extra capability.
+
+    ⚠️ TARGETED BY `td:not([data-label])`, NEVER BY `:last-child`.
+    The empty-state row's single colspan cell IS a last child, so a `:last-child`
+    rule would hide "No tickets found for your branches." — leaving a blank
+    bordered card where the explanation should be. Requiring the cell to have NO
+    data-label matches exactly the one Actions cell (the actions cell is the
+    documented single unlabelled cell in the row).
+
+    ⚠️ AND NOT `.empty-state` EXPLICITLY, TOO. The empty-state rule above sits at
+    the SAME specificity as this one and EARLIER in the file, so source order
+    would hand this rule the win and hide the empty state anyway. Restating the
+    exclusion here makes the rule correct on its own, instead of dependent on
+    where it happens to be placed relative to another rule.
+    */
+    #ownerTicketsTable tbody td:not([data-label]):not(.empty-state) {
+        display: none;
     }
 
     /*

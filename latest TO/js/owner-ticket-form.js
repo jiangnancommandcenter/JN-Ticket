@@ -384,7 +384,18 @@
         return mb >= 1 ? mb.toFixed(1) + ' MB' : Math.max(1, Math.round(bytes / 1024)) + ' KB';
     }
 
-    function renderGrid() {
+                    // ⚠️ NO loading="lazy" HERE, ON PURPOSE.
+                // Every one of these tiles is rendered into a modal that is display:none at
+                // render time, and Chrome defers a lazy image whose ancestor has no layout --
+                // then frequently never loads it at all. No error fires either, so the
+                // onerror fallback below cannot rescue it, and the result is a permanently
+                // BLANK tile that still opens the file correctly when clicked. That is exactly
+                // the "blank image icon, but the video plays on Cloudinary" report.
+                // These grids hold a handful of tiles, so lazy loading saved nothing anyway.
+                // decoding="async" keeps the decode off the main thread with none of that risk.
+                // (The REPORTS DATABASE tree in script.js DOES keep loading="lazy": it is a long
+                // scrollable list in a permanently visible panel, which is the case lazy is for.)
+function renderGrid() {
         if (!els.grid) return;
         if (!uploadedAttachments.length) {
             els.grid.style.display = 'none';
@@ -394,9 +405,17 @@
         els.grid.style.display = 'grid';
         els.grid.innerHTML = uploadedAttachments.map(function (a) {
             var isImg = /^image\//.test(a.mimeType || '');
-            var thumb = isImg
-                ? '<span class="attachment-preview"><img src="' + escapeHTML(a.url) + '" alt="' + escapeHTML(a.fileName) + '" loading="lazy"></span>'
-                : '<span class="attachment-file-icon"><i class="fas fa-file"></i></span>';
+            // The thumbnail is an ANCHOR so the shared viewer (js/attachment-viewer.js)
+            // can open it. It used to be a <span>, which the delegated handler --
+            // `a.attachment-preview` -- could never match, so a file picked here could
+            // not be previewed at all before submitting. Clicking the card now opens
+            // the lightbox; ctrl-click still reaches the browser for a new tab.
+            var thumbInner = isImg
+                ? '<img src="' + escapeHTML(a.url) + '" alt="' + escapeHTML(a.fileName) + '" decoding="async">'
+                : '<i class="fas fa-file"></i>';
+            var thumb = '<a href="' + escapeHTML(a.url) + '" target="_blank" rel="noopener noreferrer" class="'
+                + (isImg ? 'attachment-preview' : 'attachment-file-icon')
+                + '" title="' + escapeHTML(a.fileName) + '">' + thumbInner + '</a>';
             return [
                 // .attachment-item / .attachment-preview / .attachment-meta /
                 // .attachment-remove are the app's existing card classes —
