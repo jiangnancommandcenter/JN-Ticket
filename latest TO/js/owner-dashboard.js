@@ -1179,6 +1179,20 @@ window.openOwnerReport = function(reportId) {
 
     // Get full ticket data including attachments
     const rawData = snap.data();
+    // ⚠️ THE ID MUST BE GRAFTED ON BY HAND. `snap.data()` returns ONLY the
+    // document's fields — the id is a property of the SNAPSHOT, not of the
+    // data, so `rawData.id` is `undefined` here.
+    //
+    // That broke the first-open stamp completely: markTrackingAccessOpened() does
+    // `db.collection('tickets').doc(ticket.id).update(...)`, which threw on the
+    // undefined path before any network call, was swallowed by its own catch, and
+    // surfaced as "Could not start the viewing-access timer" — i.e. the viewing
+    // window never started for ANY manager, on any ticket, ever.
+    //
+    // loadOwnerTickets() already gets this right with
+    // `snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }))`. This line
+    // is that same graft, applied to the single-document read.
+    rawData.id = reportId;
     const data = normalizeTicketReport(rawData);
 
     // ⚠️ FIRST OPEN STARTS THE CLOCK.
@@ -1219,11 +1233,31 @@ window.openOwnerReport = function(reportId) {
             }
         } else {
             const result = await window.markTrackingAccessOpened(rawData);
-            // ⚠️ ONLY 'write-failed' IS WORTH TELLING THE MANAGER ABOUT. Every
-            // other reason is correct behaviour: already-stamped is the normal
-            // second open, and legacy-no-marker means the ticket predates the
-            // feature and is handled by the approvedAt + window fallback.
-            if (result && result.stamped === false && result.reason === 'write-failed') {
+            // ⚠️ TWO FAILURE CLASSES, HANDLED DIFFERENTLY.
+            //
+            // 'no-id' is a BUG in this page, not a condition the manager
+            // caused — the ticket was read without its document id attached. It
+            // gets the same loud treatment as a missing helper, because until it
+            // is fixed no window on this page can ever start.
+            //
+            // 'write-failed' is an environment problem (offline, rules). The
+            // report itself still renders, so the manager gets a toast.
+            //
+            // Everything else — already-stamped (a normal second open),
+            // legacy-no-marker (predates the feature), not-approved — is correct
+            // behaviour and stays QUIET. Toasting on those would train people to
+            // dismiss toasts without reading them, and the one time it matters
+            // is the time they would have learned to ignore it.
+            if (result && result.stamped === false && result.reason === 'no-id') {
+                console.error(
+                    '[expiry] the ticket object passed to markTrackingAccessOpened has no id. ' +
+                    'Firestore snap.data() returns fields only — the id must be grafted on ' +
+                    'from snap.id. No viewing window can start until this is fixed.'
+                );
+                if (typeof ownerToast === 'function') {
+                    ownerToast('Viewing-access timer cannot start on this page — a code fix is needed.', 'error');
+                }
+            } else if (result && result.stamped === false && result.reason === 'write-failed') {
                 console.error('[expiry] could not record the first-open moment:', result.error);
                 if (typeof ownerToast === 'function') {
                     ownerToast('Could not start the viewing-access timer for this ticket.', 'error');
@@ -1785,7 +1819,7 @@ function renderOwnerTickets(allTickets) {
       // cluttered: the LABEL was doing the damage, not the badges.
       //
       // `.status-badge.expired` is kept as the CLASS even though the visible
-      // word is now "Access closed": that class is shared with the superadmin
+      // word is now "No access": that class is shared with the superadmin
       // Approvals table, and test/owner-ticket-approval.test.js pins it by name.
       // Only the WORD changes — the class is a machine-readable hook, and
       // renaming it here would be a breaking change for code this page does
@@ -1799,8 +1833,18 @@ function renderOwnerTickets(allTickets) {
           + (reopenCount > 1 ? ` ×${reopenCount}` : '')
           + `</span>`;
       } else if (expired) {
+        // ⚠️ THE ROW STAYS — this cell just changes what it SAYS. The ticket
+        // number, branch, reporter and incident all remain visible so the
+        // manager can still see the ticket exists and chase it; only the report,
+        // the findings and the CCTV are withheld. Removing the row instead was
+        // considered and rejected: a ticket vanishing from a list reads as data
+        // loss, and the manager has no way to tell it apart from a mistake.
+        //
+        // The word is "No access", which is the fact in the manager's own terms.
+        // The old "Access closed" described the mechanism; this describes what
+        // it means for them right now.
         accessCell = `<span class="status-badge expired" title="${escapeHTML(expiryTitle)}">`
-          + `Access closed</span>`;
+          + `No access</span>`;
       // ⚠️ THE LIVE COUNTDOWN IS THE `else` — the genuinely OPEN case. Only here is
       // there a deadline to count down to, so it is the only branch that gets a
       // ticking element. Everything above it is a static state.

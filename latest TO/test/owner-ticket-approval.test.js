@@ -309,14 +309,34 @@ assert(
     /status-badge expired/.test(listSrc),
     'an expired approved row must carry the Access-closed badge — the row STAYS (badged), it is not hidden'
 );
-// The visible WORD changed to "Access closed" (the bare "Expired" read as the
-// ticket being expired, not the viewing window closing), but the CLASS did not:
+// The visible WORD is "No access" (the bare "Expired" read as the ticket being
+// expired, not the viewing window closing; "Access closed" then described the
+// mechanism rather than the consequence), but the CLASS did not:
 // `.status-badge.expired` is shared with the superadmin Approvals table in
 // script.js, so renaming it here would be a breaking change for a page this
 // file does not own. Word and class are now deliberately different things.
 assert(
-    /Access closed/.test(listSrc) && /status-badge expired/.test(listSrc),
-    'the expired row must say "Access closed" while still using the shared .status-badge.expired class'
+    /No access/.test(listSrc) && /status-badge expired/.test(listSrc),
+    'the expired row must say "No access" while still using the shared .status-badge.expired class'
+);
+
+// ⚠️ THE ROW MUST NOT BE FILTERED AWAY WHEN IT EXPIRES. The requirement is that
+// the ticket stays visible with its metadata — number, branch, reporter,
+// incident — and only the report and footage are withheld. A ticket silently
+// disappearing from the list reads as data loss and gives the manager no way to
+// know it exists or to ask for it back.
+//
+// The default filter value must therefore be "all". This assertion exists
+// because "all" is the first <option>, which is the default ONLY by position —
+// reorder the options and expired tickets start vanishing, with nothing in the
+// renderer to explain it.
+const filterMarkup = fs.readFileSync(path.join(ROOT, 'ownerdashboard.html'), 'utf8');
+const accessFilter = filterMarkup.slice(filterMarkup.indexOf('id="ownerTicketAccessFilter"'));
+assert(
+    /<option value="all"[^>]*>\s*All\s*<\/option>/.test(accessFilter.slice(0, accessFilter.indexOf('</select>'))),
+    'the FIRST option of the Access filter must be value="all". The expired predicate returns '
+    + 'false for it, so any other default silently hides every expired ticket from the list — '
+    + 'the exact "ticket disappears" behaviour this row is supposed to avoid.'
 );
 
 // ⚠️ STATUS AND ACCESS MUST BE SEPARATE CELLS. They answer different questions

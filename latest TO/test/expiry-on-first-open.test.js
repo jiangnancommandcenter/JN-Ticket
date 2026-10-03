@@ -171,7 +171,7 @@ console.log('Testing that the viewing window starts on first open...');
         // keep the old approvedAt + window behaviour. If this regressed, every
         // ticket already in the database would silently become permanent.
         const legacyFresh = { approvalStatus: 'approved', approvedAt: new Date(Date.now() - WIN / 2) };
-        const legacyOld = { approvalStatus: 'approved', approvedAt: new Date(Date.now() - 2 * WIN) };
+        const legacyOld = { id: TICKET_ID, approvalStatus: 'approved', approvedAt: new Date(Date.now() - 2 * WIN) };
         assert.strictEqual(w.getTrackingAccessExpiry(legacyFresh).getTime(),
             legacyFresh.approvedAt.getTime() + WIN,
             'a pre-feature ticket must still expire on approvedAt + window');
@@ -278,6 +278,74 @@ console.log('\n=== ⚠️ a missing helper must be LOUD, never a silent skip ===
         'rejected write means the window will not run, and the manager should be told.');
 }
 
+// ===========================================================================
+console.log('\n=== ⚠️ the ticket must carry its DOCUMENT ID, not just its fields ===');
+// ===========================================================================
+{
+    // ⚠️ THE BUG THAT STOPPED EVERY WINDOW FROM EVER STARTING.
+    //
+    // Firestore's `DocumentSnapshot.data()` returns the document's FIELDS only.
+    // The id is a property of the SNAPSHOT. So this line:
+    //
+    //     db.collection('tickets').doc(reportId).get().then(snap => {
+    //         const rawData = snap.data();        // <-- rawData.id is UNDEFINED
+    //         await markTrackingAccessOpened(rawData);
+    //     })
+    //
+    // handed a ticket object with no id to a helper that does
+    // `db.collection('tickets').doc(ticket.id).update(...)`. `doc(undefined)`
+    // throws inside the SDK before any network call; the helper's own catch
+    // swallowed it and reported a bare `null`, which read as "declined for some
+    // reason" — indistinguishable from a normal second open. The visible result
+    // was that a ticket NEVER expired for ANY manager, ever, with nothing in the
+    // console.
+    //
+    // The rest of the codebase already gets this right — loadOwnerTickets() uses
+    // `snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }))` — which is
+    // exactly why this slipped through: the correct idiom was right there.
+    const ownerJs = stripComments(
+        fs.readFileSync(path.join(ROOT, 'js', 'owner-dashboard.js'), 'utf8')
+    );
+    const opener = ownerJs.slice(ownerJs.indexOf('window.openOwnerReport = function'));
+    const readIdx = opener.indexOf('.data()');
+    const graftIdx = opener.search(/rawData\.id\s*=/);
+
+    assert(readIdx > -1, 'openOwnerReport() must read the ticket');
+    assert(graftIdx > -1,
+        'openOwnerReport() must graft the document id onto the object it keeps: ' +
+        '`rawData.id = reportId`. Without it `rawData.id` is undefined, `doc(undefined)` ' +
+        'throws, and NO viewing window can ever start.');
+    assert(graftIdx > readIdx,
+        'the id must be grafted AFTER the `.data()` read that strips it — grafting it ' +
+        'earlier would be overwritten by the assignment of rawData itself.');
+
+    // And the helper must refuse an id-less object by name rather than letting the
+    // SDK throw an opaque error.
+    const helper = src.slice(src.indexOf('window.markTrackingAccessOpened ='));
+    assert(/if\s*\(\s*!ticket\.id\s*\)\s*return\s*\{\s*stamped:\s*false,\s*reason:\s*'no-id'\s*\}/.test(helper),
+        'markTrackingAccessOpened() must check for a missing id and report it as ' +
+        "'no-id'. Otherwise `doc(undefined)` throws inside the SDK and is caught as a " +
+        "generic 'write-failed' — which is precisely how this hid for so long.");
+
+    // Behavioural proof, not just text: an id-less ticket must be refused, and it
+    // must be refused WITHOUT any Firestore call being attempted.
+    let attempts = 0;
+    const sandbox3 = {
+        window: {}, console: { warn: () => {} },
+        firebase: { firestore: { FieldValue: { serverTimestamp: () => 'TS' } } },
+        db: { collection: () => ({ doc: () => ({ update: async () => { attempts++; } }) }) },
+        auth: { currentUser: { email: 'm@e.com' } }
+    };
+    vm.createContext(sandbox3);
+    vm.runInContext(helperSrc, sandbox3);
+    const idless = { approvalStatus: 'approved', accessWindowStartsOnOpen: true };
+    const refused = await sandbox3.window.markTrackingAccessOpened(idless, new Date());
+    assert.strictEqual(refused.reason, 'no-id',
+        'an approved ticket with no id must be refused as no-id');
+    assert.strictEqual(attempts, 0,
+        'an id-less ticket must be refused BEFORE any Firestore write is attempted');
+}
+
 console.log('\n× First-open tests passed (an approved ticket with no first-open stamp has a ' +
         'NULL expiry and never expires, however far in the past it was approved; opening it ' +
         'writes ONE server-timestamped accessOpenedAt that is mirrored onto the local copy so ' +
@@ -289,7 +357,11 @@ console.log('\n× First-open tests passed (an approved ticket with no first-open
         'approvedAt + window rule they were created under; a stored expiry still wins over a ' +
         'stale stamp; and a failed write reports write-failed with the underlying error instead of ' +
         'throwing, leaving the report readable). Every refusal returns a DISTINGUISHABLE reason ' +
-        '— not-approved, legacy-no-marker, already-stamped, write-failed — because they used to ' +
-        'all return a bare null, which is how a stale cached firebase.js presented as "approved ' +
-        'tickets never expire" with nothing in the console to explain it).');
+        '— no-id, not-approved, legacy-no-marker, already-stamped, write-failed — because they used to ' +
+        'all return a bare null. That is how a ticket read with snap.data() and handed to the ' +
+        'helper WITHOUT its document id stopped EVERY viewing window from ever starting, ' +
+        'silently: doc(undefined) throws inside the SDK, the catch reported null, and null ' +
+        'looked identical to a normal second open. openOwnerReport() now grafts the id on from ' +
+        'the argument it already had, the helper refuses an id-less object by name before ' +
+        'attempting any write, and an id-less ticket is proven never to reach Firestore).');
 })();

@@ -609,6 +609,12 @@ window.getTrackingAccessExpiry = function(ticket) {
  *
  * Reason values:
  *   'no-ticket'          — nothing was passed
+ *   'no-id'              — the object carries no document id. Firestore's
+ *                          `snap.data()` returns fields only, so an object read
+ *                          that way has `id === undefined` and `doc(undefined)`
+ *                          throws. Caught here with a nameable reason rather than
+ *                          surfacing as a bare SDK error — this exact case
+ *                          silently stopped EVERY window from ever starting.
  *   'not-approved'       — nothing to view yet
  *   'legacy-no-marker'   — approved before this feature; its deadline is already
  *                          set by the approvedAt + window fallback, so it must
@@ -620,6 +626,10 @@ window.getTrackingAccessExpiry = function(ticket) {
  */
 window.markTrackingAccessOpened = async function(ticket, now) {
     if (!ticket) return { stamped: false, reason: 'no-ticket' };
+    // ⚠️ CHECKED BEFORE ANY WRITE, AND ITS OWN REASON. `doc(undefined)` throws
+    // inside the SDK, which would otherwise be indistinguishable from a genuine
+    // permission denial in the catch below.
+    if (!ticket.id) return { stamped: false, reason: 'no-id' };
     if ((ticket.approvalStatus || 'pending') !== 'approved') return { stamped: false, reason: 'not-approved' };
     if (!window.trackingAccessStartsOnOpen(ticket)) return { stamped: false, reason: 'legacy-no-marker' };
     if (window.getTrackingAccessOpenedAt(ticket)) return { stamped: false, reason: 'already-stamped' };

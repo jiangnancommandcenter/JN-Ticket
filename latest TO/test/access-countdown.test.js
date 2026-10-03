@@ -106,7 +106,7 @@ console.log('\n=== the ticker updates text IN PLACE ===');
     const lapsed = ticker.slice(guard);
     assert(/renderOwnerTickets\s*\(\s*ownerAllTicketsCache\s*\)/.test(lapsed),
         'when a countdown reaches zero the table must be re-rendered so the badge flips to ' +
-        '"Access closed". A clock that ticks to 0:00 over a still-open row is a lie.');
+        '"No access". A clock that ticks to 0:00 over a still-open row is a lie.');
     assert(/openOwnerReport\s*\(\s*ownerReopenTicketId\s*\)/.test(lapsed),
         'when a countdown reaches zero the OPEN MODAL must be re-derived too — that is where ' +
         'the report and the footage are, and they must stop being shown.');
