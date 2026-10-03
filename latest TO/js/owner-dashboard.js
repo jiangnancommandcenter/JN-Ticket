@@ -680,6 +680,117 @@ function ownerTicketExpiry(ticket) {
   } catch (e) {
     return null;
   }
+// ==============================================================
+//  LIVE EXPIRY COUNTDOWN (the Access column + the open modal)
+//
+//  The window runs from the moment the manager FIRST OPENS the ticket, so the
+//  badge has to count DOWN and, above all, has to be VISIBLE while they read.
+//  Before this, an open ticket's Access cell was a muted dash: the report simply
+//  appeared and the window silently began draining. Nobody could tell that any
+//  clock existed, let alone how long was left.
+//
+//  ⚠️ ONE INTERVAL FOR THE WHOLE PAGE, AND IT EDITS TEXT IN PLACE. This is not
+//  `renderOwnerTickets()` on a timer: that rebuilds every row, which would
+//  restart the interval, blow away focus and any open dropdown, and re-sort
+//  under the manager's cursor. The ticker instead finds the already-rendered
+//  nodes and writes only their textContent, so the table is never rebuilt
+//  except when something genuinely expires.
+// ==============================================================
+
+/**
+ * Compact human countdown, largest two units: "45s", "2m 10s", "3h 4m", "2d 3h".
+ *
+ * ⚠️ DELIBERATELY ADAPTIVE. With the window time-compressed to 1 minute for
+ * testing the useful resolution is seconds; at the real 2-day value "47:59:59"
+ * would be unreadable. Whole seconds only below an hour keeps the test window
+ * legible without making production worse.
+ */
+function formatAccessCountdown(msLeft) {
+    if (msLeft <= 0) return 'expired';
+    var s = Math.floor(msLeft / 1000);
+    var d = Math.floor(s / 86400); s -= d * 86400;
+    var h = Math.floor(s / 3600); s -= h * 3600;
+    var m = Math.floor(s / 60); s -= m * 60;
+    if (d > 0) return d + 'd ' + h + 'h';
+    if (h > 0) return h + 'h ' + m + 'm';
+    if (m > 0) return m + 'm ' + s + 's';
+    return s + 's';
+}
+
+/**
+ * Markup for one live countdown.
+ *
+ * Both moments are carried on the node as data attributes: `data-expires-at`
+ * (epoch ms) so the ticker can compute what is left without re-deriving the
+ * deadline, and `data-window-ms` so urgency can be judged as a FRACTION of the
+ * window rather than in absolute seconds. The fraction matters — a fixed
+ * "under 10 minutes" rule would be every single second of a time-compressed
+ * test window (so permanently red while testing) and would never fire once
+ * on a real 2-day window.
+ */
+function accessCountdownHtml(untilMs, title) {
+    var until = Number(untilMs);
+    var total = Number(window.TRACKING_ACCESS_WINDOW_MS) || 0;
+    return '<span class="owner-access-timer" data-owner-countdown="1"'
+        + ' data-expires-at="' + until + '"'
+        + ' data-window-ms="' + total + '"'
+        + ' title="' + escapeHTML(title || 'Viewing access closes') + '">'
+        + escapeHTML(formatAccessCountdown(until - Date.now()))
+        + '</span>';
+}
+
+let ownerCountdownTicker = null;
+
+/**
+ * Tick every live countdown on the page. Cheap enough to run once a second: it
+ * touches only the countdown spans and does nothing at all when the Area
+ * Manager has no window (HR and superadmins render none).
+ */
+function tickOwnerCountdowns() {
+    var nodes = document.querySelectorAll('[data-owner-countdown]');
+    if (!nodes.length) return;
+
+    var now = Date.now();
+    var lapsed = false;
+
+    for (var i = 0; i < nodes.length; i++) {
+        var el = nodes[i];
+        var until = Number(el.getAttribute('data-expires-at'));
+        if (!until) continue;
+        var left = until - now;
+
+        if (left <= 0) {
+            lapsed = true;
+            el.textContent = 'expired';
+            el.classList.add('urgent');
+            continue;
+        }
+        el.textContent = formatAccessCountdown(left);
+        var total = Number(el.getAttribute('data-window-ms')) || 0;
+        el.classList.toggle('urgent', total > 0 && left < total * 0.1);
+    }
+
+    // ⚠️ ONCE THE CLOCK RUNS OUT, RE-DERIVE THE UI. The badge must flip to
+    // "Access closed" and — the part that actually matters — an OPEN MODAL must
+    // begin withholding the report. A manager can sit reading while the window
+    // drains, and the evidence is taken away the moment it hits zero.
+    if (!lapsed) return;
+
+    if (ownerCountdownTicker) { clearInterval(ownerCountdownTicker); ownerCountdownTicker = null; }
+    try { renderOwnerTickets(ownerAllTicketsCache); } catch (e) { /* the tab still works */ }
+    // Re-open the report in place so it re-reads and re-renders the expired
+    // notice. markTrackingAccessOpened() is a no-op now the stamp exists, so
+    // this cannot restart the clock it just ended.
+    if (ownerReopenTicketId) {
+        try { window.openOwnerReport(ownerReopenTicketId); } catch (e) { /* ignore */ }
+    }
+}
+
+function startOwnerCountdownTicker() {
+    if (ownerCountdownTicker) return;
+    ownerCountdownTicker = setInterval(tickOwnerCountdowns, 1000);
+    tickOwnerCountdowns();
+}
 }
 
 /**
@@ -1344,8 +1455,26 @@ window.openOwnerReport = function(reportId) {
       </div>
     `;
 
-    if (ownerReportModalBody) ownerReportModalBody.innerHTML = html;
+    // ⚠️ A LIVE CLOCK INSIDE THE MODAL, not just in the list. The manager reads the
+    // report HERE, with the footage on screen, and that is exactly when the
+    // window is draining. A countdown they can only see by closing the modal and
+    // looking at the table would be useless. When it reaches zero the ticker
+    // re-opens this same modal, which swaps in the expired notice and withholds
+    // the payload.
+    const modalBanner = (expired || !expiresAt)
+      ? ''
+      : '<div class="owner-access-live">'
+        + '<i class="fas fa-hourglass-half"></i> Viewing access closes in '
+        + accessCountdownHtml(expiresAt.getTime(),
+            'Viewing access closes ' + formatDate(expiresAt))
+        + '</div>';
+
+    if (ownerReportModalBody) ownerReportModalBody.innerHTML = modalBanner + html;
     if (ownerReportModal) ownerReportModal.classList.add('active');
+    // ⚠️ START ONLY FOR A VIEWER WITH A REAL, RUNNING WINDOW. HR and superadmins
+    // get no countdown (nothing expires for them), so spinning an interval that
+    // would find zero nodes every second would be pure waste.
+    if (!expired && expiresAt) startOwnerCountdownTicker();
   }).catch((error) => {
     console.error('Failed to open report:', error);
   });
@@ -1446,6 +1575,15 @@ function closeOwnerReportModalFn() {
   ownerReopenTicketId = '';
   // Same for the footage form — a stale id must never outlive the modal.
   ownerFootageTicketId = '';
+  // ⚠️ THE CLOCK IS NOT STOPPED BY CLOSING THE MODAL — the expiry keeps running,
+  // which is the whole rule. Only the DISPLAY is torn down: the interval would
+  // otherwise tick against hidden nodes, costing a document sweep every second
+  // for nothing. The list rows carry their own countdowns, so anything still on
+  // screen keeps ticking.
+  if (ownerCountdownTicker && !document.querySelector('[data-owner-countdown]')) {
+    clearInterval(ownerCountdownTicker);
+    ownerCountdownTicker = null;
+  }
   try { if (window.RefreshState) window.RefreshState.clearModal('owner'); } catch (e) { /* ignore */ }
 }
 
@@ -1566,6 +1704,17 @@ function renderOwnerTickets(allTickets) {
         ? 'Viewing access closed ' + formatDate(expiresAt)
         : 'Approved — viewing access closed';
 
+      // ⚠️ COMPUTED SEPARATELY FROM `expiresAt` ON PURPOSE. `expiresAt` is the
+      // CLOSED moment, used only by the expired branches below, and is null while
+      // the ticket is still readable. The countdown needs the deadline in the
+      // OPEN case too — that is the only time there is anything left to count
+      // down — so it takes the same helper without the `expired` gate. Null here
+      // covers "no window at all" and "not opened yet", which correctly render
+      // no countdown.
+      const windowAccessExpiry = expiryAppliesToViewer() && !expired
+        ? ownerTicketExpiry(t)
+        : null;
+
       // ⚠️ APPROVED BUT NOT YET OPENED. Not expired, and there is no date to
       // show: the window has not started. It gets its own quiet label because
       // the neighbouring states are misleading without it — a muted dash reads
@@ -1617,6 +1766,14 @@ function renderOwnerTickets(allTickets) {
       } else if (expired) {
         accessCell = `<span class="status-badge expired" title="${escapeHTML(expiryTitle)}">`
           + `Access closed</span>`;
+      // ⚠️ THE LIVE COUNTDOWN IS THE `else` — the genuinely OPEN case. Only here is
+      // there a deadline to count down to, so it is the only branch that gets a
+      // ticking element. Everything above it is a static state.
+      } else if (windowAccessExpiry) {
+        accessCell = accessCountdownHtml(
+          windowAccessExpiry.getTime(),
+          'Viewing access closes ' + formatDate(windowAccessExpiry)
+        );
       } else if (awaitingFirstOpen) {
         // Sits between "expired" and the neutral dash. It is NOT a green "Open"
         // badge: opening is what starts the clock, so calling it open would be
@@ -1671,6 +1828,13 @@ function renderOwnerTickets(allTickets) {
     if (ownerTicketPagination) {
       ownerTicketPagination.innerHTML = `<span class="page-info">${tickets.length} ticket(s)</span>`;
     }
+    // ⚠️ THE ROW COUNTDOWNS NEED THE TICKER TOO, not just the modal's. Started
+    // here as well as on open because the LIST is where a manager triages
+    // several tickets at once — a countdown that only exists inside a modal
+    // gives no way to compare them. `startOwnerCountdownTicker()` is idempotent
+    // (it returns early when the interval is already live), so re-rendering on
+    // every snapshot does not stack intervals.
+    startOwnerCountdownTicker();
   } catch (error) {
     console.error('Failed to render owner tickets:', error);
     if (ownerTicketsBody) {

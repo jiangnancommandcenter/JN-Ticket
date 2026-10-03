@@ -4913,6 +4913,67 @@ branch name, let alone pick one. */
     color: var(--text-muted);
 }
 
+/* -------------------------------------------------------------- */
+/*  LIVE EXPIRY COUNTDOWN — Access column + the open report modal  */
+/* -------------------------------------------------------------- */
+
+/*
+   The clock is the only part of the Access column that changes on its own, so it
+   is styled as a small monospace readout rather than a badge: a pill that
+   repaints every second reads as a flicker, and `tabular-nums` stops the row
+   from twitching as the digits change width.
+
+   `.urgent` is applied by the ticker as a FRACTION of the window (last 10%),
+   not an absolute number of seconds — so it fires correctly whether the window
+   is the time-compressed 1 minute used for testing or the real 2 days.
+*/
+.owner-access-timer {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--color-warning);
+    white-space: nowrap;
+}
+
+.owner-access-timer.urgent {
+    color: var(--color-danger);
+}
+
+/* The banner across the top of an OPEN report. This is where the manager is
+   actually reading the footage, so this is the placement that matters — a
+   countdown visible only in the list is a countdown nobody is looking at. */
+.owner-access-live {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 16px;
+    padding: 10px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--color-warning-border);
+    background: var(--color-warning-bg);
+    color: var(--color-warning);
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+
+.owner-access-live .owner-access-timer {
+    color: inherit;
+}
+
+/*
+   ⚠️ SCOPED TO .owner-access-live, and deliberately NOT to the Access column.
+   The urgency recolour lives inside the banner only. In a table of a dozen rows
+   a cell that repaints itself red every second is unreadable, and the countdown
+   there is context — the banner is the thing you act on.
+*/
+.owner-access-live .owner-access-timer.urgent {
+    color: var(--color-danger);
+}
+
 /*
 ⚠️ HIDDEN ON DESKTOP, SHOWN IN THE PHONE CARD — AND THAT IS THE POINT.
 

@@ -668,7 +668,15 @@ assert(expiredUi.length > 0, 'could not isolate the re-access UI block in openOw
 // rest of openOwnerReport() would report a false leak.
 const nonExpiredTemplate = modalSrc.slice(
     modalSrc.indexOf('` : `'),
-    modalSrc.indexOf('ownerReportModalBody.innerHTML = html;')
+    // ⚠️ ANCHOR ON THE LEFT-HAND SIDE ONLY. This used to search for the whole
+    // statement `ownerReportModalBody.innerHTML = html;`, so adding the countdown
+    // banner (now `= modalBanner + html`) made indexOf return -1 — and
+    // `slice(start, -1)` then ran to the END of the function, swallowing the
+    // delegated submit handler that legitimately names #ownerReopenForm. The
+    // failure was real but the CAUSE was not: nothing had leaked into the open
+    // template. Matching the assignment target keeps the slice correct no matter
+    // what is prepended to `html`.
+    modalSrc.indexOf('ownerReportModalBody.innerHTML =')
 );
 assert(nonExpiredTemplate.length > 0, 'could not isolate the non-expired template');
 assert(nonExpiredTemplate.indexOf('ownerReopenForm') === -1,
