@@ -497,10 +497,25 @@ function buildTicketApprovedEmail(ticket) {
     // the business ("Ticket request was done, please check …").
     const headline = EMAIL_HEADLINE_PREFIX + label;
 
-    const windowUntil = shouldMentionViewingWindow(ticket)
-        ? formatEmailDateTime(window.getTrackingAccessExpiry(ticket))
+    // ⚠️ NO DATE, NO COUNTDOWN. The window starts when the requester FIRST OPENS the
+    // ticket, so at the moment this email is sent there is no expiry to put a
+    // date on. The old copy read "Viewing access is available until <date>",
+    // derived from `accessExpiresAt` written at APPROVAL — which is exactly the
+    // deadline this feature removed. Promising a date here would be promising
+    // something the system no longer decides at approval time.
+    const windowMs = window.TRACKING_ACCESS_WINDOW_MS;
+    const windowLabel = (typeof window.formatTrackingAccessWindow === 'function')
+        ? window.formatTrackingAccessWindow(windowMs)
+        : '2 days';
+    // Same time-compression guard as shouldMentionViewingWindow(): while the
+    // window is compressed for testing, promising "1 minute" to a store manager
+    // is nonsense, so the sentence is dropped rather than reworded.
+    const windowStartsOnOpen = Number.isFinite(Number(windowMs))
+        && Number(windowMs) >= 24 * 60 * 60 * 1000;
+    const windowLine = windowStartsOnOpen
+        ? 'Viewing access starts when you first open the ticket, and stays available for '
+            + windowLabel + '.'
         : '';
-    const windowLine = windowUntil ? 'Viewing access is available until ' + windowUntil + '.' : '';
 
     // The URL sits on its OWN LINE in the plain-text part. That is what lets
     // Gmail/Outlook auto-detect and linkify it — a URL glued to the end of a
@@ -626,10 +641,11 @@ async function verifyOwnerDashboardLink() {
 /**
  * Build the "re-access approved" message for the store/manager.
  *
- * `accessExpiresAt` is passed explicitly (not read off the ticket) because the
- * caller has just written the FRESH window to Firestore while the in-memory
- * copy may still hold the old, already-expired date — showing a past date
- * would be worse than showing nothing at all.
+ * ⚠️ NO EXPIRY DATE IS QUOTED. A Resend RE-ARMS the window rather than starting
+ * it — it clears `accessOpenedAt` and the manager's next open begins a fresh
+ * one — so at the moment this email is sent there is no deadline that exists.
+ * The old copy read "Viewing access is available until <date>"; that date was
+ * computed at Resend time and has no equivalent under the first-open rule.
  */
 function buildAccessApprovedEmail(ticket, accessExpiresAt) {
     const label = ticketEmailLabel(ticket);
@@ -644,14 +660,31 @@ function buildAccessApprovedEmail(ticket, accessExpiresAt) {
     const dashboardUrl = resolveOwnerDashboardUrl();
     const senderName = String(emailConfigValue('senderName', 'Jiangnan Command Center'));
 
+    // ⚠️ NO DATE HERE EITHER — same reason as the approval email. Kept as a
+    // fallback for callers that DO pass a real deadline (scripts/seed.js's
+    // preview helper does); the live flow passes nothing and gets the
+    // "starts when you open it" line below.
     const expiry = accessExpiresAt
         || (typeof window.getTrackingAccessExpiry === 'function'
             ? window.getTrackingAccessExpiry(ticket)
             : null);
     const expiryDate = expiry ? (expiry instanceof Date ? expiry : new Date(expiry)) : null;
-    const windowLine = (expiryDate && !isNaN(expiryDate.getTime()) && expiryDate.getTime() > Date.now())
+    const hasRealExpiry = expiryDate
+        && !isNaN(expiryDate.getTime())
+        && expiryDate.getTime() > Date.now();
+    const windowMs = window.TRACKING_ACCESS_WINDOW_MS;
+    const windowLabel = (typeof window.formatTrackingAccessWindow === 'function')
+        ? window.formatTrackingAccessWindow(windowMs)
+        : '2 days';
+    // Dropped entirely while the window is time-compressed for testing.
+    const windowInProduction = Number.isFinite(Number(windowMs))
+        && Number(windowMs) >= 24 * 60 * 60 * 1000;
+    const windowLine = hasRealExpiry
         ? 'Viewing access is available until ' + formatEmailDateTime(expiryDate) + '.'
-        : '';
+        : (windowInProduction
+            ? 'Viewing access starts when you first open the ticket, and stays available for '
+                + windowLabel + '.'
+            : '');
 
     const lines = [
         ACCESS_EMAIL_HEADLINE,

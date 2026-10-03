@@ -381,21 +381,36 @@ assert.strictEqual(w.EmailService.shouldMentionViewingWindow(
     'a 1-minute window must never be advertised in a real email');
 assert(message.text.indexOf('Viewing access') === -1);
 
-// Production window (2 days) + a live expiry → the line IS included.
+// Production window (2 days). ⚠️ THE SENTENCE NO LONGER CARRIES A DATE.
+// The window starts when the requester FIRST OPENS the ticket, so at the moment
+// this email is built there is no deadline to quote. Promising "available until
+// <date>" here would promise a value the system no longer computes at approval
+// time — the exact bug this change fixed.
 const DAY_WINDOW = 2 * DAY;
 w.TRACKING_ACCESS_WINDOW_MS = DAY_WINDOW;
-const liveWindow = ticket({ approvalStatus: 'approved', accessExpiresAt: new Date(Date.now() + DAY_WINDOW) });
-assert.strictEqual(w.EmailService.shouldMentionViewingWindow(liveWindow), true);
-assert(w.EmailService.buildTicketApprovedEmail(liveWindow).text.indexOf('Viewing access is available until') > -1);
+const liveWindow = ticket({ approvalStatus: 'approved', accessWindowStartsOnOpen: true });
+const liveText = w.EmailService.buildTicketApprovedEmail(liveWindow).text;
+assert(liveText.indexOf('starts when you first open the ticket') > -1,
+    'the approval email must say the window starts on first open');
+assert(liveText.indexOf('available until') === -1,
+    'the approval email must NOT quote an expiry date — the window has not started yet');
+assert(liveText.indexOf('2 days') > -1,
+    'the email must still state the LENGTH of the window, which is known up front');
 
-// An ALREADY expired window must never be advertised as available.
-const staleWindow = ticket({ approvalStatus: 'approved', accessExpiresAt: new Date(Date.now() - DAY_WINDOW) });
-assert.strictEqual(w.EmailService.shouldMentionViewingWindow(staleWindow), false);
-assert(w.EmailService.buildTicketApprovedEmail(staleWindow).text.indexOf('Viewing access') === -1);
+// An ALREADY expired window is irrelevant to the approval email now — it never
+// quotes a date at all. Pinned so that reintroducing a date cannot slip back in.
+const staleWindow = ticket({ approvalStatus: 'approved', accessWindowStartsOnOpen: true });
+assert(w.EmailService.buildTicketApprovedEmail(staleWindow).text.indexOf('available until') === -1,
+    'no ticket shape may make the approval email promise a date again');
 
-// Legacy ticket: no stored expiry → derived from approvedAt + window.
+// Legacy ticket (no marker): still uses the approvedAt + window fallback, and
+// still must not be advertised with a date by THIS email.
 assert.strictEqual(w.EmailService.shouldMentionViewingWindow(
     ticket({ approvalStatus: 'approved', approvedAt: new Date(Date.now() - 1000) })), true);
+assert(w.EmailService.buildTicketApprovedEmail(
+    ticket({ approvalStatus: 'approved', approvedAt: new Date(Date.now() - 1000) })).text
+    .indexOf('available until') === -1,
+    'a legacy ticket must not be advertised with a date either');
 
 // ===== 6. Bridge delivery =====
 (async function () {

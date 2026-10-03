@@ -525,11 +525,53 @@ window.toTrackingDate = function(value) {
 };
 
 /**
+ * ⚠️ TRUE WHEN THIS TICKET'S CLOCK STARTS ON FIRST VIEW, NOT AT APPROVAL.
+ *
+ * Written by the superadmin at APPROVAL, in place of `accessExpiresAt`. This
+ * flag is the ONLY way to tell "approved under the new rule, nobody has opened
+ * it yet" from "approved under the old rule, whose window is already running".
+ *
+ * ⚠️ WITHOUT IT, THE OLD FALLBACK SILENTLY DEFEATS THE FEATURE. Firestore
+ * cannot distinguish an ABSENT field from a null one, so an approval that
+ * simply stops writing `accessExpiresAt` produces a document shaped exactly
+ * like a pre-feature ticket. `getTrackingAccessExpiry()` would then take its
+ * legacy branch — `approvedAt + window` — and the countdown would start at
+ * approval again, for every new ticket, with nothing on screen to explain it.
+ * An explicit boolean is the discriminator; do not "simplify" it away.
+ */
+window.trackingAccessStartsOnOpen = function(ticket) {
+    return !!(ticket && ticket.accessWindowStartsOnOpen === true);
+};
+
+/**
+ * When the manager/store FIRST OPENED the approved ticket, or null if never.
+ * The stamp is written once and never rewritten, so closing the modal does not
+ * extend anything — the clock runs continuously from the first open.
+ */
+window.getTrackingAccessOpenedAt = function(ticket) {
+    if (!ticket) return null;
+    return window.toTrackingDate(ticket.accessOpenedAt);
+};
+
+/**
  * Moment (Date) when the manager/store loses viewing access, or null when the
  * ticket is not approved / has no derivable window.
- * Priority: stored `accessExpiresAt` (written on approval + every resend),
- * else legacy fallback `approvedAt + 2 days` for tickets approved before this
- * feature existed.
+ *
+ * ⚠️ THREE CASES, IN ORDER. Each is a real document shape, not a preference:
+ *
+ *  1. STORED `accessExpiresAt`. A ticket that was already open (or was
+ *     approved and opened under the old rule) carries its own deadline. It wins
+ *     over everything, because it is the one value written by a clock that was
+ *     actually running.
+ *  2. `accessWindowStartsOnOpen` — the NEW rule. The deadline is
+ *     `accessOpenedAt + window`, and it is NULL while nobody has opened the
+ *     ticket. A NULL here is the whole feature: approved, never viewed, never
+ *     expires. Callers must treat "no expiry" as "not expired" rather than
+ *     "expired".
+ *  3. NEITHER — a ticket approved before this feature existed. It has no
+ *     marker and no stamp, so the original `approvedAt + window` fallback
+ *     still applies. Without this case those tickets would silently become
+ *     permanent and lose the expiry the business relies on.
  */
 window.getTrackingAccessExpiry = function(ticket) {
     if (!ticket) return null;
@@ -538,12 +580,79 @@ window.getTrackingAccessExpiry = function(ticket) {
     const stored = window.toTrackingDate(ticket.accessExpiresAt);
     if (stored) return stored;
 
+    // Case 2 — clock starts on first open.
+    if (window.trackingAccessStartsOnOpen(ticket)) {
+        const opened = window.getTrackingAccessOpenedAt(ticket);
+        if (!opened) return null;
+        return new Date(opened.getTime() + window.TRACKING_ACCESS_WINDOW_MS);
+    }
+
+    // Case 3 — legacy, approved before the feature.
     const approved = window.toTrackingDate(ticket.approvedAt);
     if (!approved) return null;
     return new Date(approved.getTime() + window.TRACKING_ACCESS_WINDOW_MS);
 };
 
-/** True when an approved ticket's viewing window has already lapsed. */
+/**
+ * ⚠️ THE ONLY PLACE `accessOpenedAt` IS EVER WRITTEN.
+ *
+ * Stamps the first-open moment on an approved ticket whose clock starts on
+ * open. Deliberately a no-op in four cases, each of which would otherwise burn
+ * the manager's window for nothing:
+ *
+ *   - the ticket is not approved (nothing to view yet)
+ *   - the ticket is not on the new rule (legacy: its deadline is already set)
+ *   - it already carries `accessOpenedAt` — the stamp is written ONCE, so
+ *     closing and reopening the modal cannot slide the deadline along
+ *   - the caller passes `now`, used by tests to make the write deterministic
+ *
+ * Returns the Date written, or null when nothing was written.
+ *
+ * ⚠️ CLIENT-SIDE BY NATURE. This runs in the manager's browser, so the window
+ * is only as trustworthy as that client — the same caveat already documented
+ * for the whole expiry gate in js/owner-dashboard.js (firestore.rules lets any
+ * signed-in user read all tickets, so this is a display gate, not an
+ * authorisation one). Making it authoritative needs a Cloud Function.
+ */
+window.markTrackingAccessOpened = async function(ticket, now) {
+    if (!ticket) return null;
+    if ((ticket.approvalStatus || 'pending') !== 'approved') return null;
+    if (!window.trackingAccessStartsOnOpen(ticket)) return null;
+    if (window.getTrackingAccessOpenedAt(ticket)) return null;
+
+    const stamp = now ? window.toTrackingDate(now) : new Date();
+    if (!stamp || isNaN(stamp.getTime())) return null;
+
+    try {
+        // `db` / `auth` are this file's own top-level consts, used directly
+        // rather than via window.db — that mirrors every other write in
+        // firebase.js and does not depend on the window.* aliases that are only
+        // assigned at the very bottom of the file.
+        await db.collection('tickets').doc(ticket.id).update({
+            accessOpenedAt: firebase.firestore.FieldValue.serverTimestamp(),
+            accessOpenedBy: (auth && auth.currentUser && auth.currentUser.email) || 'unknown'
+        });
+        // Mirror locally so the modal that is rendering RIGHT NOW sees its own
+        // write. Without this the first open computes an expiry from a missing
+        // stamp and would flash the "withheld" state at a manager whose access
+        // is in fact open — then correct itself a beat later on the listener.
+        ticket.accessOpenedAt = stamp;
+        return stamp;
+    } catch (e) {
+        // Never block the report on a bookkeeping write. If this fails the
+        // ticket simply keeps its no-expiry state until the next open.
+        console.warn('Could not stamp accessOpenedAt:', e);
+        return null;
+    }
+};
+
+/**
+ * True when an approved ticket's viewing window has already lapsed.
+ *
+ * ⚠️ A NULL EXPIRY MEANS NOT EXPIRED, never expired. That covers an
+ * unapproved ticket, a legacy ticket with no derivable window, and — the case
+ * this feature exists for — an approved ticket nobody has opened yet.
+ */
 window.isTrackingAccessExpired = function(ticket, now) {
     const expiresAt = window.getTrackingAccessExpiry(ticket);
     if (!expiresAt) return false;

@@ -4278,19 +4278,34 @@ window.approveResolution = async function(id) {
     // approve of an already-approved ticket must never email twice).
     const prevApprovalStatus = approvedTicket ? (approvedTicket.approvalStatus || 'pending_approval') : '';
     const approvedByEmail = (auth.currentUser && auth.currentUser.email) || 'unknown';
-    // ===== 2-day tracking access window (same value written + emailed) =====
-    const windowMs = window.TRACKING_ACCESS_WINDOW_MS || 2 * 24 * 60 * 60 * 1000;
-    const accessExpiresAt = new Date(Date.now() + windowMs);
+    // ⚠️ THE CLOCK STARTS WHEN THE MANAGER OPENS THE TICKET, NOT NOW.
+    //
+    // This used to compute `now + window` and write `accessExpiresAt` here, so
+    // the countdown ran from APPROVAL whether or not anyone ever looked at the
+    // ticket. An approved report nobody opened still expired.
+    //
+    // Approval now writes the MARKER only. `accessWindowStartsOnOpen` is what
+    // tells getTrackingAccessExpiry() that this ticket's deadline is derived
+    // from `accessOpenedAt`, which the Area Manager's browser stamps the first
+    // time the modal opens (window.markTrackingAccessOpened in firebase.js).
+    // Until then the expiry is null and the ticket does not expire.
+    //
+    // ⚠️ The marker is mandatory, not tidying. Firestore cannot tell an absent
+    // field from a null one, so an approval that merely stopped writing
+    // `accessExpiresAt` would produce a document shaped exactly like a
+    // pre-feature ticket — and the legacy `approvedAt + window` fallback would
+    // restart the countdown at approval anyway.
+    const accessStartsOnOpen = true;
 
     try {
         await firestoreService.updateTicket(id, {
             approvalStatus: 'approved',
             approvedAt: firebase.firestore.FieldValue.serverTimestamp(),
             approvedBy: (auth.currentUser && auth.currentUser.email) || 'unknown',
-            // ===== 2-day tracking access window =====
-            // The manager/store may view the report + footage for 2 days from
-            // approval; a superadmin Resend restarts the window afterwards.
-            accessExpiresAt
+            // ⚠️ NO `accessExpiresAt` HERE. The window has not started — it starts
+            // when the Area Manager first opens the ticket, so writing a
+            // deadline now would expire a report nobody has read yet.
+            accessWindowStartsOnOpen: accessStartsOnOpen
         });
         console.log('Resolution approved');
         if (approvalDetailsModal) approvalDetailsModal.classList.remove('active');
@@ -4304,7 +4319,9 @@ window.approveResolution = async function(id) {
         // block, cancel or roll back the approval itself.
         await notifyRequesterOfApproval(approvedTicket, {
             id: id,
-            accessExpiresAt: accessExpiresAt,
+            // No expiry is passed: at approval the window has not started, so
+            // there is no date to promise. The email says so in words instead
+            // (see buildTicketApprovedEmail in js/email.js).
             approvedBy: approvedByEmail,
             prevApprovalStatus: prevApprovalStatus
         });
@@ -4359,7 +4376,9 @@ async function recordApprovalEmail(ticketId, info) {
 
 /**
  * Fire the requester notification right after a superadmin approves.
- * `ctx` = { id, accessExpiresAt, approvedBy, prevApprovalStatus }.
+ * `ctx` = { id, approvedBy, prevApprovalStatus }.
+ * ⚠️ No `accessExpiresAt`: the window has not started at approval, so there is
+ * no deadline to mirror into the snapshot or to promise in the email.
  * Never throws — see the banner above.
  */
 async function notifyRequesterOfApproval(ticket, ctx) {
@@ -4383,12 +4402,13 @@ async function notifyRequesterOfApproval(ticket, ctx) {
         approvalEmailInFlight.add(ctx.id);
 
         // Mirror the values just written to Firestore so the message reflects
-        // THIS approval's expiry window instead of the stale in-memory copy.
+        // THIS approval rather than the stale in-memory copy. The ticket is
+        // mirrored as APPROVED-AND-NOT-YET-OPENED, which is what it now is.
         const snapshot = Object.assign({}, ticket, {
             approvalStatus: 'approved',
             approvedAt: new Date(),
             approvedBy: ctx.approvedBy,
-            accessExpiresAt: ctx.accessExpiresAt
+            accessWindowStartsOnOpen: true
         });
 
         const recipient = window.EmailService.resolveRecipient(snapshot);
@@ -4543,7 +4563,8 @@ async function recordAccessEmail(ticketId, info) {
 
 /**
  * Fire the re-access approval notification AFTER the fresh window is safely in
- * Firestore. `ctx` = { id, accessExpiresAt, ticket }.
+ * Firestore. `ctx` = { id, ticket } — no expiry: a Resend re-arms the
+ * window rather than starting it, so there is no date to promise.
  * Never throws — see the banner above.
  */
 async function notifyRequesterOfAccessApproval(ctx) {
@@ -4562,11 +4583,15 @@ async function notifyRequesterOfAccessApproval(ctx) {
         if (accessEmailInFlight.has(ctx.id)) return;
         accessEmailInFlight.add(ctx.id);
 
-        // Mirror the fresh window that was just written to Firestore — reading
-        // it off the in-memory ticket would still give the EXPIRED date.
+        // ⚠️ THE SNAPSHOT IS "APPROVED, NOT YET OPENED". Reading the in-memory
+        // ticket would carry whatever stamp it had BEFORE the Resend deleted
+        // it, and passing the old expiry through would promise a deadline the
+        // Resend just deliberately removed.
         const snapshot = Object.assign({}, ctx.ticket || {}, {
-            accessExpiresAt: ctx.accessExpiresAt
+            accessWindowStartsOnOpen: true
         });
+        delete snapshot.accessOpenedAt;
+        delete snapshot.accessOpenedBy;
 
         const recipient = window.EmailService.resolveReopenRecipient(snapshot);
         if (!recipient) {
@@ -4631,11 +4656,25 @@ window.resendTrackingAccess = async function(id) {
     if (!confirmed) return;
 
     try {
-        const windowMs = window.TRACKING_ACCESS_WINDOW_MS || 2 * 24 * 60 * 60 * 1000;
-        const newExpiry = new Date(Date.now() + windowMs);
+        // ⚠️ A RESEND DOES NOT START THE CLOCK. It RE-ARMS it.
+        //
+        // This used to compute `now + window` and write `accessExpiresAt`, which
+        // started the deadline at the moment of the Resend — even for a ticket
+        // the manager had not opened yet, and even for one that was merely
+        // unopened and never needed re-access at all.
+        //
+        // Instead the first-open stamp is CLEARED. The ticket keeps
+        // `accessWindowStartsOnOpen`, so the manager's next open starts a fresh
+        // window. Consequence worth stating plainly: a ticket that was approved
+        // but never opened stays unopened after a Resend and does not expire —
+        // which is the intended behaviour, not a leak.
         const resendByEmail = (auth.currentUser && auth.currentUser.email) || 'unknown';
         const updateData = {
-            accessExpiresAt: newExpiry,
+            // FieldValue.delete() clears the stamp; a plain `null` would be
+            // indistinguishable from "never stamped" only by accident, and
+            // delete() is explicit about intent in the document.
+            accessOpenedAt: firebase.firestore.FieldValue.delete(),
+            accessOpenedBy: firebase.firestore.FieldValue.delete(),
             accessLastResentAt: firebase.firestore.FieldValue.serverTimestamp(),
             accessLastResentBy: resendByEmail,
             accessResentCount: firebase.firestore.FieldValue.increment(1)
@@ -4657,7 +4696,9 @@ window.resendTrackingAccess = async function(id) {
         // (the real-time listener is only a backup).
         const idx = allTickets.findIndex(t => t.id === id);
         if (idx > -1) {
-            allTickets[idx].accessExpiresAt = newExpiry;
+            // Mirrors the delete() above: the ticket is back to "not opened".
+            delete allTickets[idx].accessOpenedAt;
+            delete allTickets[idx].accessOpenedBy;
             allTickets[idx].accessLastResentAt = new Date();
             allTickets[idx].accessLastResentBy = resendByEmail;
             allTickets[idx].accessResentCount = (Number(allTickets[idx].accessResentCount) || 0) + 1;
@@ -4669,9 +4710,10 @@ window.resendTrackingAccess = async function(id) {
         if (approvalDetailsModal) approvalDetailsModal.classList.remove('active');
         currentApprovalTicketId = null;
         if (typeof showToast === 'function') {
+            // "can view" would be wrong — the window starts when they open it.
             showToast(reopenReq
-                ? `Request fulfilled — the manager/store can view this ticket for ${trackingWindowLabel()}.`
-                : `Access resent — the manager/store can now view this ticket for ${trackingWindowLabel()}.`, 'success');
+                ? 'Request fulfilled — their viewing window starts when they open the ticket.'
+                : 'Access re-armed — their viewing window starts when they open the ticket.', 'success');
         }
 
         // ===== Email the store/manager that their re-access request was approved =====
@@ -4682,7 +4724,8 @@ window.resendTrackingAccess = async function(id) {
         if (pendingReopen) {
             await notifyRequesterOfAccessApproval({
                 id: id,
-                accessExpiresAt: newExpiry,
+                // No expiry: the Resend re-armed the window, it did not start
+                // it. The manager's next open is when the clock begins.
                 ticket: (idx > -1) ? allTickets[idx] : ticket
             });
         }

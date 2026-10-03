@@ -594,7 +594,7 @@ function normalizeTicketReport(ticket) {
 //  (script.js):
 //
 //    operator resolves  → status 'Resolved', approvalStatus 'pending_approval'
-//    superadmin approves → approvalStatus 'approved'   (+ accessExpiresAt)
+//    superadmin approves → approvalStatus 'approved'   (+ accessWindowStartsOnOpen)
 //
 //  So `status === 'Resolved'` alone is NOT enough: it also matches work that
 //  is still queued for review, and work the superadmin SENT BACK. The list
@@ -975,9 +975,12 @@ function renderOwnerWindowNote() {
       ownerWindowNote.textContent = '';
       return;
     }
+    // ⚠️ "AFTER YOU FIRST OPEN IT", NOT "after approval". The window starts
+    // when the manager opens the ticket; before that there is no deadline at
+    // all, so the old wording described a countdown that is not running yet.
     ownerWindowNote.textContent =
-      'Each stays readable for ' + ownerAccessWindowLabel() +
-      ' after approval; after that the row remains but the report and evidence are withheld.';
+      'Once you open a ticket it stays readable for ' + ownerAccessWindowLabel() +
+      '; after that the row remains but the report and evidence are withheld.';
   } catch (e) { /* the tab still works without the note */ }
 }
 
@@ -1059,12 +1062,29 @@ window.openOwnerReport = function(reportId) {
   ownerFootageTicketId = reportId;
   try { if (window.RefreshState) window.RefreshState.capture('owner', { tab: 'reports', modal: 'report', id: reportId }); } catch (e) { /* ignore */ }
 
-  db.collection('tickets').doc(reportId).get().then((snap) => {
+  db.collection('tickets').doc(reportId).get().then(async (snap) => {
     if (!snap.exists) return;
 
     // Get full ticket data including attachments
     const rawData = snap.data();
     const data = normalizeTicketReport(rawData);
+
+    // ⚠️ FIRST OPEN STARTS THE CLOCK.
+    //
+    // An approved ticket nobody has opened has NO expiry at all — it does not
+    // lapse. This is where that clock begins: the first time THIS manager opens
+    // the modal, `accessOpenedAt` is stamped and the window runs from that
+    // moment onwards, continuously. Closing the modal stops nothing.
+    //
+    // ⚠️ ROLE-GATED. Only the Area Manager has a window (expiryAppliesToViewer()
+    // is `activeUserRole === 'owner'`). HR and superadmins read these tickets for
+    // a living; stamping on THEIR behalf would silently start — and burn — the
+    // manager's window during someone else's review, which is the exact failure
+    // this feature exists to prevent.
+    if (expiryAppliesToViewer()
+        && typeof window.markTrackingAccessOpened === 'function') {
+        await window.markTrackingAccessOpened(rawData);
+    }
 
     // Attachment cards come from the SHARED builder in js/attachment-viewer.js —
     // the same .attachment-item card the five grids in script.js render. This
@@ -1546,6 +1566,19 @@ function renderOwnerTickets(allTickets) {
         ? 'Viewing access closed ' + formatDate(expiresAt)
         : 'Approved — viewing access closed';
 
+      // ⚠️ APPROVED BUT NOT YET OPENED. Not expired, and there is no date to
+      // show: the window has not started. It gets its own quiet label because
+      // the neighbouring states are misleading without it — a muted dash reads
+      // as "nothing to report", when in fact this ticket's clock is simply
+      // waiting on the manager. Anything that rendered an "Until <date>" here
+      // would be inventing a deadline out of nothing.
+      const awaitingFirstOpen = !expired
+        && expiryAppliesToViewer()
+        && typeof window.trackingAccessStartsOnOpen === 'function'
+        && window.trackingAccessStartsOnOpen(t)
+        && !(typeof window.getTrackingAccessOpenedAt === 'function'
+             && window.getTrackingAccessOpenedAt(t));
+
       // A PENDING re-access request swaps the red "Expired" badge for the amber
       // "Reopen requested" chip — the exact treatment script.js already uses in
       // the Approvals table, including the ×N count. The manager's own list and
@@ -1584,6 +1617,13 @@ function renderOwnerTickets(allTickets) {
       } else if (expired) {
         accessCell = `<span class="status-badge expired" title="${escapeHTML(expiryTitle)}">`
           + `Access closed</span>`;
+      } else if (awaitingFirstOpen) {
+        // Sits between "expired" and the neutral dash. It is NOT a green "Open"
+        // badge: opening is what starts the clock, so calling it open would be
+        // a promise the ticket is not yet making.
+        accessCell = '<span class="owner-access-none" title="'
+          + escapeHTML('Approved — your viewing window starts when you first open it')
+          + '">Not yet opened</span>';
       } else {
         // A muted dash rather than a green "Open" badge. Most rows ARE open, so
         // a badge on every row is noise that says nothing — the Access column
