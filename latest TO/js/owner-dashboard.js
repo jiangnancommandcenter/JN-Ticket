@@ -680,6 +680,8 @@ function ownerTicketExpiry(ticket) {
   } catch (e) {
     return null;
   }
+}
+
 // ==============================================================
 //  LIVE EXPIRY COUNTDOWN (the Access column + the open modal)
 //
@@ -790,7 +792,6 @@ function startOwnerCountdownTicker() {
     if (ownerCountdownTicker) return;
     ownerCountdownTicker = setInterval(tickOwnerCountdowns, 1000);
     tickOwnerCountdowns();
-}
 }
 
 /**

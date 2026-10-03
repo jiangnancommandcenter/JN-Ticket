@@ -168,7 +168,93 @@ console.log('\n=== the styles exist and the comments balance ===');
         'in the source but are silently never applied.');
 }
 
-console.log('\n× Live-countdown tests passed (the human formatter reads in seconds at the ' +
+// ===========================================================================
+console.log('\n=== ⚠️ the helpers are TOP-LEVEL, not nested ===');
+// ===========================================================================
+{
+    // ⚠️ THE BUG THIS SECTION EXISTS FOR. The countdown block was inserted
+    // directly after `ownerTicketExpiry()`'s `catch` and BEFORE its closing
+    // brace, so all four helpers became function-LOCAL to ownerTicketExpiry.
+    //
+    // `node --check` passed — nested function declarations are perfectly legal
+    // JavaScript — and so did every other test in this file, because they read
+    // the source as TEXT and a nested declaration looks identical in source.
+    //
+    // The runtime effect was total: `renderOwnerTickets()` calls
+    // `startOwnerCountdownTicker()`, which was not in module scope, so it threw
+    // ReferenceError. renderOwnerTickets' own try/catch swallowed it and
+    // replaced the list with "Unable to load tickets." — the Area Manager's
+    // ticket list vanished the moment a superadmin approved anything.
+    //
+    // So: assert the declaration is at column zero. A text check is the only
+    // thing that catches this, and it catches it precisely.
+    ['formatAccessCountdown', 'accessCountdownHtml', 'tickOwnerCountdowns', 'startOwnerCountdownTicker']
+        .forEach(name => {
+            assert(new RegExp(`^function\\s+${name}\\s*\\(`, 'm').test(ownerJs),
+                `${name}() must be declared at TOP LEVEL (column 0). A declaration nested ` +
+                `inside another function is invisible to every other check here — the file ` +
+                `still parses and the source still reads correctly — but it is not in module ` +
+                `scope, so renderOwnerTickets() throws ReferenceError and its catch replaces ` +
+                `the Area Manager's ticket list with "Unable to load tickets."`);
+        });
+
+    // And the thing that swallowed it: ownerTicketExpiry() must still be a short
+    // function, not a 100-line block with helpers hidden inside it.
+    const expiryFn = extractFn(ownerJs, 'ownerTicketExpiry');
+    assert(expiryFn.length < 400,
+        `ownerTicketExpiry() is ${expiryFn.length} characters long — it has other declarations ` +
+        'buried inside it. It only ever coerces a date and returns it.');
+
+    // ⚠️ PROOF THE SCOPING IS ACTUALLY FIXED, not merely re-indented. Column-0
+    // is a text check; this runs the real thing. `startOwnerCountdownTicker` is
+    // evaluated at module scope, exactly as renderOwnerTickets() does. When the
+    // helpers were nested it threw ReferenceError here — which is precisely what
+    // blanked the Area Manager's ticket list.
+    const probe = {
+        window: { TRACKING_ACCESS_WINDOW_MS: 60000 },
+        console: { warn: () => {} },
+        document: undefined,
+        // ⚠️ THE VM SANDBOX HAS NO setInterval. Without these the probe fails
+        // with "setInterval is not defined" — a defect in the TEST, and an easy
+        // one to misread as the very bug it is meant to catch.
+        setInterval: (fn, ms) => ({ fake: true, fn, ms }),
+        clearInterval: () => {}
+    };
+    vm.createContext(probe);
+    vm.runInContext('var ownerCountdownTicker = null;', probe);
+    // ⚠️ BOTH functions, in one shared context. Loading only the starter gives a
+    // misleading "tickOwnerCountdowns is not defined" — the callee has to be in
+    // scope too, which is precisely the relationship that broke.
+    vm.runInContext(extractFn(ownerJs, 'tickOwnerCountdowns'), probe);
+    vm.runInContext(extractFn(ownerJs, 'startOwnerCountdownTicker'), probe);
+    probe.window.getTrackingAccessExpiry = () => null;
+    assert.strictEqual(typeof probe.startOwnerCountdownTicker, 'function',
+        'startOwnerCountdownTicker() must be callable at MODULE scope. This is the call ' +
+        'renderOwnerTickets() makes; if it is not defined here, that render throws ' +
+        'ReferenceError and the catch replaces the whole ticket list with an error row.');
+    assert.strictEqual(typeof probe.tickOwnerCountdowns, 'function',
+        'tickOwnerCountdowns() must also be at module scope — the starter calls it directly.');
+    // Calling it with no countdowns on the page must not throw either.
+    probe.document = { querySelectorAll: () => [] };
+    probe.startOwnerCountdownTicker();
+    assert.ok(probe.ownerCountdownTicker,
+        'starting the ticker must install the interval');
+    assert.strictEqual(probe.ownerCountdownTicker.ms, 1000,
+        'the countdown must tick once a second');
+    // Idempotent: a second call must not replace the live interval.
+    const first = probe.ownerCountdownTicker;
+    probe.startOwnerCountdownTicker();
+    assert.strictEqual(probe.ownerCountdownTicker, first,
+        'startOwnerCountdownTicker() must be idempotent — the list re-renders on every ' +
+        'Firestore snapshot, so a naive start would spawn a new interval each time.');
+}
+
+console.log('\n× Live-countdown tests passed (all four countdown helpers are declared at column ' +
+    'zero rather than nested inside ownerTicketExpiry(), which is the one failure that parsed ' +
+    'cleanly, read correctly as source, passed every other assertion here, and still emptied ' +
+    'the Area Manager\'s ticket list at runtime because renderOwnerTickets() threw a ' +
+    'ReferenceError its own catch turned into "Unable to load tickets."; the human formatter ' +
+    'reads in seconds at the ' +
     'time-compressed 1-minute window and rolls up to days+hours at the real 2-day one, with ' +
     'zero reported as a state rather than "0s"; the ticker writes textContent in place and ' +
     'cannot reach renderOwnerTickets() on the normal path, so the table is never rebuilt once ' +
