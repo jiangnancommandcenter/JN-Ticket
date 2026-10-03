@@ -1257,35 +1257,36 @@ async function initApp() {
 }
 
 async function loadTicketsDirect() {
+    // ⚠️ NO SEEDING HERE, AND THAT IS THE POINT.
+    // This used to read: if the list came back empty, call the sample-ticket
+    // seeder further down this file and write two hardcoded demo tickets. Two
+    // consequences, both bad once the app is in real use:
+    //   1. DELETED TICKETS CAME BACK. Delete the last real ticket, the
+    //      collection is empty, and the next page load re-created them — so a
+    //      superadmin could not clear the list, and a project reset looked like
+    //      it had failed even though every document really was deleted.
+    //   2. The catch branch did the same on ANY transient read error, so a
+    //      network blip wrote two tickets into production.
+    // Demo data belongs in a seed script (scripts/seed.js), not in the boot
+    // sequence of the app that serves real staff. An empty list is a legitimate
+    // state, and displayTickets() already renders "No tickets found." for it.
     try {
         const tickets = await firestoreService.getTickets();
-        if (tickets.length > 0) {
-            allTickets = tickets;
-            filterTickets();
-            updateTicketDashboard();
-            updatePendingBadge();
-            isInitialTicketLoad = false;
-        } else {
-            await seedSampleTickets();
-            const seededTickets = await firestoreService.getTickets();
-            if (seededTickets.length > 0) {
-                allTickets = seededTickets;
-                filterTickets();
-                updateTicketDashboard();
-                updatePendingBadge();
-                isInitialTicketLoad = false;
-            }
-        }
+        allTickets = tickets;
+        filterTickets();
+        updateTicketDashboard();
+        updatePendingBadge();
+        // ⚠️ UNCONDITIONAL. It used to be set only inside the branches that found
+        // at least one ticket, so an empty collection left it `true` — and the
+        // `isInitialTicketLoad || allTickets.length === 0` check further up then
+        // takes a different branch precisely when there is nothing to show.
+        isInitialTicketLoad = false;
     } catch (error) {
+        // A failed read is NOT an empty database. Say so instead of writing
+        // documents as a side effect of a network error.
         console.error('Error loading tickets directly:', error);
-        await seedSampleTickets();
-        const seededTickets = await firestoreService.getTickets();
-        if (seededTickets.length > 0) {
-            allTickets = seededTickets;
-            filterTickets();
-            updateTicketDashboard();
-            updatePendingBadge();
-            isInitialTicketLoad = false;
+        if (typeof showToast === 'function') {
+            showToast('Could not load tickets. Check your connection and refresh.', 'error');
         }
     }
 }
@@ -1299,29 +1300,28 @@ async function loadBranchData() {
         branches = await firestoreService.getBranches();
         allLogs = await firestoreService.getAllLogs();
 
-        if (branches.length === 0) {
-            // ⚠️ THE AUTO-SEED CAN FAIL SILENTLY, AND IT DID.
-            // seedDefaultBranches() writes through the web SDK, and `branches`
-            // create is `allow create: if isSuperAdmin()`. A denied write threw,
-            // the one broad catch below swallowed it, and `branches` stayed []
-            // — so the Branch Monitor was empty AND every Branch Access checkbox
-            // in User Approvals rendered "No branches loaded.", which then let
-            // approveUser() write `branches: []` onto real accounts.
-            //
-            // It is separated out here so the failure is reported and the branch
-            // dropdowns still get rebuilt, instead of the whole page believing
-            // the database genuinely has no branches.
-            try {
-                await seedDefaultBranches();
-            } catch (seedError) {
-                console.error('Default branch seeding failed:', seedError);
-                if (typeof showToast === 'function') {
-                    showToast('Could not create the default branches. Seed the database (npm run seed), '
-                        + 'or a branch must be added manually.', 'error');
-                }
-            }
-            branches = await firestoreService.getBranches();
-        }
+        // ⚠️ NO SEEDING HERE, AND THAT IS THE POINT.
+        // This used to read: if the branch list came back empty, call the branch
+        // seeder further down this file, which wrote 21 hardcoded branches and
+        // fabricated ~20 status logs (six branches forced Offline, five given
+        // invented offline/online pairs dated 1-3 days ago). Consequences:
+        //   1. DELETED BRANCHES CAME BACK. Delete one, reload, it is recreated.
+        //   2. THE METRICS WERE FICTION. The uptime chips, the downtimes and
+        //      the "last updated" times all came from that generated history,
+        //      not from anything that had happened.
+        // Branches are real places with real outages; a page load must not be
+        // able to invent them. Seed deliberately with `npm run seed`
+        // (scripts/seed.js --branches) instead.
+        //
+        // ⚠️ THE CONCERN BELOW IS STILL LIVE — do not "simplify" it away. An
+        // empty `branches` read means every Branch Access checkbox in User
+        // Approvals renders "No branches loaded.", there is then nothing to
+        // tick, and approveUser() would write `branches: []` onto a real
+        // manager, silently stripping their access. approveUser() refuses an
+        // empty selection as the last line of defence, but the seed that used
+        // to paper over a failed read is gone, so that guard is now the ONLY
+        // thing standing between a read failure and lost access.
+        // Seed with `npm run seed`, or add a branch via Manage Branches.
 
         for (let i = 0; i < branches.length; i++) {
             const branch = branches[i];
@@ -1728,41 +1728,19 @@ async function deleteUser(email) {
     }
 }
 
-const DEFAULT_BRANCH_NAMES = [
-    'Banawe', 'BF Homes', 'Eastwood', 'Fame', 'Gil Fernando',
-    'Hemady', 'Holy Spirit', 'MOA', 'Ortigas Center', 'Paseo',
-    'Promenade', 'SM Clark', 'SM Fairview', 'SM Marikina', 'SM Marilao',
-    'SM South Mall', 'SMDC Wind', 'SM East Ortigas', 'Sta. Rosa', 'SM Sucat', 'Tagaytay'
-];
-
-async function seedDefaultBranches() {
-    const now = new Date();
-    const offlineBranches = ['Banawe', 'BF Homes', 'Holy Spirit', 'SM Clark', 'Sta. Rosa', 'Tagaytay'];
-    const hadOutageBranches = ['Banawe', 'Hemady', 'MOA', 'SM Fairview', 'Paseo'];
-
-    for (const name of DEFAULT_BRANCH_NAMES) {
-        const isOffline = offlineBranches.includes(name);
-        await firestoreService.setBranch(name, {
-            branchName: name,
-            currentStatus: isOffline ? 'Offline' : 'Online',
-            lastUpdated: firebase.firestore.Timestamp.fromDate(now),
-            currentDowntimeStart: isOffline ? firebase.firestore.Timestamp.fromDate(now) : null,
-            remarks: ''
-        });
-
-        if (hadOutageBranches.includes(name)) {
-            const d1 = new Date(now); d1.setDate(d1.getDate() - 3); d1.setHours(9, 0, 0, 0);
-            const d2 = new Date(d1); d2.setHours(d2.getHours() + 2);
-            const d3 = new Date(now); d3.setDate(d3.getDate() - 1); d3.setHours(14, 30, 0, 0);
-            const d4 = new Date(d3); d4.setHours(d4.getHours() + 1, 15);
-
-            await firestoreService.addStatusLog({ branchName: name, status: 'Offline', dateTime: d1.toISOString(), remarks: '' });
-            await firestoreService.addStatusLog({ branchName: name, status: 'Online', dateTime: d2.toISOString(), remarks: '' });
-            await firestoreService.addStatusLog({ branchName: name, status: 'Offline', dateTime: d3.toISOString(), remarks: '' });
-            await firestoreService.addStatusLog({ branchName: name, status: 'Online', dateTime: d4.toISOString(), remarks: '' });
-        }
-    }
-}
+// ==============================================================
+//  DEFAULT BRANCH SEED — REMOVED 2026-03-10
+// ==============================================================
+// The 21 hardcoded branches and their generated status history that lived here
+// were deleted along with the auto-seed call in loadBranchData(). They were dev
+// scaffolding, but unlike the demo tickets they were actively misleading: the
+// Branch Monitor's uptime percentages, downtime figures and "last updated"
+// times were computed from invented logs, so the table showed confident numbers
+// describing outages that never happened.
+//
+// If you want the default branch list for local development, run
+// `npm run seed` (or `node scripts/seed.js --branches`) — an explicit,
+// separate command — rather than hiding it in the app's load path.
 
 // ==============================================================
 //  DASHBOARD
@@ -3269,40 +3247,17 @@ function setupTicketListener() {
 }
 
 // ==============================================================
-//  SEED SAMPLE TICKETS
+//  SEED SAMPLE TICKETS — REMOVED 2026-03-10
 // ==============================================================
-
-async function seedSampleTickets() {
-    const sampleTickets = [
-        { branch: 'Banawe', name: 'Juan Dela Cruz', position: 'Store Manager', contact: '09171234567', email: 'juan@example.com', datetime: '02/15/2025 0800H', location: 'Cashier Area', incident: 'Tip Pocketing', description: 'Customer reported missing wallet at cashier area. Review CCTV footage required.', priority: 'High' },
-            { branch: 'MOA', name: 'Maria Santos', position: 'Supervisor', contact: '09179876543', email: 'maria@example.com', datetime: '02/15/2025 0930H', location: 'Dining Area', incident: 'Overcharge Discrepancy', description: 'Customer complained about being overcharged PHP 250 on their bill. Need to check POS records.', priority: 'Low' }
-    ];
-
-    for (const ticket of sampleTickets) {
-        try {
-            const ticketID = await firestoreService.generateTicketNumber(ticket.branch);
-            const createdDate = new Date();
-            
-            await firestoreService.setTicket(ticketID, {
-                ticketNumber: ticketID,
-                branch: ticket.branch,
-                name: ticket.name,
-                position: ticket.position,
-                contact: ticket.contact,
-                email: ticket.email,
-                datetime: ticket.datetime,
-                location: ticket.location,
-                incident: ticket.incident,
-                description: ticket.description,
-                priority: ticket.priority || 'Low',
-                status: 'Pending',
-                createdAt: firebase.firestore.Timestamp.fromDate(createdDate)
-            });
-        } catch (e) {
-            console.error('Error seeding ticket:', e);
-        }
-    }
-}
+// The two hardcoded demo tickets that used to live here (a tip-pocketing report
+// and an overcharge report) were deleted along with the auto-seed call in
+// loadTicketsDirect(). They were dev scaffolding: the boot sequence called the
+// seeder whenever the tickets collection came back empty, which meant that
+// deleting your last ticket simply re-created them on the next page load, and a
+// project reset could never look clean.
+//
+// If you want demo data for local development, use scripts/seed.js — an
+// explicit, separate command — rather than hiding it in the app's load path.
 
 // ==============================================================
 //  NOTIFICATION BAR & DASHBOARD
