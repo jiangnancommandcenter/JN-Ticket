@@ -1300,28 +1300,29 @@ async function loadBranchData() {
         branches = await firestoreService.getBranches();
         allLogs = await firestoreService.getAllLogs();
 
-        // ⚠️ NO SEEDING HERE, AND THAT IS THE POINT.
-        // This used to read: if the branch list came back empty, call the branch
-        // seeder further down this file, which wrote 21 hardcoded branches and
-        // fabricated ~20 status logs (six branches forced Offline, five given
-        // invented offline/online pairs dated 1-3 days ago). Consequences:
-        //   1. DELETED BRANCHES CAME BACK. Delete one, reload, it is recreated.
-        //   2. THE METRICS WERE FICTION. The uptime chips, the downtimes and
-        //      the "last updated" times all came from that generated history,
-        //      not from anything that had happened.
-        // Branches are real places with real outages; a page load must not be
-        // able to invent them. Seed deliberately with `npm run seed`
-        // (scripts/seed.js --branches) instead.
-        //
-        // ⚠️ THE CONCERN BELOW IS STILL LIVE — do not "simplify" it away. An
-        // empty `branches` read means every Branch Access checkbox in User
-        // Approvals renders "No branches loaded.", there is then nothing to
-        // tick, and approveUser() would write `branches: []` onto a real
-        // manager, silently stripping their access. approveUser() refuses an
-        // empty selection as the last line of defence, but the seed that used
-        // to paper over a failed read is gone, so that guard is now the ONLY
-        // thing standing between a read failure and lost access.
-        // Seed with `npm run seed`, or add a branch via Manage Branches.
+        if (branches.length === 0) {
+            // ⚠️ THE AUTO-SEED CAN FAIL SILENTLY, AND IT DID.
+            // seedDefaultBranches() writes through the web SDK, and `branches`
+            // create is `allow create: if isSuperAdmin()`. A denied write threw,
+            // the one broad catch below swallowed it, and `branches` stayed []
+            // — so the Branch Monitor was empty AND every Branch Access checkbox
+            // in User Approvals rendered "No branches loaded.", which then let
+            // approveUser() write `branches: []` onto real accounts.
+            //
+            // It is separated out here so the failure is reported and the branch
+            // dropdowns still get rebuilt, instead of the whole page believing
+            // the database genuinely has no branches.
+            try {
+                await seedDefaultBranches();
+            } catch (seedError) {
+                console.error('Default branch seeding failed:', seedError);
+                if (typeof showToast === 'function') {
+                    showToast('Could not create the default branches. Seed the database (npm run seed), '
+                        + 'or a branch must be added manually.', 'error');
+                }
+            }
+            branches = await firestoreService.getBranches();
+        }
 
         for (let i = 0; i < branches.length; i++) {
             const branch = branches[i];
@@ -1728,19 +1729,41 @@ async function deleteUser(email) {
     }
 }
 
-// ==============================================================
-//  DEFAULT BRANCH SEED — REMOVED 2026-03-10
-// ==============================================================
-// The 21 hardcoded branches and their generated status history that lived here
-// were deleted along with the auto-seed call in loadBranchData(). They were dev
-// scaffolding, but unlike the demo tickets they were actively misleading: the
-// Branch Monitor's uptime percentages, downtime figures and "last updated"
-// times were computed from invented logs, so the table showed confident numbers
-// describing outages that never happened.
-//
-// If you want the default branch list for local development, run
-// `npm run seed` (or `node scripts/seed.js --branches`) — an explicit,
-// separate command — rather than hiding it in the app's load path.
+const DEFAULT_BRANCH_NAMES = [
+    'Banawe', 'BF Homes', 'Eastwood', 'Fame', 'Gil Fernando',
+    'Hemady', 'Holy Spirit', 'MOA', 'Ortigas Center', 'Paseo',
+    'Promenade', 'SM Clark', 'SM Fairview', 'SM Marikina', 'SM Marilao',
+    'SM South Mall', 'SMDC Wind', 'SM East Ortigas', 'Sta. Rosa', 'SM Sucat', 'Tagaytay'
+];
+
+async function seedDefaultBranches() {
+    const now = new Date();
+    const offlineBranches = ['Banawe', 'BF Homes', 'Holy Spirit', 'SM Clark', 'Sta. Rosa', 'Tagaytay'];
+    const hadOutageBranches = ['Banawe', 'Hemady', 'MOA', 'SM Fairview', 'Paseo'];
+
+    for (const name of DEFAULT_BRANCH_NAMES) {
+        const isOffline = offlineBranches.includes(name);
+        await firestoreService.setBranch(name, {
+            branchName: name,
+            currentStatus: isOffline ? 'Offline' : 'Online',
+            lastUpdated: firebase.firestore.Timestamp.fromDate(now),
+            currentDowntimeStart: isOffline ? firebase.firestore.Timestamp.fromDate(now) : null,
+            remarks: ''
+        });
+
+        if (hadOutageBranches.includes(name)) {
+            const d1 = new Date(now); d1.setDate(d1.getDate() - 3); d1.setHours(9, 0, 0, 0);
+            const d2 = new Date(d1); d2.setHours(d2.getHours() + 2);
+            const d3 = new Date(now); d3.setDate(d3.getDate() - 1); d3.setHours(14, 30, 0, 0);
+            const d4 = new Date(d3); d4.setHours(d4.getHours() + 1, 15);
+
+            await firestoreService.addStatusLog({ branchName: name, status: 'Offline', dateTime: d1.toISOString(), remarks: '' });
+            await firestoreService.addStatusLog({ branchName: name, status: 'Online', dateTime: d2.toISOString(), remarks: '' });
+            await firestoreService.addStatusLog({ branchName: name, status: 'Offline', dateTime: d3.toISOString(), remarks: '' });
+            await firestoreService.addStatusLog({ branchName: name, status: 'Online', dateTime: d4.toISOString(), remarks: '' });
+        }
+    }
+}
 
 // ==============================================================
 //  DASHBOARD
