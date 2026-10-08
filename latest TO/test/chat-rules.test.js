@@ -272,8 +272,8 @@ assert(
 const chatHelper = rules.match(/function\s+isChatRole\(\)\s*\{[\s\S]*?\n\s*\}/);
 assert(chatHelper, 'isChatRole() helper is missing from firestore.rules — it is what lets an Area Manager hold a 1:1 thread');
 assert(
-    /role\s+in\s*\[\s*'hr'\s*,\s*'superadmin'\s*,\s*'owner'\s*\]/.test(chatHelper[0]),
-    "isChatRole() must be an allowlist of exactly ['hr', 'superadmin', 'owner']"
+    /role\s+in\s*\[\s*'hr'\s*,\s*'superadmin'\s*,\s*'owner'\s*,\s*'rmsm'\s*\]/.test(chatHelper[0]),
+    "isChatRole() must be an allowlist of exactly ['hr', 'superadmin', 'owner', 'rmsm']"
 );
 assert(!/operator/.test(chatHelper[0]), 'isChatRole() must never include the operator role');
 
@@ -714,20 +714,19 @@ assert(
     'superadmin" is impossible — and it must stay scoped to role == superadmin so owner/operator ' +
     'accounts, their statuses and their permissions stay unreadable'
 );
-// The THIRD read statement: the Area Manager may discover the HR + superadmin
-// accounts they are allowed to message — and ONLY those two roles.
+// The SECOND read statement — an HR must be able to discover the
+// SUPERADMIN accounts, which is exactly what the self-published directory
+// cannot do on its own (a brand-new superadmin has no profile entry).
+// Personal chat is now a single pair (superadmin <-> HR), so there are no
+// third/fourth statements and no store-role discovery slice of `users`.
 assert(
-    /allow read: if isAreaManager\(\)\s*&&\s*resource\.data\.role in \['hr', 'superadmin'\];/.test(usersBlock),
-    'firestore.rules must let an AREA MANAGER read the HR and superadmin accounts — without it ' +
-    '"an Area Manager can message HR and superadmin" is impossible, and the roster list would be empty'
+    !/allow read: if isAreaManager\(\)/.test(usersBlock),
+    'the OLD Area Manager discovery statements must be GONE — store roles never start a private thread'
 );
 assert.strictEqual(
     (usersBlock.match(/allow read:/g) || []).length,
-    3,
-    'the three users read rules must be SEPARATE allow statements (they OR together): a superadmin ' +
-    'keeps the whole-collection read the dashboard already relies on, an HR gets only the ' +
-    'role-scoped superadmin slice, and an Area Manager gets the HR + superadmin slice — combining ' +
-    'any two would hand one role the other\'s reach (e.g. every HR the whole HR roster)'
+    2,
+    'the users read rules must now be TWO (a superadmin whole-collection read + the HR slice)'
 );
 const rosterFn = (clientSrc.match(/function\s+loadHrRoster\(\)\s*\{[\s\S]*?\n\s{4}\}/) || [''])[0];
 assert(rosterFn, 'chat.js must define loadHrRoster() — the authoritative roster behind BOTH sides of the list');
@@ -742,11 +741,10 @@ assert(
 );
 // The three sides read differently because the rules do.
 assert(
-    /if \(currentRole === 'owner'\) \{\s*source = source\.where\('role', 'in', rosterWantedRoles\(\)\);/s.test(rosterFn),
-    "the AREA MANAGER's read must carry `where('role','in',['hr','superadmin'])` — that is the " +
-    'only filter the isAreaManager() users clause is provable from (an unfiltered read of `users` ' +
-    'is denied). It is a TWO-role `in` rather than the HR single-role `==` precisely because a ' +
-    'manager may message both HRs and superadmins'
+    /if \(currentRole === 'owner'\s*\|\|\s*currentRole === 'rmsm'\) \{\s*source = source\.where\('role', 'in', rosterWantedRoles\(\)\);/s.test(rosterFn),
+    "the store-side read must carry `where('role','in',[...])` — that is the " +
+    'is denied). Store roles like Area Manager / RM/SM have no paired peer, so rosterWantedRecords() ' +
+    'returns [] for them and their read resolves empty'
 );
 assert(
     /else if \(currentRole !== 'superadmin'\) \{\s*source = source\.where\('role', '==', 'superadmin'\);/.test(rosterFn),
@@ -771,8 +769,8 @@ assert(
         /wanted\.indexOf\(normalizeRole\(data\.role\)\) === -1/.test(rosterFn),
     'the roster must keep ONLY the roles isStartable() would accept — derived by ' +
     'rosterWantedRoles() — so the pairing rule and the roster can never disagree about who may be ' +
-    'messaged. It is a SET test, not an equality, because an Area Manager may start with TWO ' +
-    'different roles (HR and superadmin); in particular a manager never sees another manager'
+    'messaged. It is a SET test, not an equality, because the wanted list is derived from the ' +
+    'pairing map (one peer role per role); in particular a manager never sees a co-manager OR an HR'
 );
 assert(
     /console\.warn\('\[Chat\] HR roster unavailable:', error && error\.message\)/.test(rosterFn) &&
@@ -1127,7 +1125,7 @@ assert(
     'how an Area Manager ends up in the All HR chat in one place but not another'
 );
 assert(
-    /if \(isGroupRoom\(\)\) \{[\s\S]{0,700}?setComposerEnabled\(true\);/.test(clientSrc),
+    /if \(isGroupRoom\(\)\) \{[\s\S]{0,1200}?setComposerEnabled\(true\);/.test(clientSrc),
     'the group chat must have a WORKING composer — it is a live channel, not an archive'
 );
 assert(
@@ -1240,6 +1238,363 @@ assert(
 );
 
 // ---------------------------------------------------------------
+// 15b. BRANCH GROUP CHATS — auto-created when a member is assigned.
+//
+//  The feature: a superadmin approves (or re-saves) a member with one or
+//  more branches → script.js ensureBranchGroupChats() seeds
+//  chats/branch-<slug> with that store's team — Superadmin + the Area
+//  Manager, HR and RM/SM assigned to THIS branch — so the group chat is
+//  already in the member's sidebar instead of needing manual creation.
+//
+//  Static checks on firestore.rules + script.js + js/chat.js, plus the
+//  REAL branchGroupMembers() executed against fixtures at the bottom.
+//  String checks use indexOf on purpose: these blocks live or die by
+//  escaping, and a regex literal here silently matches nothing when a
+//  backslash goes stale (that is exactly how this section first failed).
+// ---------------------------------------------------------------
+const approvalSrc = fs.readFileSync(path.join(ROOT, 'script.js'), 'utf8');
+function sliceBetween(src, startMarker, endMarker, what) {
+    const start = src.indexOf(startMarker);
+    assert(start > -1, 'could not locate ' + startMarker + ' for ' + what);
+    const end = src.indexOf(endMarker, start + startMarker.length);
+    assert(end > -1, 'could not locate ' + endMarker + ' after ' + startMarker + ' for ' + what);
+    return src.slice(start, end);
+}
+
+// ---- firestore.rules ----
+
+// 1. The room id is the `branch-` prefix; slugging stays client-side.
+// ⚠️ matches() is a FULL-STRING match in the rules language, so this MUST
+// carry the trailing '.*' — '^branch-' alone matches nothing and denies
+// every branch-room read and write (that is exactly what production showed
+// before the fix: op=read room AND op=seed room both denied).
+assert(
+    rules.indexOf("chatId.matches('^branch-.*')") > -1,
+    'isBranchRoom() must recognise branch rooms by their `branch-` prefix with a full-string match'
+);
+
+// 2. Only a superadmin may WRITE a branch room — create it, and change the
+//    `members` list the rules read for membership.
+assert(
+    rules.indexOf('return isSuperAdmin() && isBranchRoom(chatId);') > -1,
+    'canManageBranchRoom() must be exactly (isSuperAdmin && isBranchRoom)'
+);
+assert(
+    block.indexOf('allow create: if canManageBranchRoom(chatId)') > -1,
+    'the room `allow create` must be gated by canManageBranchRoom() — that is what ' +
+    'lets the approval generate the room and nothing else'
+);
+const createAt = block.indexOf('allow create: if canManageBranchRoom(chatId)');
+const roomCreateStmt = block.slice(createAt, block.indexOf(';', createAt) + 1);
+assert(
+    roomCreateStmt.indexOf('request.resource.data.keys().hasOnly(') > -1,
+    'the create rule must keep its hasOnly() field allowlist — the branch clause is an OR, ' +
+    'and it must not widen what a 1:1 room may write'
+);
+assert(
+    roomCreateStmt.indexOf('request.resource.data.members.size() == 2') > -1,
+    'a 1:1 room must still require exactly 2 members'
+);
+const updateAt = block.indexOf('allow update: if canManageBranchRoom(chatId)');
+assert(updateAt > -1, 'the branch-room `allow update` must be gated by canManageBranchRoom()');
+const branchUpdateStmt = block.slice(updateAt, block.indexOf(';', updateAt) + 1);
+assert(
+    branchUpdateStmt.indexOf("'members'") > -1,
+    'the branch-room update must allow changing `members` — that is how a re-approval ' +
+    'reseeds the team; the 1:1 update rule must keep it frozen'
+);
+
+// 3. ⚠️ SECURITY: reading a branch room is membership OR superadmin, never
+//    blanket. The clause used to be a bare `|| isBranchRoom(chatId)` with no
+//    isSignedIn() anywhere in it — any caller, logged out included, could read
+//    chats/branch-*/messages. Members pass through isChatMember() (the
+//    approval seeds `members`), so the branch clause only has to cover
+//    superadmin management. This fails if the blanket form ever returns.
+const canReadAt = rules.indexOf('function canReadChat(chatId)');
+assert(canReadAt > -1, 'canReadChat() helper is missing from firestore.rules');
+const readFn = rules.slice(canReadAt, rules.indexOf('\n    }', canReadAt));
+assert(
+    readFn.indexOf('isChatMember(chatId)') > -1 && readFn.indexOf('isLegacyArchive(chatId)') > -1,
+    'canReadChat() must keep its membership and legacy-archive halves'
+);
+assert(
+    readFn.indexOf('isSuperAdmin() && isBranchRoom(chatId)') > -1,
+    'a branch-room read must be superadmin-gated — members are covered by isChatMember()'
+);
+assert(
+    readFn.indexOf('|| isBranchRoom(chatId)') === -1,
+    'canReadChat() must NEVER blanket-grant branch rooms: that handed chats/branch-* to ' +
+    'every caller, including logged-out ones'
+);
+
+// ---- script.js: the approval hook ----
+assert(
+    approvalSrc.indexOf('async function ensureBranchGroupChats(') > -1,
+    'script.js must define ensureBranchGroupChats()'
+);
+const approveFn = sliceBetween(approvalSrc, 'async function approveUser(', 'async function ensureBranchGroupChats(', 'approveUser');
+assert(
+    approveFn.indexOf('ensureBranchGroupChats(') > -1,
+    'approveUser() must auto-create the branch group chats — approving a member for a store ' +
+    'must leave that store group already in the chat'
+);
+{
+    const at = approveFn.indexOf('catch (error)');
+    assert(
+        at > -1 && approveFn.indexOf('return;', at) > -1,
+        'approveUser() must bail on approval failure so the chat seed never runs for a failed approval'
+    );
+}
+const ensureFn = sliceBetween(approvalSrc, 'async function ensureBranchGroupChats(', 'async function updateUserPermissions(', 'ensureBranchGroupChats');
+assert(
+    ensureFn.indexOf('chat.branchKey(branch)') > -1,
+    'the room id must come from ChatService.branchKey — one slug rule for client, rules and approval'
+);
+assert(
+    ensureFn.indexOf('chat.branchGroupMembers(') > -1,
+    'membership must come from ChatService.branchGroupMembers — ONE tested implementation, ' +
+    'not a second copy in the approval path'
+);
+assert(
+    ensureFn.indexOf('merge: true') > -1,
+    'the room write must be merge:true — re-running an approval can only converge, ' +
+    'never duplicate a room or clobber its message preview'
+);
+assert(
+    ensureFn.indexOf('existing.data()') > -1 && ensureFn.indexOf('continue') > -1,
+    'an existing room whose members already match must be SKIPPED (duplicate-skip), not rewritten'
+);
+assert(
+    ensureFn.indexOf('title: String(branch)') > -1,
+    "the room's `title` must be the bare branch name — that is the store name the user sees"
+);
+assert(
+    ensureFn.indexOf('members: members') > -1,
+    'the computed team must be written into `members` — that array is what the rules read'
+);
+assert(
+    ensureFn.indexOf('noteBranchRoom') > -1,
+    "a seeded room must be noted locally (ChatService.noteBranchRoom) so it appears in the " +
+    "approver's sidebar immediately, denied list query or not"
+);
+const saveFn = sliceBetween(approvalSrc, 'async function updateUserPermissions(', 'async function rejectUser(', 'updateUserPermissions');
+assert(
+    saveFn.indexOf('ensureBranchGroupChats(') > -1,
+    'saving permissions must seed too — ticking another branch onto an existing account is ' +
+    'the same assignment flow'
+);
+
+// ---- the REMOVAL path: unticking a branch must PRUNE the person from the room ----
+//  The sidebar is `chats where members array-contains me`, so as long as a
+//  removed account is still in a room's `members`, hard-refreshing their
+//  dashboard keeps returning that store chat — which is exactly the bug users
+//  hit. The save must diff the branches the account HELD (read BEFORE the
+//  update overwrites them) against the ones it KEPT, and reseed the removed
+//  rooms from the FRESH roster with approvedEmail = null: the roster alone
+//  then decides membership, and the person drops out of `members`. Passing
+//  their email would re-ADD them, which is why it must be null.
+assert(
+    saveFn.indexOf('let prevBranches = [];') > -1,
+    'updateUserPermissions() must read the branches the account HOLDS before the update overwrites ' +
+    'them — without the prior value there is no diff, so a removed branch room is never reseeded ' +
+    'and the store chat stays in their sidebar for ever'
+);
+assert(
+    saveFn.indexOf('ensureBranchGroupChats(null, removedBranches)') > -1,
+    'the removed branches must go back through ensureBranchGroupChats(null, ...) — null approvedEmail ' +
+    'so the FRESH roster (which no longer lists this account there) decides membership and drops them ' +
+    'from `members`; the list query is `members array-contains me`, so THAT array is the access list'
+);
+assert(
+    ensureFn.indexOf('!roomExists && members.length < 2') > -1,
+    'the < 2 guard must block only CREATING a near-empty room — an EXISTING room whose team shrank ' +
+    '(the last assigned member was unticked, only superadmins remain) must still be reseeded, or the ' +
+    'removed account stays in `members` for ever despite the removal path above'
+);
+{
+    const deleteFn = sliceBetween(approvalSrc, 'async function deleteUser(', 'const DEFAULT_BRANCH_NAMES', 'deleteUser');
+    assert(
+        deleteFn.indexOf('ensureBranchGroupChats(null, prevBranches)') > -1,
+        'deleting an account must also reseed every room it was assigned to — a deleted account left ' +
+        'in `members` still occupies the store chat after every refresh'
+    );
+}
+
+// ---- script.js: dashboard-load auto-backfill (the UNION of all branch access) ----
+//  Existing accounts predate the approve/save hooks: without this sweep their
+//  store group chat would only appear if someone re-saved the account. A
+//  superadmin's dashboard load seeds EVERY distinct branch found in ANY
+//  approved account's `branches` — same seeder, one users read, no-op when
+//  converged.
+assert(
+    approvalSrc.indexOf('async function backfillBranchGroupChats(') > -1,
+    'script.js must define backfillBranchGroupChats() — existing users need their branch ' +
+    'rooms without anyone re-saving them'
+);
+{
+    const backfillFn = sliceBetween(
+        approvalSrc,
+        'async function backfillBranchGroupChats(',
+        'async function updateUserPermissions(',
+        'backfillBranchGroupChats'
+    );
+    assert(
+        backfillFn.indexOf('currentUserIsSuperAdmin()') > -1,
+        'the backfill must be superadmin-only — an operator session must never write rooms'
+    );
+    assert(
+        backfillFn.indexOf('ensureBranchGroupChats(null, [branch], allUsers)') > -1,
+        'the backfill must seed through the SAME ensureBranchGroupChats path with the shared ' +
+        'users snapshot — a second seeder would drift from the approval flow'
+    );
+    assert(
+        backfillFn.indexOf('u.branches') > -1
+            && backfillFn.indexOf('branches.push(') > -1
+            && backfillFn.indexOf('seen[key]') > -1,
+        'the backfill must sweep the union of branches across ALL approved accounts, deduped — ' +
+        'one chats/branch-<slug> room per distinct branch'
+    );
+}
+assert(
+    approvalSrc.indexOf('backfillBranchGroupChats().catch') > -1,
+    'the auth callback must fire-and-forget the backfill with a catch — chat bookkeeping ' +
+    'must never delay or break dashboard load'
+);
+assert(
+    approvalSrc.indexOf("currentUserRole === 'superadmin' && !branchBackfillAttempted") > -1,
+    'the backfill must run once per page load, behind a superadmin check'
+);
+
+// ---- js/chat.js: visibility, display, membership helper ----
+assert(
+    clientSrc.indexOf('function branchGroupMembers(') > -1,
+    'chat.js must define branchGroupMembers(branch, users, approvedEmail)'
+);
+assert(
+    /branchGroupMembers:\s*branchGroupMembers/.test(clientSrc),
+    'branchGroupMembers must be exported on ChatService — the approval path and this test ' +
+    'both go through it'
+);
+assert(
+    /branchKey:\s*branchKey/.test(clientSrc),
+    'branchKey must be exported on ChatService so the approval uses the SAME slug rule'
+);
+assert(
+    clientSrc.indexOf('group && group.title') > -1,
+    'the sidebar row must name a branch room from its seeded `title` (the store name), ' +
+    'falling back to branchGroupName()'
+);
+
+const headerSlice = sliceBetween(clientSrc, 'function applyActiveRoomToHeader()', 'function setComposerEnabled(', 'applyActiveRoomToHeader');
+assert(
+    headerSlice.indexOf('branchSummary.title') > -1,
+    'the open header must show the seeded branch title, not the raw room id'
+);
+const listSlice = sliceBetween(clientSrc, 'function startConversationListListener()', 'function stopConversationListListener()', 'startConversationListListener');
+assert(
+    listSlice.indexOf('next[roomId].title') > -1 && listSlice.indexOf('next[roomId].members') > -1,
+    'the list-query path must carry `title`/`members` into branch summaries — it REPLACES the ' +
+    'whole map, so without this the row name and @mentions break the moment the query answers'
+);
+const fallbackSlice = sliceBetween(clientSrc, 'function applyRoomSummaryToList(', 'function subscribeRoomForList(', 'applyRoomSummaryToList');
+assert(
+    fallbackSlice.indexOf('summary.title = data.title') > -1 && fallbackSlice.indexOf('summary.members = data.members') > -1,
+    'the per-room fallback path must carry `title`/`members` too'
+);
+const syncSlice = sliceBetween(clientSrc, 'function syncSummaryFromMessage(', 'function everyoneKnownForGroup(', 'syncSummaryFromMessage');
+assert(
+    syncSlice.indexOf('summary.members = current.members') > -1,
+    'sending a message rebuilds the summary object — it must carry `title`/`members` forward or ' +
+    'the first message in a branch room would rename the row and empty the @mention picker'
+);
+const styleLine = clientSrc.split('\n').find(function (l) {
+    return l.indexOf('GROUP_STYLE_ROOM_ROLES =') !== -1;
+}) || '';
+assert(
+    styleLine.indexOf("'owner'") !== -1 && styleLine.indexOf("'rmsm'") !== -1,
+    'GROUP_STYLE_ROOM_ROLES must include owner + rmsm — the store team is Superadmin + Area ' +
+    'Manager + HR + the assigned RM/SM; a member who cannot even see the row is not in the group'
+);
+assert(
+    clientSrc.indexOf('ChatService.noteBranchRoom =') > -1,
+    'chat.js must expose noteBranchRoom() so a just-seeded room shows up live'
+);
+
+// ---- FUNCTIONAL: the REAL seeder against fixtures ----
+//  Presence checks cannot catch seeding the WRONG people — this runs the
+//  actual branchGroupMembers() out of js/chat.js against a fixture roster.
+{
+    function extractFnSrc(name) {
+        const m = clientSrc.match(new RegExp('function\\s+' + name + '\\([^)]*\\)\\s*\\{[\\s\\S]*?\\n\\s{4}\\}'));
+        assert(m, 'could not extract function ' + name + ' from js/chat.js');
+        return m[0];
+    }
+    const rolesMatch = clientSrc.match(/CHAT_ALLOWED_ROLES\s*=\s*\[([^\]]+)\]/);
+    assert(rolesMatch, 'CHAT_ALLOWED_ROLES not found for the branchGroupMembers harness');
+    const harness = new Function(
+        'var CHAT_ALLOWED_ROLES = [' + rolesMatch[1] + '];\n'
+        + extractFnSrc('normalizeRole') + '\n'
+        + extractFnSrc('branchGroupMembers') + '\n'
+        + 'return branchGroupMembers;'
+    );
+    const branchGroupMembers = harness();
+
+    const users = [
+        { email: 'sa@x.com', role: 'superadmin', status: 'approved', branches: [] },
+        { email: 'am@x.com', role: 'owner', status: 'approved', branches: ['SM Fairview'] },
+        { email: 'hr@x.com', role: 'hr', status: 'approved', branches: ['SM Fairview'] },
+        { email: 'rm1@x.com', role: 'rmsm', status: 'approved', branches: ['SM Fairview'] },
+        { email: 'rm2@x.com', role: 'rmsm', status: 'approved', branches: ['Banawe'] },
+        { email: 'new@x.com', role: 'owner', status: 'pending', branches: ['SM Fairview'] },
+        { email: 'rej@x.com', role: 'hr', status: 'rejected', branches: ['SM Fairview'] },
+        { email: 'op@x.com', role: 'operator', status: 'approved', branches: ['SM Fairview'] }
+    ];
+
+    const team = branchGroupMembers('SM Fairview', users, 'fresh@x.com');
+    assert.deepStrictEqual(
+        team,
+        ['am@x.com', 'fresh@x.com', 'hr@x.com', 'rm1@x.com', 'sa@x.com'].sort(),
+        'the store team must be exactly: the approved person + superadmins + the owner/HR/rmsm ' +
+        'ASSIGNED TO THIS BRANCH — no one else'
+    );
+    assert(
+        team.indexOf('rm2@x.com') === -1,
+        'an RM/SM assigned to ANOTHER branch must not leak into this store group'
+    );
+    assert(
+        team.indexOf('new@x.com') === -1 && team.indexOf('rej@x.com') === -1 && team.indexOf('op@x.com') === -1,
+        'pending, rejected and operator accounts must never be seeded into a branch room'
+    );
+    assert.deepStrictEqual(
+        branchGroupMembers('SM Fairview', users, 'fresh@x.com'),
+        team,
+        'identical inputs must always produce the identical team (re-approvals are idempotent)'
+    );
+    assert.deepStrictEqual(
+        branchGroupMembers('  sm FAIRview  ', users, 'fresh@x.com'),
+        team,
+        'branch comparison must trim + ignore case, like every other branch check in the app'
+    );
+    const noSa = branchGroupMembers('Banawe', users.filter(function (u) { return u.role !== 'superadmin'; }));
+    assert.deepStrictEqual(
+        noSa,
+        ['hr@x.com', 'rm2@x.com'],
+        'without any superadmin, the branch-assigned RM/SM AND the company-wide HR still seed — ' +
+        "HR is in EVERY branch room by the spec, even one they hold no assignment for (hr@x.com's " +
+        "branches are ['SM Fairview'])"
+    );
+    assert.deepStrictEqual(
+        branchGroupMembers('Nowhere', users),
+        [],
+        'a branch with NO approved Area Manager / RM / SM assigned yields NO room ' +
+        '(Super Admin and HR are NOT auto-seeded into empty branches — the chat ' +
+        'appears only once a store user is assigned)'
+    );
+}
+
+console.log('  \u2713 Branch group chat tests passed (approval hook, seeded membership, rules).');
+
+// ---------------------------------------------------------------
 // 15. THE MODAL MUST NOT RESIZE ITSELF (chat.css).
 //
 //     With only a `max-height`, the modal was CONTENT-DRIVEN: it grew and
@@ -1334,3 +1689,6 @@ assert(
     /margin:\s*12px 12px 10px;/.test(cssBlock('.chat-search {')),
     'with the header row gone the search box is the first thing in the sidebar and needs its own top margin'
 );
+
+console.log('\n\u2705 All chat-rules tests passed (rules, roster, branch group chats, modal CSS).');
+

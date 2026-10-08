@@ -393,12 +393,12 @@ console.log('\nTesting the project reset tool (what it must never delete)...');
     console.log('  PASS  branches and counters are hard-protected; users is role-filtered');
 }
 
-// --- 3. ONLY owner/hr MAY BE DELETED ---------------------------------------
+// --- 3. Owner/HR/RM.SM ARE THE ONLY DELETABLE ROLES ---------------------------------------
 {
     const roles = (resetHtml.match(/var DELETE_ROLES\s*=\s*\[([^\]]*)\]/) || [])[1] || '';
-    assert(/'owner'/.test(roles) && /'hr'/.test(roles),
-        'Area Manager (owner) and HR are the only roles registration can create, and both need ' +
-        'superadmin approval — they are exactly what a reset should clear');
+    assert(/'owner'/.test(roles) && /'hr'/.test(roles) && /'rmsm'/.test(roles),
+        'Owner (Area Manager), HR and RM/SM are the roles the reset can delete; ' +
+        'they are exactly what a reset should clear');
     assert(!/superadmin/.test(roles),
         'superadmin MUST NOT be in DELETE_ROLES — no in-app account can create the first one');
     assert(!/operator/.test(roles),
@@ -408,7 +408,7 @@ console.log('\nTesting the project reset tool (what it must never delete)...');
         'the gate must refuse anything whose role is not exactly superadmin');
     assert(/collection\('users'\)\.doc\(lower\)/.test(resetHtml),
         'the gate must read users/<email> — the same doc isSuperAdmin() uses in the rules');
-    console.log('  PASS  only owner/hr are deletable; superadmin and operator always survive');
+    console.log('  PASS  only owner/hr/rmsm are deletable; superadmin and operator always survive');
 }
 // --- 4. THE GATE MUST FAIL CLOSED AND RUN BEFORE ANY WRITE -----------------
 // An unrecognised role must be REFUSED, not treated as admin — otherwise a role
@@ -543,7 +543,10 @@ console.log('\nTesting the project reset tool (what it must never delete)...');
         assert(new RegExp("step\\('[^']*',\\s*'" + c + "'").test(runBody),
             c + ' must be deleted through step() so a rejection is recorded and the run continues');
     });
-    assert(/step\('Area Manager \/ HR accounts',\s*'users'/.test(runBody),
+    // Label-agnostic on purpose: the display label is free to change (it did,
+    // when RM/SM accounts joined this step) — what must never change is that
+    // the users step goes through step(), so a rejection is recorded.
+    assert(/step\('[^']*',\s*'users'/.test(runBody),
         'the accounts — the last step, and the one a chats failure previously prevented ' +
         'reaching — must go through step() too');
     assert(/deleteChatRooms\(\)/.test(runBody),

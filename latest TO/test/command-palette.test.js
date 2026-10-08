@@ -389,7 +389,7 @@ assert.strictEqual(
 const palettePos = mainHtml.indexOf('js/command-palette.js');
 assert(palettePos > -1, 'js/command-palette.js must be loaded on main.html');
 assert(
-    palettePos > mainHtml.indexOf('<script src="script.js">'),
+    palettePos > mainHtml.indexOf('<script src="script.js?v='),
     'js/command-palette.js must load AFTER script.js, which defines switchTab and escapeHTML'
 );
 assert(

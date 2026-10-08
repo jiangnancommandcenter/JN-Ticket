@@ -9,7 +9,9 @@ const $owner = (id) => document.getElementById(id);
 const ownerNavItems = Array.from(document.querySelectorAll('#ownerSidebarNav .nav-item'));
 const ownerTabContents = Array.from(document.querySelectorAll('#ownerMainContent .tab-content'));
 const ownerPageTitle = $owner('ownerPageTitle');
-const ownerPageSubtitle = $owner('ownerPageSubtitle');
+// ⚠️ #ownerPageSubtitle was removed from ownerdashboard.html (phone fit) — no
+// const here on purpose. Re-adding a lookup would return null and any
+// `.textContent` on it would throw on load.
 const ownerUserEmail = $owner('ownerUserEmail');
 const ownerUserRoleBadge = $owner('ownerUserRoleBadge');
 const ownerBranchFilter = $owner('ownerBranchFilter');
@@ -260,7 +262,7 @@ window.getOwnerRole = function () {
  * in firestore.rules, the operator redirect below — keeps comparing 'owner'.
  */
 function isAreaManager() {
-  return activeUserRole === 'owner';
+  return activeUserRole === 'owner' || activeUserRole === 'rmsm';
 }
 
 /**
@@ -270,17 +272,26 @@ function isAreaManager() {
  * ⚠️ ONE definition on purpose: the badge and the tile previously carried two
  * byte-identical ternaries, which is precisely how a rename like this one ends
  * up applied to one and forgotten on the other. The badge text is also parsed
- * back out of the DOM as a role fallback by js/hr-violations.js (see readRole
- * there), so it must stay in step with that module's matcher.
+ * back out of the DOM as a role fallback by js/hr-violations.js and
+ * js/owner-violations.js (see readRole there), so it must stay in step with
+ * those modules' matchers — they map "Area Manager" → 'owner' and
+ * "RM/SM" → 'rmsm' when re-deriving the stored value.
  */
 function accessLevelLabel() {
   return activeUserRole === 'superadmin'
     ? 'Superadmin'
     : activeUserRole === 'hr'
       ? 'HR'
-      : isAreaManager()
-        ? 'Area Manager'
-        : (activeUserPermissions.permissions && activeUserPermissions.permissions.canEdit ? 'Editor' : 'Viewer');
+      // ⚠️ 'rmsm' must be checked BEFORE isAreaManager(): that gate returns
+      // true for RM/SM too (shared +Ticket button, expiry window and
+      // resolved-only scope), so the fall-through would keep labelling a
+      // re-roled RM/SM account "Area Manager" — the bug where the badge
+      // and the KPI tile never changed.
+      : activeUserRole === 'rmsm'
+        ? 'RM/SM'
+        : isAreaManager()
+          ? 'Area Manager'
+          : (activeUserPermissions.permissions && activeUserPermissions.permissions.canEdit ? 'Editor' : 'Viewer');
 }
 
 /**
@@ -364,7 +375,7 @@ function setActiveUser(permissions, role = 'viewer') {
         ? 'superadmin'
         : normalizedRole === 'hr'
           ? 'hr'
-          : normalizedRole === 'owner'
+          : (normalizedRole === 'owner' || normalizedRole === 'rmsm')
             ? 'owner'
             : (activeUserPermissions.permissions?.canEdit ? 'editor' : 'viewer')
     );
@@ -643,7 +654,7 @@ function isApprovedTicket(ticket) {
  *   expiryAppliesToViewer()       → the policy
  */
 function expiryAppliesToViewer() {
-  return activeUserRole === 'owner';
+  return activeUserRole === 'owner' || activeUserRole === 'rmsm';
 }
 
 /**
@@ -1666,14 +1677,14 @@ function renderOwnerTickets(allTickets) {
     if (!ownerTicketsBody) return;
 
     if (!db || typeof db.collection !== 'function') {
-      ownerTicketsBody.innerHTML = '<tr><td colspan="8" class="empty-state"><em>Firebase is unavailable.</em></td></tr>';
+      ownerTicketsBody.innerHTML = '<tr><td colspan="9" class="empty-state"><em>Firebase is unavailable.</em></td></tr>';
       return;
     }
 
     // Branch owners, HR and superadmins may only view APPROVED tickets.
     // HR is deliberately included: it is an owner in every respect except
     // chat access, so it must not gain a wider ticket scope by accident.
-    const ownerResolvedOnly = activeUserRole === 'owner' || activeUserRole === 'hr' || activeUserIsSuperAdmin;
+    const ownerResolvedOnly = activeUserRole === 'owner' || activeUserRole === 'hr' || activeUserRole === 'rmsm' || activeUserIsSuperAdmin;
 
     // ⚠️ THE ACCESS SPLIT — expired vs not expired. Plain labels, no counts.
     // 'all' is the default so nothing disappears on load, and an unrecognised
@@ -1753,7 +1764,7 @@ function renderOwnerTickets(allTickets) {
       const emptyText = ownerResolvedOnly
         ? 'No approved tickets yet. A ticket appears here once the superadmin approves it.'
         : 'No tickets found for your branches.';
-      ownerTicketsBody.innerHTML = `<tr><td colspan="8" class="empty-state"><i class="fas fa-ticket-alt"></i><p>${escapeHTML(emptyText)}</p></td></tr>`;
+      ownerTicketsBody.innerHTML = `<tr><td colspan="9" class="empty-state"><i class="fas fa-ticket-alt"></i><p>${escapeHTML(emptyText)}</p></td></tr>`;
       return;
     }
     ownerTicketsBody.innerHTML = tickets.map((t) => {
@@ -1884,6 +1895,31 @@ function renderOwnerTickets(allTickets) {
 
       const statusCell = `<span class="status-badge ${expired ? 'resolved' : statusClass}">`
         + escapeHTML(status) + '</span>';
+
+      // ⚠️ THE ACCESS FOOT IS GATED ON `expiryAppliesToViewer()` — the SAME
+      // predicate applyViewerExpiryChrome() uses to hide the Access column
+      // (7th of 8) for HR and a superadmin. That class hides the desktop
+      // cell by position; the card has no position to hide, so the gate has
+      // to be here, in the renderer, or a role with no viewing window would
+      // be shown an Access section that means nothing to them.
+      const cardAccessBlock = expiryAppliesToViewer()
+        ? `<div class="approval-card-expiry">
+             <span class="approval-card-label">Access</span>
+             ${accessCell}${accessNote}
+           </div>`
+        : '';
+      // Same eye button as the desktop Actions cell. The whole card is
+      // already tappable (the tr carries the onclick), so this is a pointer
+      // hint for the footer's right edge, exactly like the Approvals card.
+      const cardFoot = `<div class="approval-card-foot">
+             ${cardAccessBlock}
+             <div class="approval-card-actions">
+               <button type="button" class="btn btn-icon action-btn view" data-tooltip="${expired ? 'View details (access closed)' : 'View'}">
+                 <i class="fas fa-eye"></i>
+               </button>
+             </div>
+           </div>`;
+
       return `
       <tr onclick="window.openOwnerReport('${escapeHTML(t.id)}')">
         <td data-label="Ticket"><span class="priority-dot"><span class="dot ${dotClass}"></span><span class="ticket-link">${escapeHTML(t.ticketNumber)}</span></span></td>
@@ -1898,6 +1934,21 @@ function renderOwnerTickets(allTickets) {
             <button type="button" class="btn btn-icon action-btn view" data-tooltip="${expired ? 'View details (access closed)' : 'View'}">
               <i class="fas fa-eye"></i>
             </button>
+          </div>
+        </td>
+        <td class="approval-card-cell" data-label="Card">
+          <div class="approval-card">
+            <div class="approval-card-head">
+              <span class="approval-card-branch"><i class="fas fa-ticket-alt"></i>${escapeHTML(t.ticketNumber)}</span>
+              <span class="approval-card-pill approval-card-pill--${expired ? 'resolved' : statusClass}">${escapeHTML(status)}</span>
+            </div>
+            <div class="approval-card-grid">
+              <div class="approval-card-field"><span class="approval-card-label">Branch</span><span class="approval-card-value">${escapeHTML(t.branchName)}</span></div>
+              <div class="approval-card-field"><span class="approval-card-label">Reporter</span><span class="approval-card-value">${escapeHTML(t.authorName)}</span></div>
+              <div class="approval-card-field"><span class="approval-card-label">Date Created</span><span class="approval-card-value approval-card-muted">${escapeHTML(createdDate)}</span></div>
+              <div class="approval-card-field"><span class="approval-card-label">Incident</span><span class="approval-card-value">${escapeHTML(t.title)}</span></div>
+            </div>
+            ${cardFoot}
           </div>
         </td>
       </tr>
@@ -1917,7 +1968,7 @@ function renderOwnerTickets(allTickets) {
   } catch (error) {
     console.error('Failed to render owner tickets:', error);
     if (ownerTicketsBody) {
-      ownerTicketsBody.innerHTML = '<tr><td colspan="8" class="empty-state"><em>Unable to load tickets.</em></td></tr>';
+      ownerTicketsBody.innerHTML = '<tr><td colspan="9" class="empty-state"><em>Unable to load tickets.</em></td></tr>';
     }
   }
 }
@@ -1933,7 +1984,7 @@ async function loadOwnerTickets() {
     if (!ownerTicketsBody) return;
 
     if (!db || typeof db.collection !== 'function') {
-      ownerTicketsBody.innerHTML = '<tr><td colspan="8" class="empty-state"><em>Firebase is unavailable.</em></td></tr>';
+      ownerTicketsBody.innerHTML = '<tr><td colspan="9" class="empty-state"><em>Firebase is unavailable.</em></td></tr>';
       return;
     }
 
@@ -1949,7 +2000,7 @@ async function loadOwnerTickets() {
   } catch (error) {
     console.error('Failed to load owner tickets:', error);
     if (ownerTicketsBody) {
-      ownerTicketsBody.innerHTML = '<tr><td colspan="8" class="empty-state"><em>Unable to load tickets.</em></td></tr>';
+      ownerTicketsBody.innerHTML = '<tr><td colspan="9" class="empty-state"><em>Unable to load tickets.</em></td></tr>';
     }
   }
 }
@@ -2035,6 +2086,32 @@ bindOwnerEvents();
 
   if (toggle) toggle.addEventListener('click', () => document.body.classList.toggle('mobile-nav-open'));
   if (backdrop) backdrop.addEventListener('click', close);
+})();
+
+// ===== Mockup identity strip: auth row placement (PHONE ONLY) =====
+// The emerald .owner-subhead strip only exists at <=899px (the same
+// breakpoint as the mobile drawer above; the CSS default is display:none).
+// The DOM is original-desktop-first: #ownerAuthStatus STARTS in
+// .header-right — exactly where it lived before the strip existed — so at
+// >=900px, and on any page where this script does not run, the header is
+// unchanged. On phones the auth row moves into the strip's slot, which is
+// where the pasted mockup puts it. It is ONE node with ONE set of ids (never
+// cloned), so setActiveUser()'s writes to #ownerUserEmail / #ownerUserRoleBadge
+// and js/hr-violations.js's badge read keep working across the move — element
+// references are not invalidated by relocating the node.
+(function placeOwnerAuthStatus() {
+  const auth = document.getElementById('ownerAuthStatus');
+  const headerRight = document.querySelector('#ownerMainContent .header-right');
+  const stripSlot = document.getElementById('ownerSubheadAuth');
+  if (!auth || !headerRight || !stripSlot) return;
+  const phone = window.matchMedia('(max-width: 899px)');
+  const apply = () => {
+    const target = phone.matches ? stripSlot : headerRight;
+    if (auth.parentElement !== target) target.appendChild(auth);
+  };
+  apply();
+  if (typeof phone.addEventListener === 'function') phone.addEventListener('change', apply);
+  else if (typeof phone.addListener === 'function') phone.addListener(apply);
 })();
 
 auth.onAuthStateChanged(async (user) => {

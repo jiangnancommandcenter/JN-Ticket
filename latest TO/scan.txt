@@ -1,0 +1,7 @@
+
+Γ£à Chat access gate tests passed (hr + superadmin + Area Manager chat 1:1; the All HR group stays hr + superadmin only; operator excluded everywhere).
+Γ£à Draggable launcher tests passed (drag moves it, click opens chat, clamped + resettable).
+Γ£à Live receipt tests passed (ticks repaint without a refresh; a CLOSED chat does not mark seen).
+Γ£à Mention tests passed (roster, stored mentions, highlight, mentions-me flag, XSS-safe).
+Γ£à Mention picker tests passed (opens on @, filters, closes on space/email, inserts on pick).
+

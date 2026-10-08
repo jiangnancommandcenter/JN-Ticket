@@ -926,6 +926,137 @@
             box-shadow: var(--owner-focus-ring);
         }
 
+        /* ============================================================
+           MOCKUP REPRODUCTION — PHONE ONLY (<=899px), TOKEN-ONLY
+           ============================================================
+           Two pieces copied from the pasted mobile mockup, rebuilt in this
+           page's own style system so dark mode comes from the tokens (there
+           is no `dark:` variant to keep in sync) and NO rule can leak into
+           main.html:
+             1. The emerald identity strip under the top header.
+             2. The Tickets "Search & Filter" card (mockup: p-3.5 rounded-2xl
+                card, full-width search, 2-column select grid).
+           ⚠️ EVERYTHING is inside the @media (max-width: 899px) below — the
+           same breakpoint the page's mobile drawer/tile layer uses. At
+           >=900px (desktop) the strip is display:none and the Tickets
+           toolbar falls back to the ORIGINAL .toolbar/.owner-toolbar flex
+           row from the <link>ed style.css, so the desktop page is
+           byte-identical to before this block existed.
+           ============================================================ */
+        .owner-subhead { display: none; }
+
+        @media (max-width: 899px) {
+
+        /* ---- 1. Identity strip (mockup's sub-header) ----
+           The green tint is --color-primary-bg, which theme.css re-tints for
+           dark (0.12 -> 0.16 alpha over a dark surface), so the strip stays
+           a tint and not a hardcoded emerald. The label stays
+           --text-secondary, not the green: #72bf6a on a near-white tint is
+           ~2.1:1, far under the 4.5:1 WCAG AA floor for text. The icon is
+           a graphic next to a label, so it may carry the hue. */
+        .owner-subhead {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px 14px;
+            flex-wrap: wrap;
+            padding: 8px 20px;
+            background: var(--color-primary-bg);
+            border-bottom: 1px solid var(--border-color);
+            font-size: 0.75rem;
+        }
+        .owner-subhead-label {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            font-weight: 700;
+            color: var(--text-secondary);
+            min-width: 0;
+        }
+        .owner-subhead-label i { color: var(--color-online); }
+        /* The slot js/owner-dashboard.js moves #ownerAuthStatus into on
+           phones. :empty keeps it from occupying space before the move (or
+           forever, if JS never runs). */
+        .owner-subhead-auth { display: contents; }
+        .owner-subhead-auth:empty { display: none; }
+        .owner-subhead .header-auth-status {
+            margin-left: auto;
+            font-weight: 600;
+            color: var(--text-secondary);
+        }
+
+        /* ---- 2. Tickets filter card (mockup's search & filter card) ----
+           ⚠️ #ownerMainContent-PREFIXED on purpose. The page's own inline
+           rules pin the three selects by ID alone (`#ownerTicketAccessFilter
+           { width: 168px; max-width: 200px }`, specificity 1,0,0) and
+           `.owner-toolbar .search-box { max-width: 420px }` (0,2,0). An ID
+           beats any class-only selector, so WITHOUT the ID prefix these
+           would keep fighting the card layout — (1,1,0)+ outranks both with
+           no !important, the same trick the phone layer in style.css uses.
+
+           The phone layer already lays this toolbar out as a 2-col tile grid
+           below 899px; this block uses the SAME grid at every width, so the
+           card reads identically on a phone and on the desktop. */
+        #ownerMainContent .owner-filter-card {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+            align-items: stretch;
+            margin-bottom: 0;
+            padding: 14px;
+            max-width: 640px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            box-shadow: var(--owner-elev-0);
+        }
+        #ownerMainContent .owner-filter-card .search-box {
+            grid-column: 1 / -1;
+            flex: none;
+            width: 100%;
+            min-width: 0;
+            max-width: none;
+            padding: 0 12px;
+            border-radius: 12px;
+        }
+        #ownerMainContent .owner-filter-card .filter-group {
+            min-width: 0;
+            padding: 0;
+            background: transparent;
+            border: none;
+            border-radius: 0;
+        }
+        #ownerMainContent .owner-filter-card select,
+        #ownerMainContent .owner-filter-card .filter-group select {
+            flex: 1 1 auto;
+            width: 100%;
+            min-width: 0;
+            max-width: none;
+            padding: 9px 12px;
+            font-size: 0.78rem;
+            border: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+            border-radius: 12px;
+            color: var(--text-primary);
+        }
+        /* The mockup has exactly two selects; this page has three. Two
+           half-width tiles, then the branch select takes the rest of the
+           row — a lone half-width third tile reads as a mistake. When the
+           JS hides the access filter (no viewing window for this role),
+           the priority tile simply sits alone and the row still holds. */
+        #ownerMainContent .owner-filter-card .owner-filter-group:last-child {
+            grid-column: 1 / -1;
+        }
+
+        /* Mockup's rounded-xl (12px) header controls — phone only, so the
+           desktop header keeps its shared radii. Touch sizing (>=44x44) is
+           untouched — it is pinned by test/owner-mobile.test.js. */
+        #ownerMainContent .top-header .icon-btn,
+        #ownerMainContent .menu-toggle,
+        #btnOwnerNewTicket { border-radius: 12px; }
+
+        } /* end @media (max-width: 899px) — MOCKUP REPRODUCTION block */
+
         /* ===== Tickets table =====
            ⚠️ The cell/row backgrounds MUST come from a token, never a
            hardcoded white. A 70%-opaque white on every cell made the dark
@@ -1006,11 +1137,9 @@
            (The off-canvas sidebar drawer itself is handled by the shared
            "MOBILE RESPONSIVE LAYER" block in style.css.) */
         @media (max-width: 899px) {
-            #ownerPageSubtitle {
-                max-width: 100%;
-                white-space: normal;
-                padding: 3px 10px;
-            }
+            /* ⚠️ #ownerPageSubtitle was REMOVED from ownerdashboard.html (phone fit).
+               The span no longer exists, so there is deliberately NO rule for it
+               here. The shared .header-subtitle phone rules serve main.html only. */
             #ownerUserEmail {
                 max-width: 170px;
                 overflow: hidden;
@@ -1027,7 +1156,11 @@
             .owner-panel { padding: 16px; }
             .owner-branch-list .quick-status-item { padding: 11px 12px; min-height: 48px; }
             .table-container { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-            #ownerTicketsTable { min-width: 620px; }
+            /* `#ownerTicketsTable { min-width: 620px }` used to live here to make
+               the 8-column table scrollable. Below 900px that table is CARDS now
+               (shared ROW CARD SWAP in style.css), and a `min-width` on a
+               display:block card stack only forces a horizontal overflow of the
+               whole page — so it is gone rather than overridden. */
             #ownerKpiCards { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
         }
 
@@ -1076,6 +1209,25 @@
                 <i class="fas fa-video"></i>
                 <span>Violations</span>
             </button>
+            <!-- ===== AREA MANAGER HANDOFF =====
+                 Reports a superadmin reviewed and transferred to an AREA
+                 MANAGER (violations.managerStatus == 'transferred').
+
+                 ⚠️ SEPARATE ITEM FROM #hrViolationsNavItem, NOT A REUSE. Both
+                 roles get a nav item labelled "Violations", driven by the SAME
+                 generic switchOwnerTab() (it resolves the section as
+                 `tab` + Capitalised(tabId), hence data-tab="ownerViolations" ->
+                 id="tabOwnerViolations"). Reusing the HR item would give one
+                 role the other's list, and would collide with HR's
+                 `applyRole()` which hides #tabViolations for owners.
+
+                 js/owner-violations.js reveals this only for the stored role
+                 'owner', and scopes the list to that manager's branches.
+                 Strictly read-only, exactly like HR's. -->
+            <button class="nav-item u-hidden" data-tab="ownerViolations" id="ownerViolationsNavItem" style="display:none;">
+                <i class="fas fa-video"></i>
+                <span>Violations</span>
+            </button>
         </nav>
 
         <div class="sidebar-footer">
@@ -1095,7 +1247,6 @@
                     <i class="fas fa-bars"></i>
                 </button>
                 <h1 class="page-title" id="ownerPageTitle">Dashboard</h1>
-                <span class="header-subtitle" id="ownerPageSubtitle">View tickets from your assigned branches</span>
             </div>
             <div class="header-right">
                 <div class="header-actions">
@@ -1145,6 +1296,24 @@
                 </div>
             </div>
         </header>
+
+        <!-- ===== Mockup reproduction: identity strip — PHONE ONLY (<=899px) =====
+             The pasted mockup's emerald sub-header. The DOM is ORIGINAL-DESKTOP
+             FIRST: #ownerAuthStatus lives in .header-right exactly where it
+             always did, so at >=900px the header is unchanged and the strip is
+             display:none (the default rule in the inline <style>). On phones,
+             js/owner-dashboard.js (placeOwnerAuthStatus) moves the auth row
+             into the slot below — same element, same ids, so setActiveUser()'s
+             email/role writes and hr-violations.js's badge read are untouched.
+             Without JS the auth row simply stays in the header and the strip
+             carries only its label. -->
+        <div class="owner-subhead">
+            <span class="owner-subhead-label">
+                <i class="fas fa-shield-halved"></i>
+                <span>Assigned Branches View</span>
+            </span>
+            <span class="owner-subhead-auth" id="ownerSubheadAuth"></span>
+        </div>
 
         <section class="tab-content active" id="tabOverview">
             <div class="section-header owner-section-header">
@@ -1226,7 +1395,7 @@
                     <p>Approved tickets at the branches assigned to you.</p>
                     <span class="owner-window-note" id="ownerWindowNote"></span>
                 </div>
-                <div class="toolbar owner-toolbar">
+                <div class="toolbar owner-toolbar owner-filter-card">
                     <div class="search-box">
                         <i class="fas fa-search"></i>
                         <input id="ownerTicketSearch" type="search" placeholder="Search tickets...">
@@ -1268,7 +1437,7 @@
             </div>
 
             <div class="table-container">
-                <table class="data-table" id="ownerTicketsTable">
+                <table class="data-table row-card-table" id="ownerTicketsTable">
                     <thead>
                         <tr>
                             <th>Ticket No.</th>
@@ -1279,10 +1448,11 @@
                             <th>Status</th>
                             <th>Access</th>
                             <th>Actions</th>
+                            <th class="approval-card-th" aria-hidden="true"><span class="u-hidden">Card</span></th>
                         </tr>
                     </thead>
                     <tbody id="ownerTicketsBody">
-                        <tr><td colspan="8" class="empty-state"><i class="fas fa-ticket-alt"></i><p>No tickets found for your branches.</p></td></tr>
+                        <tr><td colspan="9" class="empty-state"><i class="fas fa-ticket-alt"></i><p>No tickets found for your branches.</p></td></tr>
                     </tbody>
                 </table>
                 <div class="pagination" id="ownerTicketPagination">
@@ -1324,7 +1494,7 @@
             </div>
 
             <div class="table-container">
-                <table class="data-table" id="hrViolationsTable">
+                <table class="data-table row-card-table" id="hrViolationsTable">
                     <thead>
                         <tr>
                             <th>Report No.</th>
@@ -1335,13 +1505,87 @@
                             <th>Reporter</th>
                             <th>Files</th>
                             <th>Actions</th>
+                            <th class="approval-card-th" aria-hidden="true"><span class="u-hidden">Card</span></th>
                         </tr>
                     </thead>
                     <tbody id="hrViolationsBody">
-                        <tr><td colspan="8" class="empty-state"><i class="fas fa-video"></i><p>No violation reports have been transferred to you yet.</p></td></tr>
+                        <tr><td colspan="9" class="empty-state"><i class="fas fa-video"></i><p>No violation reports have been transferred to you yet.</p></td></tr>
                     </tbody>
                 </table>
                 <div class="pagination" id="hrViolationPagination">
+                    <span class="page-info">Loading...</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- TAB: VIOLATIONS (Area Manager — read-only, branch-scoped)   -->
+        <!-- ============================================================ -->
+        <!-- Reports a superadmin reviewed and transferred to an AREA     -->
+        <!-- MANAGER (violations.managerStatus == 'transferred').          -->
+        <!--                                                              -->
+        <!-- ⚠️ DISTINCT FROM #tabViolations ABOVE, which is HR's. They    -->
+        <!-- cannot be merged: they are gated on different roles, they    -->
+        <!-- read different fields (hrStatus vs managerStatus), and the   -->
+        <!-- Area Manager one additionally scopes to that manager's own   -->
+        <!-- assigned branches. switchOwnerTab() resolves this section     -->
+        <!-- from data-tab="ownerViolations".                              -->
+        <!--                                                              -->
+        <!-- STRICTLY READ-ONLY, in the same two layers as HR's:            -->
+        <!--   1. firestore.rules gives the `owner` role no create/update/ -->
+        <!--      delete access to `violations` at all — only reads.       -->
+        <!--   2. There is no edit / delete / transfer control in the      -->
+        <!--      markup below. Only view + download the report PDF.       -->
+        <!--                                                              -->
+        <!-- ⚠️ BRANCH SCOPING IS ENFORCED IN THE UI ONLY (see            -->
+        <!-- js/owner-violations.js). The rules cannot prove it because an -->
+        <!-- Area Manager's branch list lives on their user document, not  -->
+        <!-- on the queried collection. The long note above `allow read`   -->
+        <!-- in firestore.rules explains what closing that gap would need. -->
+        <section class="tab-content" id="tabOwnerViolations">
+
+            <div class="section-header owner-section-header">
+                <div>
+                    <h2><i class="fas fa-video u-icon-primary u-icon-gap"></i>Violation Reports</h2>
+                    <p style="color:var(--text-muted);font-size:0.85rem;margin-top:4px;">
+                        CCTV violations reviewed and sent to you by the superadmin, for your branches. View and print only &mdash; these reports cannot be edited here.
+                    </p>
+                </div>
+            </div>
+
+            <div class="toolbar">
+                <div class="search-box">
+                    <i class="fas fa-search"></i>
+                    <input type="text" id="ownerViolationSearch" placeholder="Search subject, store, location, reporter...">
+                </div>
+                <div class="sort-group">
+                    <label><i class="fas fa-store"></i></label>
+                    <select id="ownerViolationStoreFilter">
+                        <option value="all">All Stores</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="table-container">
+                <table class="data-table row-card-table" id="ownerViolationsTable">
+                    <thead>
+                        <tr>
+                            <th>Report No.</th>
+                            <th>Report Date</th>
+                            <th>Incident Date/Time</th>
+                            <th>Store</th>
+                            <th>Subject</th>
+                            <th>Reporter</th>
+                            <th>Files</th>
+                            <th>Actions</th>
+                            <th class="approval-card-th" aria-hidden="true"><span class="u-hidden">Card</span></th>
+                        </tr>
+                    </thead>
+                    <tbody id="ownerViolationsBody">
+                        <tr><td colspan="9" class="empty-state"><i class="fas fa-video"></i><p>No violation reports have been transferred to you yet.</p></td></tr>
+                    </tbody>
+                </table>
+                <div class="pagination" id="ownerViolationPagination">
                     <span class="page-info">Loading...</span>
                 </div>
             </div>
@@ -1376,6 +1620,43 @@
                 </div>
             </div>
             <!-- Intentionally empty: HR has no write actions on a report. -->
+        </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- MODAL: TRANSFERRED VIOLATION DETAILS (Area Manager, read-only) -->
+    <!-- ============================================================ -->
+    <!-- A SEPARATE dialog from #hrViolationModal, not a shared one. They look
+         identical but belong to different roles reading different documents,
+         and a shared dialog would mean one role's open-report state could be
+         shown against the other's data.
+
+         There is deliberately NO edit / delete / transfer control in the footer:
+         firestore.rules gives the `owner` role no write access to `violations`,
+         so such a control could not work even if it were added. -->
+    <div class="modal-overlay" id="ownerViolationModal">
+        <div class="modal-container modal-lg">
+            <div class="modal-header">
+                <h2><i class="fas fa-video"></i> <span id="ownerViolationModalTitle">Violation Report</span></h2>
+                <!-- Printing is a VIEW action, so it stays available. -->
+                <button type="button" class="btn btn-sm btn-primary" id="btnOwnerViolationReport" title="Download the report PDF to your computer">
+                    <i class="fas fa-file-pdf"></i> <span>Download Report</span>
+                </button>
+                <button class="modal-close" id="closeOwnerViolationModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="modal-fields" id="ownerViolationModalBody">
+                    <p style="color:var(--text-muted);">Loading...</p>
+                </div>
+
+                <div class="ticket-attachments-section" style="margin-top:22px;">
+                    <h3 class="section-title"><i class="fas fa-paperclip"></i> CCTV Footage / Evidence</h3>
+                    <div id="ownerViolationAttachmentsGrid" class="attachments-grid">
+                        <p class="u-section-sub">No attachments yet.</p>
+                    </div>
+                </div>
+            </div>
+            <!-- Intentionally empty: read-only, same as HR's dialog. -->
         </div>
     </div>
 
@@ -1442,6 +1723,19 @@
          shared PDF builder is available. -->
     <script src="js/violation-report.js"></script>
     <script src="js/hr-violations.js"></script>
+    <!-- ===== Area Manager violations (read-only, branch-scoped) =====
+         Loads AFTER owner-dashboard.js because it reads that module's
+         getOwnerRole() / getOwnerAssignedBranches() to gate the tab and scope
+         the list, and after js/violation-report.js for the shared PDF builder.
+
+         ⚠️ Deliberately a SEPARATE module from js/hr-violations.js rather than
+         one parameterised by role. The two read different Firestore fields
+         (hrStatus vs managerStatus), use different listeners, and only one of
+         them is branch-scoped. Merging them would put a role check on every
+         branch of the rendering path, where a mistake shows up as a hidden
+         control that still works — much harder to spot than in two small files
+         that are each correct on their own. -->
+    <script src="js/owner-violations.js"></script>
     <!-- ===== Command palette + keyboard shortcuts (Ctrl/Cmd+K) =====
          Loaded LAST so it can see the owner page's DOM. It has no
          .nav-item[data-tab] elements, so the list is just the actions this

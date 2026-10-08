@@ -400,6 +400,104 @@ const firestoreService = {
         });
     },
 
+    // ===== AREA MANAGER HANDOFF =====
+    // Identical shape to the HR handoff above but stamped on `managerStatus` /
+    // `managerTransferred*` instead of `hrStatus` / `transferred*`.
+    //
+    // ⚠️ WHY SEPARATE FIELDS RATHER THAN ONE SHARED `hrStatus`. The two handoffs
+    // are INDEPENDENT: a superadmin can send a report to HR, to an Area
+    // Manager, or to both. Reusing one field would make the second transfer
+    // silently revoke the first, and reverting one would revoke the other — the
+    // two lists would be impossible to hold at the same time.
+    //
+    // Nothing is copied or deleted here either: the report stays in the command
+    // center list and simply becomes readable by Area Managers as well.
+
+    /**
+     * Listen ONLY to the reports a superadmin has transferred to an Area Manager.
+     *
+     * ⚠️ The `where()` is REQUIRED, for the same reason the HR listener needs
+     * one: firestore.rules grants the `owner` role read access per-document via
+     * `resource.data.managerStatus == 'transferred'`, and Firestore will only
+     * run a query whose constraints it can prove against the rule. An unfiltered
+     * query from an Area Manager is therefore DENIED — which is the guarantee,
+     * not a bug.
+     *
+     * A single equality filter on one field needs no composite index, so this
+     * works on the Spark (free) plan.
+     *
+     * ⚠️ THIS RETURNS EVERY MANAGER-TRANSFERRED REPORT, NOT ONLY THE READER'S
+     * BRANCHES. Branch scoping happens in js/owner-violations.js, because the
+     * branch list lives on the user's document and a query cannot constrain it
+     * (see the long note above `allow read` in firestore.rules).
+     */
+    listenTransferredViolationsForAreaManager(callback, onError = null) {
+        return db.collection('violations')
+            .where('managerStatus', '==', 'transferred')
+            .onSnapshot(
+                (snapshot) => {
+                    const violations = [];
+                    snapshot.forEach((doc) => {
+                        violations.push({ id: doc.id, ...doc.data() });
+                    });
+                    violations.sort((a, b) => {
+                        const aTime = a.managerTransferredAt?.toDate?.()?.getTime() || 0;
+                        const bTime = b.managerTransferredAt?.toDate?.()?.getTime() || 0;
+                        // Newest transfer first when the timestamps tie, then fall
+                        // back to the filing date.
+                        if (bTime !== aTime) return bTime - aTime;
+                        const aFile = a.createdAt?.toDate?.()?.getTime() || 0;
+                        const bFile = b.createdAt?.toDate?.()?.getTime() || 0;
+                        return bFile - aFile;
+                    });
+                    callback(violations, snapshot.docChanges());
+                },
+                (error) => {
+                    console.error('🔥 Firestore manager-violations listener error:', error);
+                    if (onError) onError(error);
+                }
+            );
+    },
+
+    /**
+     * Hand one report to an Area Manager. Superadmin-only in practice
+     * (firestore.rules allows update only to a superadmin or the reporting
+     * operator — the `owner` role gets no write access at all).
+     */
+    async transferViolationToAreaManager(violationId, byEmail, byName) {
+        await db.collection('violations').doc(violationId).update({
+            managerStatus: 'transferred',
+            managerTransferredAt: firebase.firestore.FieldValue.serverTimestamp(),
+            managerTransferredBy: byEmail || null,
+            managerTransferredByName: byName || null,
+            // Cleared so a later re-transfer does not show a stale revert time.
+            managerRevertedAt: firebase.firestore.FieldValue.delete(),
+            managerRevertedBy: firebase.firestore.FieldValue.delete(),
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+    },
+
+    /**
+     * Take a report back off the Area Manager's list. `managerStatus` is DELETED
+     * rather than set to another value, so the document matches its original
+     * shape again and the rules treat it like every pre-handoff report.
+     *
+     * This touches ONLY the manager* fields — an HR transfer on the same report
+     * is untouched.
+     */
+    async revertViolationTransferFromAreaManager(violationId, byEmail, byName) {
+        await db.collection('violations').doc(violationId).update({
+            managerStatus: firebase.firestore.FieldValue.delete(),
+            managerTransferredAt: firebase.firestore.FieldValue.delete(),
+            managerTransferredBy: firebase.firestore.FieldValue.delete(),
+            managerTransferredByName: firebase.firestore.FieldValue.delete(),
+            managerRevertedAt: firebase.firestore.FieldValue.serverTimestamp(),
+            managerRevertedBy: byEmail || null,
+            managerRevertedByName: byName || null,
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+    },
+
     /**
      * Generate the next violation report number (VIO-0001 format).
      * Uses a Firestore transaction on the shared `counters/violations`

@@ -1642,12 +1642,27 @@ tr.row-online {
     background: transparent;
 }
 
+/* ⚠️ RIGHT-ANCHORED ON PURPOSE — do not "tidy" this back to
+   `left: 50%; transform: translateX(-50%)`. The tooltip is `white-space:
+   nowrap` and `opacity: 0` — invisible, but STILL IN LAYOUT, so its box
+   counts toward the scrollable overflow of `.table-container`
+   (`overflow-x: auto`). In the Ticket Reviews table the Actions column is
+   the LAST column, and this element's buttons carry the longest tooltips
+   in the app ("…press to resend to someone@example.com", "Approve Request
+   & Resend (2-Day Access)") on buttons in the LEFT half of that column —
+   centered, half of each tooltip stuck out past the table's right edge and
+   produced a horizontal scrollbar under a table whose columns all fit.
+   Right-anchoring pins the tooltip's right edge to the button's right edge
+   so it can never poke past the table; any leftward extension is clipped
+   at the scroller's left edge and does NOT create a scrollbar in LTR.
+   Pinned by test/owner-ticket-approval.test.js. */
 .action-btn::after {
     content: attr(data-tooltip);
     position: absolute;
     bottom: calc(100% + 6px);
-    left: 50%;
-    transform: translateX(-50%);
+    right: 0;
+    left: auto;
+    transform: none;
     background: #1e293b;
     color: #fff;
     padding: 4px 10px;
@@ -3152,12 +3167,17 @@ branch name, let alone pick one. */
     background: transparent;
 }
 
+/* Right-anchored for the same reason as `.action-btn::after` above: an
+   invisible nowrap tooltip centered on a button in a table's last column
+   extends the scroll area past the table edge and shows a scrollbar under
+   a table that fits. Keep in step with that rule. */
 .history-action-btn::after {
     content: attr(data-tooltip);
     position: absolute;
     bottom: calc(100% + 6px);
-    left: 50%;
-    transform: translateX(-50%);
+    right: 0;
+    left: auto;
+    transform: none;
     background: #1e293b;
     color: #fff;
     padding: 4px 10px;
@@ -3221,13 +3241,18 @@ branch name, let alone pick one. */
     background: transparent;
 }
 
+/* Right-anchored for the same reason as `.action-btn::after` above: an
+   invisible nowrap tooltip centered on a button in a table's last column
+   extends the scroll area past the table edge and shows a scrollbar under
+   a table that fits. Keep in step with that rule. */
 .btn-view::after,
 .btn-remove::after {
     content: attr(data-tooltip);
     position: absolute;
     bottom: calc(100% + 6px);
-    left: 50%;
-    transform: translateX(-50%);
+    right: 0;
+    left: auto;
+    transform: none;
     background: #1e293b;
     color: #fff;
     padding: 4px 10px;
@@ -3809,6 +3834,78 @@ branch name, let alone pick one. */
 
 .upload-progress-wrap.error .upload-progress-text {
     color: var(--color-danger);
+}
+
+/* ==============================================================
+   INDETERMINATE PROGRESS  (operator Resolve / Revise submit)
+   ==============================================================
+   Used for the Firestore write, which happens AFTER every file has
+   finished uploading. XHR fires no further progress events once the
+   request body is sent, so a bar parked at 100% during the write is
+   indistinguishable from "already finished" -- which is precisely the
+   "nothing is happening" feeling this indicator set out to fix.
+
+   The stripe only reads as motion against a fully-grown bar, so the
+   fill stays at 100% and the highlight sweeps across it. `indeterminate`
+   is removed again by finishUploadProgress()/resetUploadProgress(),
+   otherwise a completed bar would keep crawling forever. */
+
+@keyframes uploadIndeterminateSweep {
+    0% {
+        background-position: -200% 0;
+    }
+
+    100% {
+        background-position: 200% 0;
+    }
+}
+
+.upload-progress-wrap.indeterminate .upload-progress-bar {
+    background-image: linear-gradient(90deg,
+            var(--color-primary) 0%,
+            var(--color-primary-hover) 40%,
+            var(--color-primary) 80%);
+    background-size: 200% 100%;
+    animation: uploadIndeterminateSweep 1.1s linear infinite;
+}
+
+/* The percentage is meaningless here -- the text would sit at a stale 100%
+   for the whole write. The spinner already carries the "busy" signal. */
+.upload-progress-wrap.indeterminate .upload-progress-text {
+    color: var(--color-primary);
+}
+
+/* ==============================================================
+   SUBMIT BUTTON BUSY STATE
+   ==============================================================
+   `pointer-events: none` matters as much as the spinner: the spinner
+   sits inside a disabled button, and in some engines a disabled element
+   still swallows the click, so the operator's second tap would be
+   consumed silently instead of being visibly refused. */
+
+.btn.is-busy {
+    opacity: 0.85;
+    cursor: progress;
+    pointer-events: none;
+}
+
+.btn.is-busy i {
+    /* Keep the icon from reflowing the label as the glyph spins. */
+    display: inline-block;
+}
+
+/* Respect the OS-level motion preference -- this animation is pure
+   decoration and carries no information the text does not already give. */
+@media (prefers-reduced-motion: reduce) {
+
+    .upload-progress-wrap.indeterminate .upload-progress-bar {
+        animation: none;
+        background-image: none;
+    }
+
+    .btn.is-busy i {
+        animation: none;
+    }
 }
 
 /* Upload actions row */
@@ -4788,12 +4885,9 @@ branch name, let alone pick one. */
     letter-spacing: -0.03em;
 }
 
-#ownerPageSubtitle {
-    background: rgba(37, 99, 235, 0.06);
-    border: 1px solid rgba(37, 99, 235, 0.12);
-    color: var(--color-primary);
-    font-weight: 600;
-}
+/* ⚠️ #ownerPageSubtitle was REMOVED from ownerdashboard.html (phone fit) —
+   no rule for it here on purpose. The shared .header-subtitle rules below
+   serve main.html only. */
 
 .owner-section-header {
     margin-bottom: 18px;
@@ -5070,9 +5164,17 @@ Duplicating it would mean two renderings of the same fact to keep in step.
 ⚠️ WHY A SEPARATE BLOCK INSTEAD OF ADDING TO THE EXISTING @media BLOCKS.
 
 Those blocks are shared with main.html and are written to be conservative. The
-two things this page needs — a card layout for its tables, and a two-up header —
-are exactly the two things that would be wrong on the command centre, so they
-cannot go in a shared rule. Scoping by ID keeps the blast radius at this page.
+two things this page needs — a two-up header, and touch-sized controls — are
+exactly what would be wrong on the command centre, so they cannot go in a
+shared rule. Scoping by ID keeps the blast radius at this page.
+
+⚠️ THE TABLES LEFT THIS BLOCK. `ownerTicketsTable` and `hrViolationsTable`
+used to carry their own card conversion here — and `ownerViolationsTable`
+never got one at all — while every main.html table still swiped sideways.
+All NINE tables now share ONE mechanism: the trailing card column plus the
+"ROW CARD SWAP" block in style.css (search for it), at the same 899px
+breakpoint the Approvals card already used. This block keeps only what is
+genuinely owner-specific.
 
 WHAT WAS ACTUALLY BROKEN ON A PHONE, measured at 390px:
 
@@ -5081,7 +5183,7 @@ WHAT WAS ACTUALLY BROKEN ON A PHONE, measured at 390px:
      as broken: roughly 800px of table in a 359px viewport is two screens of
      horizontal swipe, with nothing on screen to say you could swipe, and the
      leftmost column (the ticket number) is the one you most want to see. They
-     are now CARDS, one per row, with the column name as an inline label.
+     are now CARDS, one per row — via the shared swap, see above.
   2. THE KPI ROW. Four cards at one per row is four full-width blocks before any
      real content. Two-up is two rows.
   3. THE HEADER. `.top-header` went `column` at 720px AND `.header-left` went
@@ -5199,38 +5301,17 @@ WHAT WAS ACTUALLY BROKEN ON A PHONE, measured at 390px:
         min-height: 48px;
     }
 
-    /* ---- 1. THE TABLES BECOME CARDS ---- */
+    /* ---- 1. THE TABLES — via the SHARED row-card swap, see header ---- */
     /*
-    ⚠️ THE MECHANISM. `thead` is hidden and every `tr` becomes a block, so each
-    row renders as its own card. Each `td` becomes a label/value pair using
-    `content: attr(data-label)`, which means THE COLUMN NAMES HAVE TO EXIST IN
-    THE MARKUP — that is why the renderers in js/owner-dashboard.js and
-    js/hr-violations.js now emit `data-label` on every cell. Without them a row
-    is a stack of unlabelled values, which is worse than the table it replaced.
+    ⚠️ MOVED, NOT DELETED. The conversion that lived here (hide `thead`,
+    blockify `tr`, label every `td` from `attr(data-label)`) was this page's
+    own private copy of what the Approvals table already did — which is why
+    `ownerViolationsTable` never got it and why no main.html table did. All
+    nine tables now go through the one "ROW CARD SWAP" block in style.css.
+    What remains below is only the owner-page-specific part of it.
     */
-    #ownerTicketsTable,
-    #hrViolationsTable {
-        display: block;
-    }
-    #ownerTicketsTable thead,
-    #hrViolationsTable thead {
-        /* `display: none`, not `visibility: hidden` — a screen reader must not
-           read a header row that is not on screen. */
-        display: none;
-    }
-    #ownerTicketsTable tbody,
-    #hrViolationsTable tbody {
-        display: block;
-    }
-
     #ownerTicketsTable tbody tr,
     #hrViolationsTable tbody tr {
-        display: block;
-        background: var(--bg-tertiary);
-        border: 1px solid var(--border-color);
-        border-radius: var(--radius-md);
-        padding: 10px 12px;
-        margin-bottom: 10px;
         /*
         These rows carry `onclick="window.openOwnerReport(...)"`. There was no
         `cursor: pointer` anywhere, so even on desktop nothing said the row was
@@ -5240,231 +5321,49 @@ WHAT WAS ACTUALLY BROKEN ON A PHONE, measured at 390px:
         */
         cursor: pointer;
     }
-    #ownerTicketsTable tbody tr:active,
-    #hrViolationsTable tbody tr:active {
+    /* The CARD — not the row — is the visible box now, so the press
+       feedback has to land on it. The row stays in the selector chain so
+       the hit area remains the whole row. */
+    #ownerTicketsTable tbody tr:active .approval-card,
+    #hrViolationsTable tbody tr:active .approval-card {
         background: var(--bg-hover);
     }
 
-    #ownerTicketsTable tbody td,
-    #hrViolationsTable tbody td {
-        display: flex;
-        align-items: baseline;
-        justify-content: space-between;
-        gap: 12px;
-        padding: 4px 0;
-        border: none;
-        text-align: right;
-        min-width: 0;
-    }
+    /* (The label/value `td` conversion that lived here — `display: flex`,
+       `::before { content: attr(data-label) }`, the `:last-child` Actions
+       footer, the empty-state exception, the wrapping Access cell — moved to
+       the shared ROW CARD SWAP block. On a phone every cell but the card cell
+       is hidden now, so `data-label` is a semantic hook rather than the label
+       mechanism it used to be; `.approval-card .owner-access-note` inside the
+       card is what renders the access detail as visible text.) */
 
-    #ownerTicketsTable tbody td::before,
-    #hrViolationsTable tbody td::before {
-        content: attr(data-label);
-        flex: 0 0 auto;
-        font-size: 0.66rem;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.4px;
-        color: var(--text-muted);
-        text-align: left;
-    }
+    /* (COMPACT CARD — the second round of rules that compressed the eight
+       label/value lines down to two — is gone with the first: the shared
+       ROW CARD SWAP hides every cell except the card, and the renderer puts
+       ticket, branch, badges, incident and the access note into that one
+       card. The cells themselves are untouched, so the desktop table still
+       shows all eight columns and test/owner-mobile.test.js still counts
+       `<th>` against the renderer's cells.) */
+    /* (ditto for the Incident one-liner and the Actions-footer hiding rule —
+       the Actions cell is hidden by the shared `:has(> .approval-card-cell)`
+       rule, never by `:last-child` or `td:not([data-label])`, so the empty
+       state cannot be caught by it: it is excluded by class instead.) */
+    /* (The per-column card-compression rules that followed — Created and
+       Reporter dropped, the ticket number promoted to a title, Branch/Status/
+       Access sharing one line, the Incident one-liner, and the Actions cell
+       hidden by `td:not([data-label])` — were all phone-only presentation for
+       the label/value card. The shared ROW CARD SWAP hides those cells behind
+       `:has(> .approval-card-cell)` instead, and the renderer lays the same
+       information out inside `.approval-card`: ticket as the head, branch and
+       the self-labelling badges beside it, incident as the value under it,
+       access detail as real text in the foot.) */
 
-    /*
-    The Actions cell is the one with no meaningful label — its buttons are
-    self-labelling — so its ::before is suppressed and the cell becomes a
-    full-width right-aligned footer for the card.
-    */
-    #ownerTicketsTable tbody td:last-child,
-    #hrViolationsTable tbody td:last-child {
-        justify-content: flex-end;
-        padding-top: 8px;
-        margin-top: 4px;
-        border-top: 1px solid var(--border-color);
-    }
-    #ownerTicketsTable tbody td:last-child::before,
-    #hrViolationsTable tbody td:last-child::before {
-        content: none;
-    }
-
-    /*
-    ⚠️ DELIBERATELY AFTER the :last-child rules, and at EQUAL specificity, so
-    these win. The empty state is the only cell in its row, which makes it the
-    last child — without this ordering it would inherit the Actions treatment
-    and render a right-aligned "Actions" label above the message.
-    */
-    #ownerTicketsTable tbody td.empty-state,
-    #hrViolationsTable tbody td.empty-state {
-        display: block;
-        text-align: center;
-        padding: 28px 12px;
-        border: none;
-    }
-    #ownerTicketsTable tbody td.empty-state::before,
-    #hrViolationsTable tbody td.empty-state::before {
-        content: none;
-    }
-
-    /*
-    THE ACCESS CELL GETS TO WRAP. The `td` is a flex row here (label left, value
-    right), so `flex: 1 0 100%` on the note drops it onto its OWN line beneath
-    the badge instead of squeezing the badge and the reason onto one line. This
-    is what turns the Access cell from an unexplained word into a readable
-    state on a phone.
-    */
-    #ownerTicketsTable tbody td[data-label="Access"] {
-        flex-wrap: wrap;
-    }
-    #ownerTicketsTable .owner-access-note {
-        display: block;
-        flex: 1 0 100%;
-        margin-top: 4px;
-        font-size: 0.72rem;
-        line-height: 1.4;
-        color: var(--text-muted);
-    }
-
-    /*
-    ============================================================================
-    COMPACT CARD — 8 stacked label/value lines -> 2
-    ============================================================================
-    ⚠️ WHAT WAS ACTUALLY WRONG. The card conversion above was correct but
-    literal: it turned all EIGHT columns into label/value pairs, so one ticket
-    became an eight-line block (Ticket / Created / Branch / Reporter / Incident
-    / Status / Access / Actions) and a manager had to scroll three or four
-    tickets to reach the fourth. Every one of those lines is a place to stop
-    reading. What a manager scans a list FOR is "which ticket, and can I still
-    open it" — so that is all the card now shows:
-
-        BNW-TIX002 · Banawe              [Resolved] [Access closed]
-        Requesting clearer till-count footage
-
-    DROPPED, and why each is safe to drop:
-      Created   — the ticket number is the identifier people quote; the date is
-                  in the modal, which is one tap away and is where you go to
-                  act on it anyway.
-      Reporter  — this is the manager's OWN report. They filed it, or their
-                  branch did. It is the same value on every row they can see.
-      Incident  — the longest field in the table and the one that wraps most,
-                  which is what pushed rows from two lines to four. Kept, but
-                  demoted to a single truncated line UNDER the header instead
-                  of a labelled row of its own, because it is the only one of
-                  the three that tells you whether you are looking at the right
-                  ticket at a glance.
-
-    ⚠️ THE CELLS ARE NOT REMOVED — THEY ARE HIDDEN WITH CSS. The <th>/<td>
-    counts are static and test/owner-mobile.test.js requires them to agree with
-    the renderer's `data-label` count; the DESKTOP table still shows all eight
-    columns, and the modal still shows every field. This is a phone-only
-    presentation decision, so it belongs in the phone layer.
-    */
-    #ownerTicketsTable tbody td[data-label="Created"],
-    #ownerTicketsTable tbody td[data-label="Reporter"] {
-        display: none;
-    }
-
-    /* The ticket number becomes the card's TITLE: no label, left-aligned,
-       full width, and the only thing at a glance that says which row this is. */
-    #ownerTicketsTable tbody td[data-label="Ticket"] {
-        display: block;
-        padding: 0;
-        text-align: left;
-        font-size: 0.95rem;
-        font-weight: 700;
-        color: var(--text-primary);
-    }
-    #ownerTicketsTable tbody td[data-label="Ticket"]::before {
-        content: none;
-    }
-    #ownerTicketsTable tbody td[data-label="Ticket"] .ticket-link {
-        /* The whole card is already tappable (tr onclick), so this is a
-           pointer hint only — never underline it, which would imply a
-           separate link target that does not exist. */
-        color: inherit;
-        font-weight: 700;
-    }
-
-    /*
-    BRANCH + THE TWO BADGES SHARE ONE LINE. `justify-content: space-between`
-    is inherited from the label/value rule above; overriding it here is what
-    actually puts the branch on the left and the badges on the right. The
-    labels are dropped because the badges are self-labelling ("Resolved",
-    "Access closed") — a "Status:" prefix above a badge that says "Resolved"
-    is noise.
-    */
-    #ownerTicketsTable tbody td[data-label="Branch"],
-    #ownerTicketsTable tbody td[data-label="Status"],
-    #ownerTicketsTable tbody td[data-label="Access"] {
-        padding: 0;
-        justify-content: flex-start;
-        gap: 8px;
-    }
-    #ownerTicketsTable tbody td[data-label="Branch"]::before,
-    #ownerTicketsTable tbody td[data-label="Status"]::before,
-    #ownerTicketsTable tbody td[data-label="Access"]::before {
-        content: none;
-    }
-    #ownerTicketsTable tbody td[data-label="Status"] {
-        display: inline-flex;
-        margin-left: auto;
-    }
-
-    /*
-    ⚠️ THE INCIDENT LINE KEEPS ITS OWN data-label, so the phone layer can
-    restyle it — but it is rendered as ONE TRUNCATED LINE, not a wrapped
-    paragraph. `white-space: nowrap` + `text-overflow: ellipsis` is the whole
-    point: the full text is one tap away in the modal, and a title that wraps
-    to four lines is what made the old card tall.
-    */
-    #ownerTicketsTable tbody td[data-label="Incident"] {
-        display: block;
-        padding: 6px 0 0;
-        text-align: left;
-        font-size: 0.78rem;
-        color: var(--text-muted);
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-    }
-    #ownerTicketsTable tbody td[data-label="Incident"]::before {
-        content: none;
-    }
-
-    /*
-    THE ACTIONS FOOTER IS GONE. The card already carries `cursor: pointer` and
-    an :active state, and the eye button opened the same modal the row did —
-    so on a phone it was a 44px tap target duplicating the card itself, which
-    is a whole extra row of height per ticket for no extra capability.
-
-    ⚠️ TARGETED BY `td:not([data-label])`, NEVER BY `:last-child`.
-    The empty-state row's single colspan cell IS a last child, so a `:last-child`
-    rule would hide "No tickets found for your branches." — leaving a blank
-    bordered card where the explanation should be. Requiring the cell to have NO
-    data-label matches exactly the one Actions cell (the actions cell is the
-    documented single unlabelled cell in the row).
-
-    ⚠️ AND NOT `.empty-state` EXPLICITLY, TOO. The empty-state rule above sits at
-    the SAME specificity as this one and EARLIER in the file, so source order
-    would hand this rule the win and hide the empty state anyway. Restating the
-    exclusion here makes the rule correct on its own, instead of dependent on
-    where it happens to be placed relative to another rule.
-    */
-    #ownerTicketsTable tbody td:not([data-label]):not(.empty-state) {
-        display: none;
-    }
-
-    /*
-    The container no longer has anything to scroll sideways once the rows are
-    cards, and leaving `overflow-x: auto` in place invites a swipe that does
-    nothing — which reads as a broken page. The card styling lives on the
-    `tr`, so the container's own border and fill are dropped to avoid drawing
-    a second box around them.
-    */
-    #ownerMainContent .table-container {
-        overflow-x: visible;
-        background: transparent;
-        border: none;
-        padding: 0;
-    }
+    /* (The container rule that lived here — `#ownerMainContent .table-container
+       { overflow-x: visible; background: transparent; border: none }` — moved
+       to the shared ROW CARD SWAP as
+       `.table-container:has(.row-card-table)`, so it covers main.html's tables
+       too and needs no per-page copy. It applies at the same ≤899px range the
+       card swap does, i.e. strictly wider than this block's ≤640px.) */
 
     /* ---- Pagination: buttons need room to be hit ---- */
     #ownerMainContent .pagination button {
@@ -5594,6 +5493,30 @@ body.mobile-nav-open .mobile-nav-backdrop {
 }
 
 /* ------------------------------------------------------------------ */
+/*  ROW CARD — the trailing card column shared by every .data-table   */
+/*  that opts in with the `row-card-table` class.                     */
+/* ------------------------------------------------------------------ */
+/*
+   Desktop keeps the real table: the card cell (and its header cell) is
+   `display: none` at EVERY width, and the "ROW CARD SWAP" block further
+   down re-shows it under 900px with a higher-specificity rule.
+
+   ⚠️ THIS RULE MUST STAY OUTSIDE ANY @media. It used to live INSIDE the
+   `max-width: 899px` block below, which meant nothing hid the card column
+   ABOVE 900px — the desktop Approvals table grew a stray extra column of
+   unstyled card markup. "Hide at all widths, show on demand" is the only
+   ordering that is correct at both ends of the range.
+*/
+.approval-card-th,
+.approval-card-cell { display: none; }
+
+/* The #approvalTable-specific restatement below is pinned verbatim by
+   test/owner-ticket-approval.test.js; it is identical in effect to the
+   generic rule above and is kept so that test keeps naming it. */
+#approvalTable .approval-card-th,
+#approvalTable .approval-card-cell { display: none; }
+
+/* ------------------------------------------------------------------ */
 /*  Phones & small tablets — turn the fixed sidebar into an            */
 /*  off-canvas drawer opened via the hamburger, and stack layouts.     */
 /* ------------------------------------------------------------------ */
@@ -5641,13 +5564,75 @@ body.mobile-nav-open .mobile-nav-backdrop {
     /* Charts go single column on phones */
     .charts-row { grid-template-columns: 1fr; gap: 16px; }
 
+    /* Needs Attention + activity panels: keep desktop gap, just stack-safe */
+    .dash-split { gap: 16px; }
+
+    /* ---- Phone fit pass: Needs Attention / Analytics / Charts ----
+       The queue is a 5-column table that cannot fit 360px in one line,
+       so each row becomes a 2-line grid on phones:
+         [dot] Branch ........ Elapsed
+         Issue .............. Open
+       thead hides (column names live only in the desktop table), the
+       Issue/Branch cells ellipsis, the sev dot spans both lines. All
+       selectors are #attentionTable-scoped inside this 899px block -
+       every other data-table keeps its desktop look untouched. */
+    .dash-panel { padding: 16px; }
+    #attentionTable thead { display: none; }
+    #attentionTable,
+    #attentionTable tbody { display: block; }
+    #attentionTable tr {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        grid-template-areas: "sev branch elapsed" "sev issue open";
+        column-gap: 10px;
+        align-items: center;
+        padding: 10px 4px;
+        border-bottom: 1px solid var(--border-color);
+    }
+    #attentionTable td { border-bottom: none; padding: 2px 4px; }
+    #attentionTable td:nth-child(1) { grid-area: sev; }
+    #attentionTable td:nth-child(2) { grid-area: branch; font-weight: 600; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #attentionTable td:nth-child(3) { grid-area: issue; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #attentionTable td:nth-child(4) { grid-area: elapsed; text-align: right; white-space: nowrap; }
+    #attentionTable td:nth-child(5) { grid-area: open; text-align: right; }
+    #attentionTable td.empty-state { grid-column: 1 / -1; grid-row: 1 / -1; text-align: center; }
+    #attentionTable .btn { padding: 6px 10px; }
+
+    /* Performance Analytics: compact header row on a phone */
+    .dash-analytics-head h2 { font-size: 1.15rem; }
+    .dash-analytics-head .dash-filters { width: 100%; }
+
+    /* Charts: tighter chrome so the canvas gets the width it needs */
+    .chart-container { padding: 14px; }
+    .chart-wrapper { height: 190px; }
+    .dash-chart-head .chart-title { font-size: 0.85rem; }
+    .dash-chart-pill { font-size: 0.65rem; padding: 2px 8px; }
+
     /* Two-column fields collapse to one column */
     .modal-fields { grid-template-columns: 1fr; gap: 12px; }
     .modal-field.full-width { grid-column: span 1; }
+    /* Ticket/violation detail modals: huwag gumawa ng implicit 2nd track
+       sa 1-col grid — buong row ang section titles at full-width fields
+       para walang tagas/putol sa phone. Mobile-only. */
+    .modal-fields > .modal-field.full-width,
+    .modal-fields > .modal-section-title { grid-column: 1 / -1; }
+    .modal-field { min-width: 0; }
+    .modal-field span { overflow-wrap: anywhere; }
 
     .form-row { grid-template-columns: 1fr; gap: 12px; }
 
     .view-summary { grid-template-columns: 1fr; }
+    /* View-branch modal panels: 1-col na sa phone, may kaunting sikip lang
+       para hindi magmukhang kalat. Mobile-only. */
+    .view-summary { gap: 10px; }
+    .view-stat { padding: 12px; }
+    .view-stat-value { overflow-wrap: anywhere; }
+    .monthly-stats { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .stat-card { padding: 12px; }
+    /* Update History table: isang swipe lang, hindi durog ang columns. */
+    .view-history-table { overflow-x: auto; }
+    .view-history-table th,
+    .view-history-table td { white-space: nowrap; padding: 10px; }
 
     .card { padding: 16px; gap: 12px; }
     .card-icon { width: 42px; height: 42px; font-size: 1.1rem; }
@@ -5656,10 +5641,309 @@ body.mobile-nav-open .mobile-nav-backdrop {
     /* Toolbars stack so nothing is pushed off-screen */
     .toolbar { flex-direction: column; align-items: stretch; }
     .search-box { max-width: none; width: 100%; }
+    /* OPTION-2 PHONE FILTER TILES (small screens only) - pantay na tiles
+       imbis na pababang magkakaibang lapad. Row 1: search, full-width.
+       Row 2: All/Online/Offline pills, pantay-hati sa isang row. Row 3+:
+       bawat .sort-group ay sariling tile na pantay ang lapad (select at
+       date input 100 percent ng tile), nag-wrap sa 2 columns. Trailing
+       .btn (Manage/Search) full-width sa dulo. #mainContent-scoped kaya
+       hindi madadamay ang ownerdashboard; layout props lang, walang kulay. */
+    #mainContent .toolbar {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        align-items: stretch;
+    }
+    #mainContent .toolbar .search-box {
+        grid-column: 1 / -1;
+        max-width: none;
+        width: 100%;
+    }
+    #mainContent .toolbar .filter-group {
+        grid-column: 1 / -1;
+    }
+    #mainContent .toolbar .filter-group .filter-btn {
+        flex: 1 1 0;
+    }
+    #mainContent .toolbar .sort-group {
+        min-width: 0;
+    }
+    #mainContent .toolbar .sort-group select,
+    #mainContent .toolbar .sort-group input {
+        width: 100%;
+        min-width: 0;
+    }
+    #mainContent .toolbar .btn {
+        grid-column: 1 / -1;
+        width: 100%;
+    }
+
+    /* OWNER: PHONE FILTER TILES (mirror ng OPTION-2) - parehong 2-col na
+       tile grid sa loob ng ownerdashboard, pero #ownerMainContent-scoped
+       kaya hindi madadamay ang main dashboard. Ang dating OPTION-2 block sa
+       itaas ay #mainContent-only, kaya rito nagkakalat pa rin ang toolbars
+       ng owner: full-width na pababang stack (inline .owner-toolbar rules
+       sa ownerdashboard.html + .toolbar { flex-direction: column } sa itaas).
+       ID-scoped ang selectors (1,x,x) kaya nananalo sila laban sa inline
+       ID rules tulad ng #ownerTicketAccessFilter { width: 168px } nang walang
+       !important. Layout props lang, walang kulay - kaya pareho ng theme.
+       Row 1: search, full-width. Select-holding .filter-group / .sort-group
+       ay tiles na pantay sa 2 columns; lone filters (Overview branch, store
+       select sa Violations) buong row para hindi kalahating nakaiwanan. */
+    #ownerMainContent .toolbar,
+    #ownerMainContent .owner-toolbar {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        align-items: stretch;
+    }
+    #ownerMainContent .toolbar .search-box,
+    #ownerMainContent .owner-toolbar .search-box {
+        grid-column: 1 / -1;
+        max-width: none;
+        width: 100%;
+    }
+    #ownerMainContent .toolbar .sort-group,
+    #ownerMainContent .toolbar .filter-group,
+    #ownerMainContent .owner-toolbar .filter-group {
+        min-width: 0;
+    }
+    #ownerMainContent .toolbar .sort-group select,
+    #ownerMainContent .toolbar .sort-group input,
+    #ownerMainContent .toolbar .filter-group select,
+    #ownerMainContent .owner-toolbar .filter-group select {
+        width: 100%;
+        min-width: 0;
+        max-width: none;
+    }
+    /* Lone filter sa sariling toolbar -> buong row (Overview branch select) */
+    #ownerMainContent .owner-filter-wrap {
+        grid-column: 1 / -1;
+    }
+    #ownerMainContent .owner-filter-wrap select {
+        width: 100%;
+        min-width: 0;
+    }
+    /* Violations toolbars: search + iisang store sort-group -> buong row
+       ang store select, hindi kalahating tile */
+    #ownerMainContent .toolbar > .search-box + .sort-group:last-child {
+        grid-column: 1 / -1;
+    }
 
     /* Tables: keep horizontal swipe, slightly tighter padding */
     .table-container { -webkit-overflow-scrolling: touch; }
     .data-table th, .data-table td { padding: 11px 12px; }
+
+    /* Ticket/violation modal attachments: 2 pantay na tiles sa phone,
+       hindi 3 pilit na siksikan. Mobile-only. */
+    .modal-body .attachments-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .modal-body .attachment-preview { height: 96px; }
+    /* Violation modal header: title + Generate Report + X nag-wrap na,
+       hindi nagtutulakan. Mobile-only. */
+    #violationModal .modal-header { flex-wrap: wrap; row-gap: 8px; }
+    #violationModal .modal-header h2 { min-width: 0; flex: 1 1 180px; }
+    #violationModal .modal-header h2 span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* ---- Modal action buttons, phone-safe (violations + tickets) ----
+       The violation footer carries up to FOUR long labels in one row
+       (Delete / Transfer to HR / Transfer to Area Manager / Edit
+       Report) and the ticket modals' form actions are right-aligned
+       with nowrap labels — both overflow a 360px screen. Let them
+       WRAP into two thumb-sized rows instead of spilling off-screen.
+       ⚠️ flex-wrap ONLY, never flex-direction: the buttons must stay
+       side by side; stacking them hid the primary action. */
+    #violationModal .modal-footer,
+    #approvalModalFooter {
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 12px 16px;
+    }
+    #violationModal .modal-footer .btn,
+    #approvalModalFooter .btn {
+        flex: 1 1 40%;
+        justify-content: center;
+        min-width: 0;
+        white-space: normal;
+        text-align: center;
+    }
+    /* Resolve / Revise / Reject / Edit-ticket / Violation-form rows */
+    #resolveModal .form-actions,
+    #revisionModal .form-actions,
+    #rejectModal .form-actions,
+    #editTicketModal .form-actions,
+    #violationFormModal .form-actions {
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+    #resolveModal .form-actions .btn,
+    #revisionModal .form-actions .btn,
+    #rejectModal .form-actions .btn,
+    #editTicketModal .form-actions .btn,
+    #violationFormModal .form-actions .btn {
+        flex: 1 1 40%;
+        justify-content: center;
+        min-width: 0;
+    }
+
+    /* The card itself is theme-token only: white card, dark text, hairline
+       border, 16px radius — same silhouette as the mockup in both themes. */
+    .approval-card {
+        background: var(--bg-card);
+        border: 1px solid var(--border-color);
+        border-radius: 16px;
+        padding: 14px;
+    }
+    .approval-card-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding-bottom: 10px;
+        border-bottom: 1px solid var(--border-color);
+        margin-bottom: 10px;
+    }
+    .approval-card-branch {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-weight: 800;
+        font-size: 0.85rem;
+        color: var(--text-primary);
+        min-width: 0;
+    }
+    .approval-card-branch i { color: var(--text-muted); font-size: 0.75rem; }
+
+    .approval-card-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 12px;
+        border-radius: 999px;
+        font-size: 0.68rem;
+        font-weight: 700;
+        white-space: nowrap;
+        border: 1px solid var(--border-color);
+    }
+    .approval-card-pill--approved {
+        background: var(--color-resolved-bg);
+        color: var(--color-resolved);
+        border-color: var(--color-resolved-border);
+    }
+    .approval-card-pill--pending-approval {
+        background: var(--color-warning-bg);
+        color: var(--color-warning);
+        border-color: var(--color-warning-border);
+    }
+    .approval-card-pill--for-revision {
+        background: var(--color-danger-bg);
+        color: var(--color-danger);
+        border-color: var(--color-offline-border);
+    }
+    .approval-card-pill--expired {
+        background: var(--color-danger-bg);
+        color: var(--color-danger);
+        border-color: var(--color-offline-border);
+    }
+    /* The same vocabulary the `.status-badge` cells use, so every other
+       carded table can name its state in the head pill without inventing
+       a second colour system. */
+    .approval-card-pill--online,
+    .approval-card-pill--resolved {
+        background: var(--color-resolved-bg);
+        color: var(--color-resolved);
+        border-color: var(--color-resolved-border);
+    }
+    .approval-card-pill--offline,
+    .approval-card-pill--rejected,
+    .approval-card-pill--no-access {
+        background: var(--color-danger-bg);
+        color: var(--color-danger);
+        border-color: var(--color-offline-border);
+    }
+    .approval-card-pill--pending,
+    .approval-card-pill--insufficient-footage {
+        background: var(--color-pending-bg);
+        color: var(--color-pending);
+        border-color: var(--color-pending-border);
+    }
+    .approval-card-pill--in-progress {
+        background: var(--color-progress-bg);
+        color: var(--color-progress);
+        border-color: var(--color-progress-border);
+    }
+    /* A pill with no state of its own (a report number, a file count). */
+    .approval-card-pill--neutral {
+        background: var(--bg-tertiary);
+        color: var(--text-secondary);
+        border-color: var(--border-color);
+    }
+    .approval-card-dot { font-size: 0.4rem; color: var(--text-muted); }
+    .approval-card-dot--ok { color: var(--color-resolved); }
+    .approval-card-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px 12px;
+    }
+    .approval-card-field { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .approval-card-label {
+        font-size: 0.62rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        color: var(--text-muted);
+    }
+    .approval-card-value {
+        font-size: 0.8rem;
+        font-weight: 600;
+        color: var(--text-primary);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .approval-card-muted { font-weight: 500; color: var(--text-secondary); }
+    /*
+    The card foot can carry a real sentence (an access note, the remarks
+    line). A phone has no hover, so this is where detail has to live rather
+    than in a `title` tooltip nobody can see.
+    */
+    .approval-card-note {
+        font-size: 0.72rem;
+        line-height: 1.4;
+        color: var(--text-muted);
+        margin-top: 4px;
+    }
+    /*
+    ⚠️ THE BASE RULE FOR `.owner-access-note` IS `display: none` (it must not
+    steal a line from the desktop table's Access cell). Inside a card it is
+    the entire point of the column — when access closed, and why the manager
+    asked to reopen — so it is re-enabled here, where the phone actually
+    shows it.
+    */
+    .approval-card .owner-access-note {
+        display: block;
+        margin-top: 4px;
+        font-size: 0.72rem;
+        line-height: 1.4;
+        color: var(--text-muted);
+    }
+    .approval-card-foot {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 10px;
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid var(--border-color);
+    }
+    .approval-card-expiry { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+    .approval-card-actions { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; margin-left: auto; }
+    /* Card buttons: 32px rounded squares in message-blue / edit-amber /
+       view-green, exactly like the mockup's three actions. */
+    .approval-card-actions .action-btn { width: 32px; height: 32px; border-radius: 8px; font-size: 13px; }
+    .approval-card-actions .action-btn::after { display: none; }
+    .approval-card-actions .action-btn.msg { background: var(--color-progress-bg); color: var(--color-progress); }
+    .approval-card-actions .action-btn.edit { background: var(--color-pending-bg); color: var(--color-pending); }
+    .approval-card-actions .action-btn.view { background: var(--color-resolved-bg); color: var(--color-resolved); }
 
     /* Modals fit the phone viewport comfortably */
     .modal-container { width: 94%; max-height: 92vh; }
@@ -5678,6 +5962,147 @@ body.mobile-nav-open .mobile-nav-backdrop {
     /* Printable monthly report never goes off-screen */
     .print-header { flex-direction: column; text-align: center; }
     .print-title-block { text-align: center; }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Ticket Reviews phone card swap (matches the mobile mockup).        */
+/*  PANG-PHONE LANG: desktop keeps the 9-column table (card cell stays  */
+/*  hidden); on phones the table cells hide and the card shows.         */
+/* ------------------------------------------------------------------ */
+@media (max-width: 899px) {
+    #tabApprovals .table-container {
+        overflow-x: visible;
+        background: transparent;
+        border: none;
+        padding: 0;
+    }
+    #approvalTable { display: block; }
+    #approvalTable thead { display: none; }
+    #approvalTable tbody { display: block; }
+    #approvalTable tbody tr.approval-row {
+        display: block;
+        background: transparent;
+        border: none;
+        padding: 0;
+        margin-bottom: 12px;
+    }
+    #approvalTable tbody tr.approval-row > td:not(.approval-card-cell) { display: none; }
+    #approvalTable tbody td.approval-card-cell {
+        display: block;
+        padding: 0;
+        border: none;
+    }
+    #approvalTable tbody td.empty-state {
+        display: block;
+        text-align: center;
+        padding: 28px 12px;
+        border: 1px solid var(--border-color);
+        border-radius: 16px;
+        background: var(--bg-card);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/*  ROW CARD SWAP — THE one phone mechanism shared by every table      */
+/*  that carries a trailing card column.                               */
+/* ------------------------------------------------------------------ */
+/*
+   HOW A TABLE OPTS IN — two marks, nothing else:
+
+     1. `<table class="data-table row-card-table">` plus a trailing
+        `<th class="approval-card-th">` in the head (see the base rule
+        above: it is hidden at every width until this block shows it).
+     2. The renderer emits a trailing
+        `<td class="approval-card-cell" data-label="Card">…</td>`
+        mirroring that row's own cells inside `.approval-card`.
+
+   Then this block does the rest at the SAME 899px breakpoint the
+   Approvals card already used, so all nine tables — Branch Monitor,
+   Status History, Tickets, Violations, Users, Ticket Reviews, the Area
+   Manager's tickets, and both transferred-violations tables — change
+   shape identically. The per-table swap block above stays only because
+   test/owner-ticket-approval.test.js pins its selectors by name.
+
+   ⚠️ THE HIDE RULE IS GATED ON `:has(> .approval-card-cell)`, NOT ON
+   `:last-child` AND NOT ON `td:not([data-label])`. The rows that are
+   PANELS rather than records — the branches table's group headers, the
+   expandable user-detail panel, the empty states — have no card cell,
+   and a blunt "hide every other cell" rule blanks them: the empty-state
+   cell is an only child as often as it is a last child, and hiding it
+   leaves an empty bordered box where the explanation should be.
+*/
+@media (max-width: 899px) {
+    /* Nothing to swipe sideways once rows are cards, and leaving
+       `overflow-x: auto` in place invites a swipe that does nothing —
+       which reads as a broken page. The container's own border and fill
+       go too, so a second box is not drawn around the cards. */
+    .table-container:has(.row-card-table) {
+        overflow-x: visible;
+        background: transparent;
+        border: none;
+        padding: 0;
+    }
+
+    .row-card-table,
+    .row-card-table tbody {
+        display: block;
+    }
+    /* `display: none`, not `visibility: hidden` — a screen reader must
+       not read a header row that is not on screen. The column names are
+       re-printed inside every card, so nothing is lost. */
+    .row-card-table thead { display: none; }
+
+    /* The CARD is the visual box (`.approval-card` carries the border,
+       fill and 16px radius), so the row itself stays transparent — a
+       second box around it would double every border. */
+    .row-card-table tbody tr {
+        display: block;
+        background: transparent;
+        border: none;
+        padding: 0;
+        margin-bottom: 12px;
+    }
+
+    .row-card-table tbody tr:has(> .approval-card-cell) > td:not(.approval-card-cell):not(.empty-state) {
+        display: none;
+    }
+    .row-card-table tbody td.approval-card-cell {
+        display: block;
+        padding: 0;
+        border: none;
+    }
+    /* The empty state renders as its own rounded card. It is excluded by
+       class in the hide rule above rather than re-shown here at a lower
+       specificity, which would silently lose the argument. */
+    .row-card-table tbody td.empty-state {
+        display: block;
+        text-align: center;
+        padding: 28px 12px;
+        border: 1px solid var(--border-color);
+        border-radius: 16px;
+        background: var(--bg-card);
+    }
+
+    /* Rows that exist to be PANELS: the branches group header and the
+       expandable user-detail panel. They have no card cell of their own,
+       so they keep their content as plain stacked blocks. The tr rule
+       above already blockifies them; this un-hides their cells (a cell
+       that stays `table-cell` inside a block row is laid out in an
+       anonymous table box, which none of the panel styles assume). */
+    .row-card-table tbody tr.group-header-row > td,
+    .row-card-table tbody tr.user-detail-row > td {
+        display: block;
+        border: none;
+    }
+    /* The zero-height spacer row between users only makes sense in the
+       table layout — cards are already spaced by margin-bottom. */
+    .row-card-table tbody tr.user-detail-gap { display: none; }
+
+    /* Every card table's pager gets thumb-sized buttons, on every page. */
+    .pagination button {
+        min-height: 40px;
+        min-width: 40px;
+    }
 }
 
 /* ------------------------------------------------------------------ */

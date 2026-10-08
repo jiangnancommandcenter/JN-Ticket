@@ -1,10 +1,12 @@
-// Functional test for the User Approvals "Set Role" (Owner / HR) helpers.
+// Functional test for the User Approvals "Set Role" (Owner / HR / RM.SM) helpers.
 //
-// The superadmin assigns each user one of two roles. HR and Owner use the
-// SAME dashboard; the only differences are the profile label and chat
-// access (HR has it, owner does not). These helpers normalise/clamp what
-// the dropdown can write, so a tampered DOM value can never grant a
-// privileged role such as 'superadmin'.
+// The superadmin assigns each user one of three assignable roles. Owner and HR
+// share the same dashboard but differ only in profile label and chat access.
+// RM/SM mirrors the Area Manager role exactly (same dashboard, branches,
+// feature permissions, ticket filing) with no chat access. All three roles use
+// the same role assignment helpers, which normalise/clamp what the dropdown
+// can write, so a tampered DOM value can never grant a privileged role such
+// as 'superadmin'.
 // Run: npm test
 const fs = require('fs');
 const path = require('path');
@@ -36,11 +38,11 @@ const stripComments = (s) => s
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/^\s*\/\/.*$/gm, '');
 
-// 1. Exactly the two assignable roles exist.
+// 1. Exactly the three assignable roles exist.
 assert.strictEqual(
     ASSIGNABLE_ROLES.slice().sort().join(','),
-    'hr,owner',
-    'ASSIGNABLE_ROLES must be exactly owner + hr'
+    'hr,owner,rmsm',
+    'ASSIGNABLE_ROLES must be owner + hr + rmsm'
 );
 assert.strictEqual(ASSIGNABLE_ROLES.indexOf('superadmin'), -1, 'superadmin must not be assignable');
 assert.strictEqual(ASSIGNABLE_ROLES.indexOf('operator'), -1, 'operator must not be assignable');
@@ -71,6 +73,8 @@ assert.notStrictEqual(ownerHint, hrHint, 'the two roles must have different hint
 assert(/no chat access/i.test(ownerHint), 'the owner hint must say there is no chat access');
 assert(/chat/i.test(hrHint), 'the HR hint must mention chat');
 assert(/branches/i.test(hrHint), 'the HR hint must mention branches');
+const rmsmHint = roleHintHtml({ role: 'rmsm' });
+assert(!/chat/i.test(rmsmHint), 'the RM/SM hint must not mention chat');
 
 // 4b. The Area Manager rename is DISPLAY-ONLY. The stored value stays
 //     'owner' everywhere, so no user document has to be migrated and the
@@ -175,9 +179,13 @@ assert(
 
 // (b) The gate compares the stored role value, not the label.
 assert(
-    /function isAreaManager\(\)\s*\{\s*return activeUserRole === 'owner';/.test(ownerJs),
-    'isAreaManager() must test the STORED role value "owner" — comparing the "Area Manager" ' +
+    /function isAreaManager\(\)\s*\{\s*return activeUserRole === 'owner'\s*\|\|\s*activeUserRole === 'rmsm';/.test(ownerJs),
+    'isAreaManager() must test the STORED role value "owner" or "rmsm" — comparing the "Area Manager" ' +
     'label would never match and the button would never appear'
+);
+assert(
+    /activeUserRole === 'rmsm'/.test(ownerJs),
+    'isAreaManager() must also return true for "rmsm" — ensuring RM/SM has same ticket access as Area Manager'
 );
 assert(
     /syncNewTicketButton\(\);/.test(ownerJs),
@@ -219,10 +227,61 @@ assert(
     /'Area Manager'/.test(ownerJs),
     'js/owner-dashboard.js must label the role "Area Manager"'
 );
+
+// RM/SM must show ITS OWN label — the exact regression reported as
+// "I changed my role to RM/SM but the dashboard label did not change".
+// 'rmsm' falls INSIDE isAreaManager() (it shares the +Ticket button, the
+// expiry window and the resolved-only scope), so a naive ternary falls
+// through and keeps labelling a re-roled RM/SM "Area Manager". The probe
+// runs the REAL accessLevelLabel() + isAreaManager() out of the file.
+{
+    const isAmAt = ownerJs.indexOf('function isAreaManager');
+    const syncAt = ownerJs.indexOf('function syncNewTicketButton');
+    assert(isAmAt > -1 && syncAt > isAmAt,
+        'isAreaManager() and syncNewTicketButton() must both exist to build the label probe');
+    const labelSb = { console };
+    labelSb.window = labelSb;
+    vm.createContext(labelSb);
+    vm.runInContext(
+        "let activeUserRole = 'viewer';\n" +
+        'let activeUserPermissions = { permissions: { canEdit: false } };\n' +
+        ownerJs.slice(isAmAt, syncAt) + '\n' +
+        'function probeLabel(r) { activeUserRole = r; return accessLevelLabel(); }\n' +
+        'function probeIsAm(r) { activeUserRole = r; return isAreaManager(); }\n',
+        labelSb
+    );
+    assert.strictEqual(labelSb.probeLabel('rmsm'), 'RM/SM',
+        'the badge + KPI tile must label role "rmsm" as RM/SM, not fall through to "Area Manager"');
+    assert.strictEqual(labelSb.probeLabel('owner'), 'Area Manager', 'owner must still label as Area Manager');
+    assert.strictEqual(labelSb.probeLabel('hr'), 'HR', 'hr must still label as HR');
+    assert.strictEqual(labelSb.probeLabel('superadmin'), 'Superadmin', 'superadmin must still label as Superadmin');
+    // The LABEL differs, but the GATES are shared: RM/SM keeps +Ticket, the
+    // expiry window and the resolved-only scope.
+    assert.strictEqual(labelSb.probeIsAm('rmsm'), true,
+        'isAreaManager() must remain true for rmsm — that is what gates +Ticket/expiry/scope');
+    assert.strictEqual(labelSb.probeIsAm('owner'), true, 'isAreaManager() stays true for owner');
+    assert.strictEqual(labelSb.probeIsAm('hr'), false, 'isAreaManager() stays false for hr');
+}
 assert(
     />Area Manager<\/option>/.test(src),
     'the User Approvals role dropdown must offer "Area Manager" (value stays "owner")'
 );
+assert(
+    />RM\/SM<\/option>/.test(src),
+    'the User Approvals role dropdown must offer "RM/SM"'
+);
 
-console.log('✅ Set Role tests passed (owner + hr only; unknown/privileged roles clamped; ' +
+// Every option must appear EXACTLY ONCE inside the <select>. A duplicated
+// <option> (which happened when RM/SM was added by an earlier edit that
+// re-inserted the HR line) silently renders two identical rows and can make
+// the wrong value win the "selected" tie-break.
+const roleSelectMatch = src.match(/<select id="roleSelect[^>]*>[\s\S]*?<\/select>/);
+assert(roleSelectMatch, 'the role <select> could not be found in script.js');
+['owner', 'hr', 'rmsm'].forEach((value) => {
+    const count = (roleSelectMatch[0].match(new RegExp('value="' + value + '"', 'g')) || []).length;
+    assert.strictEqual(count, 1,
+        `the role dropdown must contain exactly ONE option with value="${value}", found ${count}`);
+});
+
+console.log('✅ Set Role tests passed (owner + hr + rmsm; unknown/privileged roles clamped; ' +
     'Area Manager is a label-only rename; +Ticket is gated, ship-hidden and really hides).');

@@ -135,7 +135,7 @@
 
         if (!filtered.length) {
             const hasAny = allViolations.length > 0;
-            tableBody.innerHTML = '<tr><td colspan="8" class="empty-state">'
+            tableBody.innerHTML = '<tr><td colspan="9" class="empty-state">'
                 + '<i class="fas fa-video"></i><p>'
                 + (hasAny
                     ? 'No transferred reports match your search.'
@@ -155,6 +155,16 @@
             const incident = incidentDate(v);
             const report = reportDate(v);
             const files = Array.isArray(v.attachments) ? v.attachments.length : 0;
+            // Built once and used by BOTH the desktop Actions cell and the
+            // card's footer — below 900px the desktop cells hide and only the
+            // card shows (ROW CARD SWAP in style.css). The row-level
+            // delegation above serves both copies, because the card cell sits
+            // inside the same `tr[data-id]`.
+            const actionsGroup = `
+                        <div class="action-group">
+                            <button class="action-btn view" type="button" title="View details"><i class="fas fa-eye"></i></button>
+                            <button class="action-btn report" type="button" title="Download the report PDF"><i class="fas fa-file-pdf"></i></button>
+                        </div>`;
             return `
                 <tr class="hr-violation-row" data-id="${esc(v.id)}">
                     <td data-label="Report"><span class="ticket-link">${esc(v.violationNumber || v.id)}</span></td>
@@ -164,10 +174,26 @@
                     <td data-label="Subject">${esc(v.subject || '—')}</td>
                     <td data-label="Reporter">${esc(v.reportedByName || v.reportedBy || '—')}</td>
                     <td data-label="Files">${files > 0 ? `<i class="fas fa-paperclip"></i> ${files}` : '—'}</td>
-                    <td>
-                        <div class="action-group">
-                            <button class="action-btn view" type="button" title="View details"><i class="fas fa-eye"></i></button>
-                            <button class="action-btn report" type="button" title="Download the report PDF"><i class="fas fa-file-pdf"></i></button>
+                    <td>${actionsGroup}</td>
+                    <td class="approval-card-cell" data-label="Card">
+                        <div class="approval-card">
+                            <div class="approval-card-head">
+                                <span class="approval-card-branch"><i class="fas fa-store"></i>${esc(v.store || '—')}</span>
+                                <span class="approval-card-pill approval-card-pill--neutral">${esc(v.violationNumber || v.id)}</span>
+                            </div>
+                            <div class="approval-card-grid">
+                                <div class="approval-card-field"><span class="approval-card-label">Report Date</span><span class="approval-card-value">${esc(fmtDate(report))}</span></div>
+                                <div class="approval-card-field"><span class="approval-card-label">Incident Date/Time</span><span class="approval-card-value">${esc(incident ? fmtDate(incident) + ', ' + fmtTime(incident) : '—')}</span></div>
+                                <div class="approval-card-field"><span class="approval-card-label">Subject</span><span class="approval-card-value">${esc(v.subject || '—')}</span></div>
+                                <div class="approval-card-field"><span class="approval-card-label">Reporter</span><span class="approval-card-value">${esc(v.reportedByName || v.reportedBy || '—')}</span></div>
+                            </div>
+                            <div class="approval-card-foot">
+                                <div class="approval-card-expiry">
+                                    <span class="approval-card-label">Evidence</span>
+                                    <span class="approval-card-note">${files > 0 ? `<i class="fas fa-paperclip"></i> ${files} file${files === 1 ? '' : 's'}` : 'No attachments'}</span>
+                                </div>
+                                <div class="approval-card-actions">${actionsGroup}</div>
+                            </div>
                         </div>
                     </td>
                 </tr>`;
@@ -333,7 +359,7 @@
             (error) => {
                 console.error('HR violations listener error:', error);
                 if (tableBody) {
-                    tableBody.innerHTML = '<tr><td colspan="8" class="empty-state">'
+                    tableBody.innerHTML = '<tr><td colspan="9" class="empty-state">'
                         + '<em>Unable to load transferred violations.</em></td></tr>';
                 }
             }
@@ -420,6 +446,10 @@
         // above would keep retrying a role it can never match.
         if (text === 'hr' || text === 'superadmin' || text === 'owner') return text;
         if (text === 'area manager' || text === 'am') return 'owner';
+        // 'RM/SM' is the badge LABEL owner-dashboard.js renders for the
+        // stored role 'rmsm' — map it back exactly the same way
+        // 'Area Manager' maps to 'owner', or the fallback yields ''.
+        if (text === 'rm/sm') return 'rmsm';
         return '';
     }
 

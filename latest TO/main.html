@@ -36,6 +36,128 @@
     <link rel="stylesheet" href="theme.css">
     <!-- HR <-> Superadmin chat (superadmin only on this page) -->
     <link rel="stylesheet" href="chat.css">
+    <!-- ============================================================ -->
+    <!-- OPTION-2 MOBILE HEADER + COMMAND BANNER (phone only)          -->
+    <!-- ============================================================ -->
+    <!-- Tailwind (Play CDN) powers ONLY the pasted Option-2 blocks:
+         header.jn2-mobile-only and section.jn2-mobile-only. preflight is
+         OFF so Tailwind's reset can never touch the existing app CSS
+         (style.css / theme.css), and those blocks are hidden on desktop
+         anyway. Verified: no class name in the current markup collides
+         with a Tailwind utility. -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            corePlugins: { preflight: false },
+            theme: {
+                extend: {
+                    colors: {
+                        jn: {
+                            green: '#2e7d32',
+                            lightGreen: '#4caf50',
+                            accentGreen: '#e8f5e9',
+                            darkBg: '#0f172a',
+                            darkCard: '#1e293b',
+                            darkHeader: '#0f172a'
+                        }
+                    }
+                }
+            }
+        };
+    </script>
+
+    <!-- The app stores dark/light in data-theme (js/theme.js), while the
+         pasted blocks use Tailwind's `dark:` variant, which keys off the
+         `dark` CLASS on <html>. Keep the two in sync so the pasted icons
+         and dark colors follow the real theme toggle. -->
+    <script>
+        (function () {
+            var root = document.documentElement;
+            function syncThemeClass() {
+                root.classList.toggle('dark', root.getAttribute('data-theme') === 'dark');
+            }
+            syncThemeClass();
+            if (window.MutationObserver) {
+                new MutationObserver(syncThemeClass).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+            }
+        })();
+    </script>
+
+    <style>
+        /* ----------------------------------------------------------
+           Visibility rules for the Option-2 blocks.
+           899px is the app's own phone breakpoint (style.css turns the
+           sidebar into an off-canvas drawer at exactly this width).
+           Selectors are #id-scoped and !important so they always win
+           over the Tailwind utility classes on the pasted markup.
+           ---------------------------------------------------------- */
+
+        /* Desktop (≥900px): identical to the current UI — blocks hidden. */
+        #mainContent > header.jn2-mobile-only,
+        .jn2-fab,
+        #tabDashboard > section.jn2-mobile-only {
+            display: none !important;
+        }
+
+        @media (max-width: 899px) {
+            /* Phone (899px and below) + ANY tab: the pasted Option-2 header replaces
+               the classic .top-header everywhere, so the phone UI never jumps
+               between two header styles while switching tabs. Both headers
+               stay in the DOM (display:none only) because script.js, the
+               palette and the tests depend on their IDs (#btnAddStatus,
+               #btnNewViolation, #pageTitle, #authStatusText, .header-actions).
+               Add Status stays Dashboard-only (the pasted banner); Report
+               Violation is reachable phone-wide via .jn2-fab below. */
+            #mainContent > header.jn2-mobile-only {
+                display: flex !important;
+            }
+            #mainContent > .top-header {
+                display: none !important;
+            }
+
+            .jn2-fab { display: flex !important; }
+
+            /* Chat keeps ONE phone entry point. The Option-2 header icon
+               opens the same modal by code, so the floating circle would
+               only duplicate it on top of content. The typing pill goes
+               along with it. Drag logic in js-chat stays untouched. */
+            #chatLauncher,
+            #chatLauncherTyping { display: none !important; }
+
+            #tabDashboard > section.jn2-mobile-only {
+                display: block !important;
+            }
+            #tabDashboard > .dash-hero {
+                display: none !important;
+            }
+        }
+        /* ----------------------------------------------------------
+           Scoped "preflight-lite" for the pasted Option-2 blocks.
+
+           Tailwind's real global preflight is deliberately OFF (it
+           would restyle every button/card in the app), so the browser's
+           own default button chrome — the grey box with the outset
+           "dark edge" around each icon button — has to be neutralised
+           HERE, inside .jn2-mobile-only only.
+
+           :where() keeps this rule at specificity (0,1,0): Tailwind
+           utilities carry the same specificity and are injected AFTER
+           this block, so wherever the mockup sets its own border /
+           background (Monitor, Add Status) those still win — while the
+           browser/app element rules at (0,0,1) are always beaten.
+           ---------------------------------------------------------- */
+        .jn2-mobile-only :where(button),
+        .jn2-fab:where(button) {
+            -webkit-appearance: none;
+            appearance: none;
+            border: 0;
+            background-color: transparent;
+            background-image: none;
+            -webkit-tap-highlight-color: transparent;
+        }
+    </style>
+
 </head>
 <body>
 
@@ -116,6 +238,58 @@
     <!-- ============================================================ -->
     <main class="main-content" id="mainContent">
 
+        <!-- ============================================================ -->
+        <!-- OPTION-2 HEADER (pasted verbatim from the Option 2 mockup;   -->
+        <!-- marker class added) — PHONE ONLY.                            -->
+        <!-- The media query in the page head applies this at 899px and below
+        <!-- on EVERY phone tab (hiding .top-header there); on desktop it stays
+        <!-- display:none, so the current header below is untouched. It sits
+        <!-- directly under the main element, so sticky top keeps working. -->
+        <!-- ============================================================ -->
+        <header class="jn2-mobile-only sticky top-0 z-30 bg-white/90 dark:bg-jn-darkCard/90 backdrop-blur-md shadow-sm border-b border-gray-200 dark:border-gray-800/80 px-4 py-3 flex items-center justify-between transition-colors">
+          <div class="flex items-center gap-3">
+            <!-- Side Menu Drawer Trigger -->
+            <button id="openDrawer" aria-label="Open Navigation Menu" class="p-2 -ml-2 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800/80 rounded-xl transition-colors active:scale-95">
+              <i class="fa-solid fa-bars text-lg"></i>
+            </button>
+
+            <!-- Brand & Status -->
+            <div class="flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse ring-4 ring-emerald-500/20"></span>
+              <h1 id="jn2HeaderTitle" class="font-bold text-base tracking-tight text-gray-900 dark:text-white">Dashboard</h1>
+            </div>
+          </div>
+
+          <!-- Header Right Docked Controls -->
+          <div class="flex items-center gap-1.5">
+            <!-- Expandable Search Toggle -->
+            <button id="toggleSearch" aria-label="Search" class="p-2 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800/80 rounded-xl transition-colors active:scale-95">
+              <i class="fa-solid fa-magnifying-glass text-sm"></i>
+            </button>
+
+            <!-- Header Docked Support Chat Icon (No Floating Widgets) -->
+            <button id="openChatModal" aria-label="Open Chat Support" class="relative p-2 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800/80 rounded-xl transition-colors active:scale-95">
+              <i class="fa-solid fa-comments text-base text-emerald-600 dark:text-emerald-400"></i>
+              <span class="absolute top-1.5 right-1.5 w-2.5 h-2.5 bg-emerald-500 rounded-full ring-2 ring-white dark:ring-jn-darkCard"></span>
+            </button>
+
+            <!-- Theme Toggle (Dark / Light) -->
+            <button id="toggleDark" aria-label="Toggle Theme" class="p-2 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800/80 rounded-xl transition-colors active:scale-95">
+              <i class="fa-solid fa-moon dark:hidden text-slate-700"></i>
+              <i class="fa-solid fa-sun hidden dark:block text-amber-400"></i>
+            </button>
+
+            <!-- User Profile Avatar Badge Trigger -->
+            <button id="openProfile" aria-label="User Profile" class="relative ml-1 active:scale-95 transition-transform">
+              <div class="w-8 h-8 rounded-full bg-emerald-700 text-white font-bold text-xs flex items-center justify-center ring-2 ring-emerald-500/30 shadow-inner">
+                N
+              </div>
+              <span class="absolute bottom-0 right-0 w-2.5 h-2.5 bg-emerald-500 border-2 border-white dark:border-jn-darkCard rounded-full"></span>
+            </button>
+          </div>
+        </header>
+
+
         <!-- TOP HEADER -->
         <header class="top-header">
             <div class="header-left">
@@ -147,6 +321,46 @@
         <!-- TAB: DASHBOARD                                                -->
         <!-- ============================================================ -->
         <section class="tab-content active" id="tabDashboard">
+
+            <!-- ============================================================ -->
+            <!-- OPTION-2 COMMAND CENTER BANNER (pasted verbatim from the     -->
+            <!-- Option 2 mockup; marker class added) — PHONE ONLY.           -->
+            <!-- Hidden on desktop by the media query in <head>, where the     -->
+            <!-- .dash-hero right below stays the current UI.                 -->
+            <!-- ============================================================ -->
+            <section class="jn2-mobile-only relative overflow-hidden rounded-2xl bg-gradient-to-br from-slate-900 via-slate-800 to-emerald-950 p-5 text-white shadow-xl border border-slate-700/60">
+              <!-- Top Meta Info -->
+              <div class="flex items-center justify-between mb-3">
+                <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold tracking-wider uppercase bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                  <i class="fa-solid fa-shield-halved text-[9px]"></i> Command Center • Live
+                </span>
+                <span class="text-xs font-semibold text-slate-300 bg-slate-800/80 px-2.5 py-1 rounded-md border border-slate-700/80 shadow-inner">
+                  7:49 AM
+                </span>
+              </div>
+
+              <!-- Overview Header Text -->
+              <h2 class="text-xl font-extrabold tracking-tight mb-1 text-white">Network Operations Overview</h2>
+              <p class="text-xs text-slate-300 mb-5 leading-relaxed">3 of 9 branches offline · 1 tickets need action.</p>
+
+              <!-- Contextually Docked Action Buttons Footer (NO Floating Buttons) -->
+              <div class="flex items-center justify-between pt-3 border-t border-slate-700/60 gap-2">
+                <div class="text-[11px] text-slate-400 font-bold tracking-wider uppercase">TUESDAY, OCT 6</div>
+
+                <div class="flex items-center gap-2">
+                  <!-- Secondary Action: Branch Monitor -->
+                  <button id="openBranchMonitor" class="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all active:scale-95 shadow-sm">
+                    <i class="fa-solid fa-tower-cell text-xs text-emerald-400"></i> Monitor
+                  </button>
+
+                  <!-- Primary Action: Contextual + Add Status Modal Trigger -->
+                  <button id="openStatusModal" class="bg-emerald-600 hover:bg-emerald-500 text-white px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-md shadow-emerald-950/50 transition-all active:scale-95 ring-2 ring-emerald-500/30">
+                    <i class="fa-solid fa-plus text-xs"></i> Add Status
+                  </button>
+                </div>
+              </div>
+            </section>
+
 
             <!-- Dashboard hero: greeting + live status -->
             <div class="dash-hero">
@@ -444,7 +658,7 @@
             </div>
 
 <div class="table-container">
-                <table class="data-table" id="branchesTable">
+                <table class="data-table row-card-table" id="branchesTable">
                     <thead>
                         <tr>
                             <th>Branch</th>
@@ -453,11 +667,12 @@
                             <th>Last Updated</th>
                             <th>Current Downtime</th>
                             <th>Actions</th>
+                            <th class="approval-card-th" aria-hidden="true"><span class="u-hidden">Card</span></th>
                         </tr>
                     </thead>
                     <tbody id="branchesTableBody">
                         <tr>
-                            <td colspan="6" class="empty-state">
+                            <td colspan="7" class="empty-state">
                                 <i class="fas fa-database"></i>
                                 <p>No branches found. Add a status update to get started.</p>
                             </td>
@@ -520,7 +735,7 @@
             </div>
 
             <div class="table-container">
-                <table class="data-table" id="historyTable">
+                <table class="data-table row-card-table" id="historyTable">
                     <thead>
                         <tr>
                             <th>Date</th>
@@ -529,11 +744,12 @@
                             <th>Status</th>
                             <th>Remarks</th>
                             <th>Actions</th>
+                            <th class="approval-card-th" aria-hidden="true"><span class="u-hidden">Card</span></th>
                         </tr>
                     </thead>
 <tbody id="historyTableBody">
                         <tr>
-                            <td colspan="6" class="empty-state">
+                            <td colspan="7" class="empty-state">
                                 <i class="fas fa-history"></i>
                                 <p>No history records yet.</p>
                             </td>
@@ -572,7 +788,7 @@
                         <option value="In Progress">In Progress</option>
                         <option value="For Revision">For Revision</option>
                         <option value="Insufficient Footage">Insufficient Footage</option>
-                        <option value="Pending Approval">Pending Approval</option>
+                        <option value="Pending Approval" selected>Pending Approval</option>
                         <option value="Resolved">Resolved</option>
                     </select>
                 </div>
@@ -594,7 +810,7 @@
             </div>
 
             <div class="table-container">
-                <table class="data-table" id="ticketTable">
+                <table class="data-table row-card-table" id="ticketTable">
                     <thead>
                         <tr>
                             <th class="checkbox-cell"><input type="checkbox" id="selectAll" onchange="selectAllTickets()"></th>
@@ -605,11 +821,12 @@
                             <th>Incident</th>
                             <th>Status</th>
                             <th>Actions</th>
+                            <th class="approval-card-th" aria-hidden="true"><span class="u-hidden">Card</span></th>
                         </tr>
                     </thead>
                     <tbody id="ticketList">
                         <tr>
-                            <td colspan="8" class="empty-state">
+                            <td colspan="9" class="empty-state">
                                 <i class="fas fa-ticket-alt"></i>
                                 <p>No tickets found.</p>
                             </td>
@@ -665,7 +882,7 @@
             </div>
 
             <div class="table-container">
-                <table class="data-table" id="violationTable">
+                <table class="data-table row-card-table" id="violationTable">
                     <thead>
                         <tr>
                             <th>Report No.</th>
@@ -677,11 +894,12 @@
                             <th>Reporter</th>
                             <th>Files</th>
                             <th>Actions</th>
+                            <th class="approval-card-th" aria-hidden="true"><span class="u-hidden">Card</span></th>
                         </tr>
                     </thead>
                     <tbody id="violationList">
                         <tr>
-                            <td colspan="9" class="empty-state">
+                            <td colspan="10" class="empty-state">
                                 <i class="fas fa-video"></i>
                                 <p>No violation reports found.</p>
                             </td>
@@ -769,8 +987,8 @@
                 <div class="sort-group">
                     <label><i class="fas fa-filter"></i></label>
                     <select id="approvalStatusFilter">
-                        <option value="all">All</option>
-                        <option value="Pending Approval" selected>Pending Approval</option>
+                        <option value="all" selected>All</option>
+                        <option value="Pending Approval">Pending Approval</option>
                         <option value="Approved">Approved</option>
                         <option value="Expired">Access Expired</option>
                         <option value="For Revision">For Revision</option>
@@ -785,7 +1003,7 @@
             </div>
 
             <div class="table-container">
-                <table class="data-table" id="approvalTable">
+                <table class="data-table row-card-table" id="approvalTable">
                     <thead>
                         <tr>
                             <th>Ticket No.</th>
@@ -797,11 +1015,12 @@
                             <th>Approved Date</th>
                             <th>Access Expires</th>
                             <th>Actions</th>
+                            <th class="approval-card-th" aria-hidden="true"><span class="u-hidden">Card</span></th>
                         </tr>
                     </thead>
                     <tbody id="approvalListBody">
                         <tr>
-                            <td colspan="9" class="empty-state">
+                            <td colspan="10" class="empty-state">
                                 <i class="fas fa-clipboard-check"></i>
                                 <p>No approval tickets found.</p>
                             </td>
@@ -838,7 +1057,7 @@
             </div>
 
             <div class="table-container">
-                <table class="data-table" id="usersTable">
+                <table class="data-table row-card-table" id="usersTable">
                     <thead>
                         <tr>
                             <th>User</th>
@@ -847,10 +1066,11 @@
                             <th>Requested Branches</th>
                             <th>Status</th>
                             <th></th>
+                            <th class="approval-card-th" aria-hidden="true"><span class="u-hidden">Card</span></th>
                         </tr>
                     </thead>
                     <tbody id="usersListBody">
-                        <tr><td colspan="6" class="empty-state"><em>No pending approvals.</em></td></tr>
+                        <tr><td colspan="7" class="empty-state"><em>No pending approvals.</em></td></tr>
                     </tbody>
                 </table>
             </div>
@@ -904,6 +1124,18 @@
                 <span>Jiangnan CCTV Command Center</span>
             </div>
         </div>
+
+    <!-- ============================================================ -->
+    <!-- HANGING PLUS BUTTON - Report Violation (PHONE ONLY)           -->
+    <!-- The classic header that holds #btnNewViolation is hidden on   -->
+    <!-- phones now (the Option-2 header takes over every tab) and     -->
+    <!-- #tabViolations has no in-tab trigger, so this is the phone    -->
+    <!-- entry point. Wired in script.js (initOption2MobileHeader) to  -->
+    <!-- click the real button. Hidden on desktop by the page rules.   -->
+    <!-- ============================================================ -->
+    <button type="button" id="jn2ReportFab" class="jn2-fab fixed bottom-5 right-4 z-40 w-14 h-14 items-center justify-center bg-emerald-600 hover:bg-emerald-500 text-white rounded-full shadow-lg shadow-emerald-950/40 active:scale-95 transition-all" aria-label="Report Violation" title="Report Violation">
+        <i class="fa-solid fa-plus text-xl"></i>
+    </button>
 
     </main>
 
@@ -1086,6 +1318,21 @@
                      both the transfer and its undo. -->
                 <button type="button" class="btn btn-success u-hidden" id="btnTransferViolation" style="display:none;" title="Send this report to HR so they can write the incident report">
                     <i class="fas fa-share-nodes" id="btnTransferViolationIcon"></i> <span id="btnTransferViolationLabel">Transfer to HR</span>
+                </button>
+                <!-- ===== AREA MANAGER HANDOFF =====
+                     A SECOND, INDEPENDENT transfer. This stamps
+                     `managerStatus: 'transferred'` (see firebase.js) while the HR
+                     button above stamps `hrStatus` — so one report can sit on
+                     HR's list, the Area Manager's list, or BOTH at once. Reusing
+                     the single `hrStatus` field would make this button silently
+                     revoke an existing HR transfer.
+
+                     It also uses its own id/icon/label triples. The HR button
+                     swaps ITS label to "Revert Transfer" when the report is
+                     already transferred; sharing any of these three elements
+                     would make the two buttons overwrite each other's state. -->
+                <button type="button" class="btn btn-success u-hidden" id="btnTransferViolationToManager" style="display:none;" title="Send this report to the Area Manager so they can review it for their branches">
+                    <i class="fas fa-share-nodes" id="btnTransferViolationToManagerIcon"></i> <span id="btnTransferViolationToManagerLabel">Transfer to Area Manager</span>
                 </button>
                 <button type="button" class="btn btn-primary" id="btnEditViolation"><i class="fas fa-edit"></i> Edit Report</button>
             </div>
@@ -1674,7 +1921,7 @@
          initApp(). The dialog markup is INJECTED by the module, so this
          page deliberately has no <div> for it any more. -->
     <script src="js/attachment-viewer.js"></script>
-    <script src="script.js"></script>
+    <script src="script.js?v=branch-backfill-2"></script>
     <!-- ===== Command palette + keyboard shortcuts (Ctrl/Cmd+K) =====
          Loaded LAST: it references window.switchTab and window.escapeHTML,
          which script.js defines. Every lookup is guarded, so a missing global

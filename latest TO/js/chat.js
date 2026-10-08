@@ -5,11 +5,12 @@
 //
 //  ⚠️⚠️ TWO DIFFERENT ROLE SETS — DO NOT COLLAPSE THEM INTO ONE.
 //
-//  1:1 CONVERSATIONS: HR, superadmin and the AREA MANAGER (stored role
-//  'owner'). An Area Manager may open a private thread with any HR and with
-//  any superadmin, but NOT with another Area Manager — the pairing rule is
-//  "both chat-eligible AND a different role", so managers simply never pair
-//  with each other. Operators and unknown roles are excluded entirely.
+//  1:1 CONVERSATIONS — STRICTLY PAIRED (spec): personal chat exists between
+//  superadmin <-> HR, and Area Manager (stored 'owner') <-> RM/SM (stored
+//  'rmsm'). Store personnel meet HR and the superadmin in the STORE GROUP
+//  chat, never in DMs; every pairing is symmetric (one map, consulted from
+//  either side, so a room can never be opened one way and stranded).
+//  Operators and unknown roles are excluded entirely.
 //
 //  THE "All HR" GROUP CHAT: HR and superadmin ONLY. An Area Manager is a full
 //  chat participant yet is deliberately NOT in the group — they never see the
@@ -76,7 +77,7 @@
     // chat access by accident. It must stay in lockstep with `isChatRole()` in
     // firestore.rules — that rule is the real authorisation; this one only
     // controls the UI. test/chat-rules.test.js asserts both lists match.
-    var CHAT_ALLOWED_ROLES = ['hr', 'superadmin', 'owner'];
+    var CHAT_ALLOWED_ROLES = ['hr', 'superadmin', 'owner', 'rmsm'];
 
     // Who may be in the "All HR" GROUP chat: HR and superadmin only, so an
     // Area Manager is excluded from the group even though they can chat 1:1.
@@ -84,6 +85,25 @@
     // the two together are what keep Area Managers out of the group. A test
     // asserts this list is exactly these two roles and excludes 'owner'.
     var GROUP_ROOM_ROLES = ['hr', 'superadmin'];
+
+    // A per-branch group chat is an ALL-MEMBERS broadcast channel with no
+    // 1:1 semantics. Membership is the `members` list seeded at approval —
+    // EVERY approved account assigned to that branch plus all superadmins
+    // (see branchGroupMembers) — so this gate is about who can chat at all,
+    // not about membership (the list query only returns rooms you are in).
+    // Area Managers and RM/SM ARE members of their own branch's room.
+    // ⚠️ NOT THE SAME AS GROUP_ROOM_ROLES — that list is the legacy "All HR"
+    // room (hr + superadmin only) and must stay narrower.
+    var GROUP_STYLE_ROOM_ROLES = ['hr', 'superadmin', 'owner', 'rmsm'];
+
+    /** True when the signed-in person may see group-style rooms (legacy All HR + branch rooms). */
+    function inGroupStyleRoom() {
+      return GROUP_STYLE_ROOM_ROLES.indexOf(normalizeRole(currentRole)) !== -1;
+    }
+
+    // The two roles a 1:1 may be started with — HR, superadmin, and the
+    // Area Manager (stored role 'owner'). Area Manager never paired with
+    // themselves, and HRs never paired with HRs.
 
     /**
      * Who may MENTION a violation report in chat. HR and superadmin ONLY.
@@ -479,6 +499,94 @@
         return null;
     }
 
+    // The room id for a per-branch group chat. branchName -> chats/branch-<slug>.
+    function branchKey(branch) {
+      return 'branch-' + String(branch || '').toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    }
+
+    // True for a per-branch group chat (the client-side shape check).
+    function isBranchRoom(roomId) {
+      return roomId.indexOf('branch-') === 0;
+    }
+
+    // The display name for a branch room. Accepts EITHER the branch name (as
+    // seeded in the room document's `title`) or the room id — call sites pass
+    // whichever they hold, and the room-id form is prettified (the `branch-`
+    // prefix is dropped and hyphens become spaces) so a summary that has not
+    // arrived yet still reads "sm fairview", not "branch-sm-fairview".
+    function branchGroupName(branch) {
+      var raw = String(branch || '');
+      var name = isBranchRoom(raw) ? raw.slice('branch-'.length).replace(/-/g, ' ') : raw;
+      return (name || 'Unnamed branch') + ' — branch chat';
+    }
+
+    /**
+     * Who belongs in chats/branch-<slug> for `branch` — the seeded `members`
+     * list written by ensureBranchGroupChats() in script.js when a superadmin
+     * approves (or re-saves) a member's branch assignment.
+     *
+     * Three sources, all from the `users` collection:
+     *   1. `approvedEmail` — the person the approval was just for. Added
+     *      unconditionally so they are in the room even if the snapshot has
+     *      not caught up with the status write yet.
+     *   2. every approved SUPERADMIN and every approved HR — the superadmin
+     *      owns and manages every branch room (canManageBranchRoom) and may
+     *      hold no branches of their own, and HR's access is company-wide by
+     *      the spec ("HR has access to ALL Store Group Chats"), so neither is
+     *      filtered by `branches`.
+     *   3. every approved account whose `branches` INCLUDES this branch —
+     *      the Area Manager and the RM/SM assigned to THIS store. Anyone
+     *      assigned to a different branch is deliberately NOT here: a branch
+     *      room is that store's team and nobody else's. Pending, rejected and
+     *      operator accounts never qualify.
+     *
+     * PURE (no module state) — exercised for real by test/chat-rules.test.js
+     * §15b, which extracts this function and runs it against fixtures.
+     */
+    function branchGroupMembers(branch, users, approvedEmail) {
+      var key = String(branch || '').trim().toLowerCase();
+      var seen = {};
+      var add = function (email) {
+          var e = String(email || '').trim().toLowerCase();
+          if (e) seen[e] = true;
+      };
+      if (approvedEmail) add(approvedEmail);
+
+      // ⚠️ Does this branch have ANY approved Area Manager (owner) or RM/SM
+      // assigned to it? If not, the store has no team yet — the room must NOT
+      // be created, so Super Admin / HR do not get a phantom room.
+      var hasStoreUser = (users || []).some(function (u) {
+          if (!u) return;
+          var role = normalizeRole(u.role);
+          if (role !== 'owner' && role !== 'rmsm') return false;
+          var status = String(u.status || 'approved').trim().toLowerCase();
+          if (status !== 'approved') return false;
+          return Array.isArray(u.branches) && u.branches.some(function (b) {
+              return String(b || '').trim().toLowerCase() === key;
+          });
+      });
+
+      (users || []).forEach(function (u) {
+          if (!u) return;
+          var role = normalizeRole(u.role);
+          if (CHAT_ALLOWED_ROLES.indexOf(role) === -1) return;
+          var status = String(u.status || 'approved').trim().toLowerCase();
+          if (status !== 'approved') return;
+          if (role === 'superadmin' || role === 'hr') {
+              // Only add Super Admin / HR when the store actually has a team.
+              if (!hasStoreUser) return;
+              add(u.email || u.id);
+              return;
+          }
+          var assigned = Array.isArray(u.branches) && u.branches.some(function (b) {
+              return String(b || '').trim().toLowerCase() === key;
+          });
+          if (assigned) add(u.email || u.id);
+      });
+
+      return Object.keys(seen).sort();
+    }
+
     // Exposed early so the test can grab them and the pages can probe.
     var ChatService = {
         canChat: canChat,
@@ -492,7 +600,15 @@
         // Exported for unit tests: both sides must derive the SAME id for a
         // pair, or each opens a different (empty) room and messages vanish.
         dmRoomIdFor: dmRoomIdFor,
-        peerFromRoomId: peerFromRoomId
+        peerFromRoomId: peerFromRoomId,
+        // Branch rooms — auto-generated when a member is assigned to a branch
+        // (script.js ensureBranchGroupChats): id + display name + the PURE
+        // membership seeder, exported so the approval flow, this file's own
+        // UI and test/chat-rules.test.js §15b all use ONE implementation.
+        branchKey: branchKey,
+        isBranchRoom: isBranchRoom,
+        branchGroupName: branchGroupName,
+        branchGroupMembers: branchGroupMembers
     };
 
     window.ChatService = ChatService;
@@ -1595,14 +1711,19 @@
             // The non-superadmin reads are the ones that must be provable from
             // the rules, so each carries exactly the filter its clause restates:
             //   HR            → where('role','==','superadmin')
-            //   Area Manager  → where('role','in',['hr','superadmin'])
+            //   Area Manager / RM/SM → no personal-chat roster at all: the
+            //                         store meets in the branch group chat
+            //                         (rosterWantedRoles() returns [] for them)
             // The superadmin's whole-collection read (already deployed, already
             // in production) stays unfiltered — no index, and it survives a role
             // stored with stray case or whitespace.
             //
             // ⚠️ These filters are the ONLY reason the roster is readable at all.
             // An unfiltered read is denied, because the rules are per-document.
-            if (currentRole === 'owner') {
+            // These roles have no paired peer → their roster is empty.
+            // `rosterWantedRoles()` returns [] for them, so the read resolves
+            // empty and the directory simply stays empty.
+            if (currentRole === 'owner' || currentRole === 'rmsm') {
                 source = source.where('role', 'in', rosterWantedRoles());
             } else if (currentRole !== 'superadmin') {
                 source = source.where('role', '==', 'superadmin');
@@ -1618,14 +1739,22 @@
      * rule (isStartable) accepts, derived from CHAT_ALLOWED_ROLES rather than
      * written out again, so adding a chat role cannot leave the roster behind.
      *
-     * "Every chat role except my own": a superadmin may start with HRs, an HR
-     * with superadmins, and an Area Manager with both HRs and superadmins. It
+     * "Every chat role except my own": A superadmin may start with HRs, an HR with superadmins, and nobody else.
+     * No Area Manager thread exists now
+      * No store-side role starts a personal thread now.
+      * No store-side role starts a personal thread. The branch group chat carries those threads instead.
      * also means a superadmin's own role is excluded here, so the query below
      * still needs its own unfiltered branch.
      */
     function rosterWantedRoles() {
         const mine = normalizeRole(currentRole);
-        return CHAT_ALLOWED_ROLES.filter(function (role) { return role !== mine; });
+        // Strict pairing (see isStartable): each role has exactly ONE peer it
+        // may message. The intersection with CHAT_ALLOWED_ROLES keeps this
+        // derived from the master allowlist — a new chat role can never leave
+        // the roster behind, and the `in` filter always matches the pairing
+        // the users read rule is provable from.
+        const wanted = pairedRoleFor(mine);
+        return CHAT_ALLOWED_ROLES.filter(function (role) { return role === wanted; });
     }
 
     // ==============================================================
@@ -1706,26 +1835,26 @@
     /**
      * True when this person can be STARTED in a conversation.
      *
-     * Strict 1:1 and SYMMETRIC, matching the roles the rules allow. The single
-     * rule is: **both people must be chat-eligible, and they must hold
-     * DIFFERENT roles.** That one line produces the whole matrix —
+     * STRICT PAIRING (spec) and SYMMETRIC: personal chat exists for exactly
+     * ONE pair — superadmin <-> HR. Store personnel (Area Manager / RM/SM)
+     * never start a personal thread: they meet HR and the superadmin in the
+     * STORE GROUP chat instead:
      *
-     *            superadmin      HR          Area Manager
-     *   superadmin      ✗           ✓               ✓
-     *   HR              ✓           ✗               ✓
-     *   Area Manager    ✓           ✓               ✗   <-- co-managers
+     *              superadmin     HR     Area Manager    RM/SM
+     *   superadmin      ✗         ✓           ✗          ✗
+     *   HR              ✓         ✗           ✗          ✗
+     *   Area Manager    ✗         ✗           ✗          ✗
+     *   RM/SM           ✗         ✗           ✗          ✗
      *
-     * The two ✘ diagonals are the same rule, not special cases: HRs cannot
-     * message HRs (that predates the Area Manager) and Area Managers cannot
-     * message each other, which is exactly what keeps every conversation
-     * private to the pair it belongs to.
+     * The ✗ diagonals are one rule, not special cases: nobody pairs with
+     * their own role, and every off-diagonal cell is refused by the ONE
+     * pairing map (pairedRoleFor) below.
      *
      * ⚠️ SYMMETRIC ON PURPOSE. A 1:1 room is authorised by MEMBERSHIP, not by
-     * who opened it, so a one-way rule would strand a real conversation: an
-     * Area Manager could start a thread with an HR, the room would be created
-     * and both would be listed in it, and the HR — unable to start a thread
-     * with the Area Manager — could then never find it in their list. Both
-     * sides must be able to reach the other.
+     * who opened it, so a one-way rule would strand a real conversation: if
+     * only one side may start the pair, the other can never find the room
+     * that exists. One map, consulted from either side, keeps every cell
+     * agreeing with its mirror.
      */
     function isStartable(entry) {
         if (!entry) return false;
@@ -1738,7 +1867,24 @@
         const role = normalizeRole(entry.role);
         if (CHAT_ALLOWED_ROLES.indexOf(role) === -1) return false;
         // Never yourself (already checked above), never your own role.
-        return role !== normalizeRole(currentRole);
+        if (role === normalizeRole(currentRole)) return false;
+        // The pairing map: my role's ONE permitted peer. Declared after this
+        // function on purpose — function declarations hoist, and the pairing
+        // test's extracted slice (isStartable -> startableEntryFor) must
+        // contain BOTH halves of the rule or the sandbox would go quiet.
+        return pairedRoleFor(currentRole) === role;
+    }
+
+    /**
+     * The ONE personal-chat pairing map: each role's single permitted peer.
+     * Both isStartable() and rosterWantedRoles() derive from this, so the
+     * sidebar rows, the roster query and the pairing rule can never drift
+     * apart. Spec: superadmin <-> HR only — a store-side Area Manager or
+     * RM/SM never starts a personal thread (they meet in the branch group chat).
+     */
+    function pairedRoleFor(role) {
+        const PAIRED_ROLES = { superadmin: 'hr', hr: 'superadmin' };
+        return PAIRED_ROLES[normalizeRole(role)];
     }
 
     /**
@@ -2133,6 +2279,14 @@
             // A room we cannot attribute to a peer is unusable in a 1:1
             // list, and rendering it could expose another conversation.
             if (!peer || peer === me) return;
+            // Spec: a pair that may no longer personal-chat (see isStartable)
+            // must not be OFFERED — but ONLY when this peer's role is actually
+            // KNOWN. Hiding a conversation whose peer is in neither people
+            // source would make a real thread vanish with no way to rediscover
+            // it (the remembered-rooms invariant): unknown stays visible, a
+            // known-forbidden role is hidden.
+            const peerEntry = startableEntryFor(peer);
+            if (peerEntry && normalizeRole(peerEntry.role) && !isStartable(peerEntry)) return;
             seen[peer] = true;
             rows.push({
                 roomId: roomId,
@@ -2177,7 +2331,6 @@
         // is a channel everybody is already in, so it must never depend on a
         // summary arriving (and it can never contribute to the unread badge:
         // it is one pinned row, not a conversation that goes quiet).
-        //
         // ⚠️ NOT SHOWN TO AN AREA MANAGER. They pass canChat() and hold 1:1
         // threads, but the rules deny them this room (isLegacyArchive is still
         // HR + superadmin), so offering the row would be a guaranteed
@@ -2194,6 +2347,32 @@
                 unread: 0,
                 isArchive: true,
                 started: true
+            });
+        }
+
+        // Per-branch rooms: each branch is a separate ALL-MEMBERS broadcast
+        // channel. The room appears here only if the list query returned it —
+        // i.e. this user is IN its seeded `members` (approval seeds the store
+        // team: every assigned member + superadmins) — so the gate below is
+        // about who can chat at all, not about membership. Area Managers and
+        // RM/SM of this branch DO see the row; roles outside the chat
+        // allowlist never do.
+        if (inGroupStyleRoom()) {
+            const branchRooms = Object.keys(conversationSummaries).filter(function (id) {
+                return isBranchRoom(id);
+            });
+            branchRooms.forEach(function (roomId) {
+                const group = conversationSummaries[roomId];
+                rows.push({
+                    roomId: roomId,
+                    peerEmail: null,
+                    name: (group && group.title) || branchGroupName(roomId),
+                    lastMessage: (group && group.lastMessage) || '',
+                    lastMessageAt: (group && group.lastMessageAtMs) || 0,
+                    unread: 0,
+                    isArchive: true,
+                    started: true
+                });
             });
         }
 
@@ -2307,6 +2486,18 @@
                             // person (or another person's thread).
                             peerEmail: roomId === LEGACY_ROOM_ID ? null : peerFromRoomId(roomId)
                         };
+                        // Branch rooms: carry `title`/`members` into the
+                        // summary too. The row name, the open-header title and
+                        // the @mention picker all read them — and this query
+                        // path REPLACES the whole map, so without this they
+                        // would only survive on the denied-query fallback
+                        // (applyRoomSummaryToList copies them as well).
+                        if (isBranchRoom(roomId)) {
+                            next[roomId].title = data.title || '';
+                            if (Array.isArray(data.members)) {
+                                next[roomId].members = data.members.slice();
+                            }
+                        }
                     });
                     conversationSummaries = next;
                     conversationListReady = true;
@@ -2458,7 +2649,7 @@
             updateLauncherBadgeFromList();
             return;
         }
-        conversationSummaries[roomId] = {
+        const summary = {
             roomId: roomId,
             lastMessage: data.lastMessage || '',
             lastMessageAtMs: (toDate(data.lastMessageAt) || new Date(0)).getTime(),
@@ -2469,6 +2660,15 @@
             // list show the wrong person.
             peerEmail: roomId === LEGACY_ROOM_ID ? null : peerFromRoomId(roomId)
         };
+        // Branch rooms carry their display `title` (the store name) and full
+        // `members` into the summary: the row name, the open header and the
+        // @mention picker all read them. The list-query path does the same in
+        // startConversationListListener(); this is the per-room fallback path.
+        if (isBranchRoom(roomId)) {
+            summary.title = data.title || '';
+            if (Array.isArray(data.members)) summary.members = data.members.slice();
+        }
+        conversationSummaries[roomId] = summary;
         // The room reported, so it exists: remember it, or a conversation
         // whose other side later leaves the directory and the roster would
         // vanish from this list with no way to rediscover it.
@@ -2772,7 +2972,8 @@
      * is a worse outcome than a feature that never claims to exist.
      */
     function isGroupRoom(roomId) {
-        return (roomId === undefined ? activeRoomId : roomId) === LEGACY_ROOM_ID;
+        const id = (roomId === undefined ? activeRoomId : roomId) || '';
+        return id === LEGACY_ROOM_ID || id.indexOf('branch-') === 0;
     }
 
     /** Header text + avatar for the open conversation. */
@@ -2788,10 +2989,22 @@
         }
 
         if (isGroupRoom()) {
-            if (els.chatTitle) els.chatTitle.textContent = GROUP_ROOM_NAME;
-            if (els.chatSubtitle) {
-                els.chatSubtitle.textContent = 'Everyone with HR or superadmin access — ' +
-                    'new accounts are here automatically';
+            if (isBranchRoom(activeRoomId)) {
+                // The seeded room document carries the bare branch name as
+                // `title` ("SM Fairview"); branchGroupName() is only the
+                // fallback for before that snapshot has arrived.
+                const branchSummary = conversationSummaries[activeRoomId];
+                if (els.chatTitle) {
+                    els.chatTitle.textContent = (branchSummary && branchSummary.title)
+                        || branchGroupName(activeRoomId);
+                }
+                if (els.chatSubtitle) els.chatSubtitle.textContent = 'All members of that branch — the superadmin manages who is in it';
+            } else {
+                if (els.chatTitle) els.chatTitle.textContent = GROUP_ROOM_NAME;
+                if (els.chatSubtitle) {
+                    els.chatSubtitle.textContent = 'Everyone with HR or superadmin access — ' +
+                        'new accounts are here automatically';
+                }
             }
             if (els.threadAvatar) els.threadAvatar.hidden = true;
             // A real composer: this is a live channel, not a museum piece.
@@ -2803,7 +3016,18 @@
         if (els.chatTitle) els.chatTitle.textContent = name;
         if (els.chatSubtitle) {
             const role = normalizeRole(personProfileFor(activePeerEmail).role);
-            els.chatSubtitle.textContent = role ? roleLabel(role) : '';
+            const label = role ? roleLabel(role) : '';
+            // Colour-coded ROLE pill (violet = Area Manager, green = HR,
+            // blue = superadmin) — same hues as the avatar fills, so the
+            // superadmin knows at a glance who they are talking to.
+            // innerHTML is safe: role comes from the allowlist in
+            // normalizeRole() + roleLabel(), never from user text.
+            if (label && (role === 'owner' || role === 'hr' || role === 'superadmin' || role === 'rmsm')) {
+                els.chatSubtitle.innerHTML = '<span class="chat-role-pill chat-role-pill--' +
+                    role + '">' + label + '</span>';
+            } else {
+                els.chatSubtitle.textContent = label;
+            }
         }
         if (els.threadAvatar) {
             els.threadAvatar.hidden = false;
@@ -2972,19 +3196,20 @@
     }
 
     /**
-     * Human label for a role: "HR" / "Superadmin" / "Area Manager".
+     * Human label for a role: "HR" / "Superadmin" / "Area Manager" / "RM/SM".
      *
-     * ⚠️ 'owner' MUST be labelled here. An Area Manager is a real chat
-     * participant now, and an empty string is what this returns for an
+     * ⚠️ 'owner' and 'rmsm' MUST be labelled here. They are real chat
+     * participants, and an empty string is what this returns for an
      * unrecognised role — so without this the thread subtitle (and any other
-     * caller) would render blank for every Area Manager, looking like missing
-     * data rather than a role.
+     * caller) would render blank for every Area Manager or RM/SM, looking
+     * like missing data rather than a role.
      */
     function roleLabel(role) {
         var r = normalizeRole(role);
         if (r === 'superadmin') return 'Superadmin';
         if (r === 'hr') return 'HR';
         if (r === 'owner') return 'Area Manager';
+        if (r === 'rmsm') return 'RM/SM';
         return '';
     }
 
@@ -3025,18 +3250,24 @@
     }
 
     /**
-     * The name (+ optional job title) shown in the compact header above the
-     * bubble. The AVATAR is deliberately not here — it lives in its own
-     * column beside the message, so the header collapses to one short line.
+     * The role chip + name (+ optional job title) shown in the compact header
+     * above the bubble. Order is chip FIRST, then the name: `[HR] Maria` —
+     * the eye lands on the role before reading who said it. The AVATAR is
+     * deliberately not here — it lives in its own column beside the message,
+     * so the header collapses to one short line.
      *
-     * There is deliberately NO visible role badge. The role is carried by
-     * the avatar colour (blue = superadmin, green = HR) and by the job
-     * title, and is still discoverable on hover via the avatar's tooltip.
+     * The role chip reads from the SAME profileFor() source as the avatar
+     * (message's senderRole first, published profile as fallback), so a
+     * pre-feature message with no senderRole renders no chip rather than a
+     * wrong one — and everything works on existing history with no backfill.
      */
     function renderSenderIdentity(msg) {
         var p = profileFor(msg);
+        var role = normalizeRole(p.role);
         var label = roleLabel(p.role);
-        return '<span class="chat-msg-name">' + escapeHTML(p.name) + '</span>' +
+        return (label ? '<span class="chat-role-pill chat-role-pill--' + escapeHTML(role) +
+                '" title="' + escapeHTML(label) + '">' + escapeHTML(label) + '</span>' : '') +
+            '<span class="chat-msg-name">' + escapeHTML(p.name) + '</span>' +
             (p.title ? '<span class="chat-msg-title">' + escapeHTML(p.title) + '</span>' : '');
     }
 
@@ -4828,7 +5059,7 @@
         const at = (toDate(msg.sentAt) || new Date(0)).getTime();
         const current = conversationSummaries[roomId];
         if (current && Number(current.lastMessageAtMs || 0) >= at) return;
-        conversationSummaries[roomId] = {
+        const summary = {
             roomId: roomId,
             lastMessage: String(msg.text || '').slice(0, 140),
             lastMessageAtMs: at,
@@ -4836,6 +5067,16 @@
             isArchive: roomId === LEGACY_ROOM_ID,
             peerEmail: roomId === LEGACY_ROOM_ID ? null : peerFromRoomId(roomId)
         };
+        // A branch room's identity lives in `title`/`members`. This function
+        // REBUILDS the summary object, so carry them forward — otherwise the
+        // first message sent in a branch room would rename the row to
+        // "branch-x — branch chat" and empty the @mention picker until the
+        // next room snapshot.
+        if (current && isBranchRoom(roomId)) {
+            if (current.title) summary.title = current.title;
+            if (Array.isArray(current.members)) summary.members = current.members;
+        }
+        conversationSummaries[roomId] = summary;
         renderConversationList();
         updateLauncherBadgeFromList();
     }
@@ -5243,13 +5484,29 @@
         }
     }
 
-    // A distinct, more insistent sound for a direct mention.
-    var mentionSoundUrl = 'https://assets.mixkit.co/active_storage/sfx/2873/2873-preview.mp3';
+    // A distinct, more insistent sound for a direct mention. Local-first like
+    // the main chime (see js/notifications.js): sounds/mention.mp3 is the
+    // byte-identical copy of the mixkit preview; the CDN is the fallback so
+    // an ad-blocker can never mute mentions silently. Single `new Audio`
+    // construction (guarded by test 68): the fallback swaps the SRC on the
+    // same element instead of building a second object.
+    var mentionSoundUrl = 'sounds/mention.mp3';
+    var mentionSoundFallbackUrl = 'https://assets.mixkit.co/active_storage/sfx/2873/2873-preview.mp3';
     var mentionAudio = null;
 
     function playMentionSound() {
         try {
-            if (!mentionAudio) mentionAudio = new Audio(mentionSoundUrl);
+            if (!mentionAudio) {
+                mentionAudio = new Audio(mentionSoundUrl);
+                mentionAudio.addEventListener('error', function handleMentionError() {
+                    mentionAudio.removeEventListener('error', handleMentionError);
+                    try {
+                        mentionAudio.src = mentionSoundFallbackUrl;
+                        mentionAudio.preload = 'auto';
+                        mentionAudio.load();
+                    } catch (e) { /* ignore */ }
+                });
+            }
             mentionAudio.pause();
             mentionAudio.currentTime = 0;
             const p = mentionAudio.play();
@@ -5533,6 +5790,49 @@
     // picker filters this list on every input event, and a Firestore read per
     // character typed would be unusable.
 
+    // ===============================================================
+    //  STORE-SCOPED MENTIONS (spec: the Store Group Chat determines the
+    //  scope, and the RM/SM dashboard access determines which tickets
+    //  and violations may be mentioned within it)
+    //
+    //  Inside chats/branch-<slug>, the @ticket / @violation pickers AND
+    //  their resolvers offer only items whose branch/store matches the
+    //  room's branch — a broader dashboard (Area Manager, HR, superadmin)
+    //  must NEVER widen the mention list inside a store room. Outside a
+    //  branch room (1:1 DMs, the All-HR group) there is no store scope,
+    //  so the existing behaviour is unchanged.
+    //
+    //  Every outer reference is typeof-guarded: the picker block is also
+    //  executed by test/chat-ticket-mentions.test.js in a vm sandbox
+    //  where the room state does not exist, and a ReferenceError there
+    //  would fail the suite for a reason unrelated to the feature.
+    // ===============================================================
+    function activeRoomBranch() {
+        var roomId = (typeof activeRoomId !== 'undefined') ? activeRoomId : '';
+        if (!roomId) return '';
+        if (!(typeof isBranchRoom === 'function' && isBranchRoom(roomId))) return '';
+        var summary = (typeof conversationSummaries !== 'undefined' && conversationSummaries)
+            ? conversationSummaries[roomId] : null;
+        // The room document's `title` is the bare branch name ("SM Fairview");
+        // the id slug is the fallback before the summary arrives.
+        if (summary && summary.title) return String(summary.title).trim().toLowerCase();
+        return roomId.slice('branch-'.length).replace(/-/g, ' ').trim().toLowerCase();
+    }
+
+    /**
+     * True when `item` may be offered as a mention in the CURRENT room.
+     * Tickets carry `branch`/`branchName`, violations carry `store` — the
+     * comparison is trim + case-insensitive, like every other branch check
+     * in the app.
+     */
+    function inActiveRoomScope(item) {
+        var branch = activeRoomBranch();
+        if (!branch) return true;              // not a store room — no scope
+        if (!item) return false;
+        var own = String(item.branchName || item.branch || item.store || '').trim().toLowerCase();
+        return !!own && own === branch;
+    }
+
     var ticketIndex = null;          // null = never loaded
     var ticketIndexLoading = false;
     var ticketIndexByNumber = {};    // lowercased ticketNumber -> doc id
@@ -5620,7 +5920,9 @@
 
     /** Picker options for the current "ticket " query. */
     function ticketCandidates(query) {
-        var list = ticketIndex || [];
+        // Store scope first (spec): inside a branch room the picker may only
+        // offer THIS store's tickets, whoever is typing.
+        var list = (ticketIndex || []).filter(inActiveRoomScope);
         var q = String(query || '').trim().toLowerCase();
         if (!q) return list;
         return list.filter(function (t) {
@@ -5655,10 +5957,11 @@
         lastRefWasUnresolved = false;
 
         var cached = ticketIndexById[key];
-        if (cached) return cached;
+        if (cached) return inActiveRoomScope(cached) ? cached : null;
         var cachedId = ticketIndexByNumber[key];
         if (cachedId && ticketIndexById[cachedId.toLowerCase()]) {
-            return ticketIndexById[cachedId.toLowerCase()];
+            var cachedHit = ticketIndexById[cachedId.toLowerCase()];
+            return inActiveRoomScope(cachedHit) ? cachedHit : null;
         }
 
         if (typeof db === 'undefined' || !db || typeof db.collection !== 'function') {
@@ -5680,7 +5983,10 @@
                     return null;
                 }
                 indexTicket(found);
-                return found;
+                // Store scope (spec): a cross-STORE ticket may never become a
+                // chip in THIS store's room, whoever is looking at it. Still
+                // indexed — another room's picker may legitimately offer it.
+                return inActiveRoomScope(found) ? found : null;
             }
         } catch (e) { /* fall through to the scan */ }
 
@@ -5698,6 +6004,9 @@
                 // Same rule: a number that matches but is still open is not a
                 // mentionable ticket.
                 if (!isMentionableTicket(candidate)) { unresolved = true; return; }
+                // ...and a number that matches but belongs to ANOTHER store is
+                // not mentionable in a store room (spec).
+                if (!inActiveRoomScope(candidate)) return;
                 match = candidate;
             });
             if (match) {
@@ -6372,7 +6681,9 @@ async function openTicketFromRef(ref) {
 
     /** Picker options for the current violation query. */
     function violationCandidates(query) {
-        var list = violationIndex || [];
+        // Store scope first (spec): inside a branch room the picker may only
+        // offer THIS store's reports, whoever is typing.
+        var list = (violationIndex || []).filter(inActiveRoomScope);
         var q = String(query || '').trim().toLowerCase();
         if (!q) return list;
         return list.filter(function (v) {
@@ -6414,10 +6725,11 @@ async function openTicketFromRef(ref) {
         lastViolationWasUntransferred = false;
 
         var cached = violationIndexById[key];
-        if (cached) return cached;
+        if (cached) return inActiveRoomScope(cached) ? cached : null;
         var cachedId = violationIndexByNumber[key];
         if (cachedId && violationIndexById[cachedId.toLowerCase()]) {
-            return violationIndexById[cachedId.toLowerCase()];
+            var cachedHit = violationIndexById[cachedId.toLowerCase()];
+            return inActiveRoomScope(cachedHit) ? cachedHit : null;
         }
 
         if (typeof db === 'undefined' || !db || typeof db.collection !== 'function') {
@@ -6442,6 +6754,9 @@ async function openTicketFromRef(ref) {
                 // The same rule as everywhere else: a number that matches but
                 // is not transferred is not a mentionable report.
                 if (!isMentionableViolation(candidate)) return;
+                // ...and a report from ANOTHER store may never be mentioned in
+                // a store room, whoever is looking at it (spec).
+                if (!inActiveRoomScope(candidate)) return;
                 match = candidate;
             });
             if (match) {
@@ -6923,6 +7238,18 @@ async function openTicketFromRef(ref) {
         (lastRenderedMessages || []).forEach(function (msg) {
             add(msg.senderEmail, msg.senderName);
         });
+        // Branch rooms are ALL-MEMBERS groups. The room summary (built by
+        // applyRoomSummaryToList) carries the full membership when it is a
+        // branch room, so a superadmin who is in the branch can mention
+        // anyone else in that branch. Area Managers are excluded from the
+        // list above, so they never see branch members either.
+        if (activeRoomId && isBranchRoom(activeRoomId) &&
+            conversationSummaries[activeRoomId] &&
+            Array.isArray(conversationSummaries[activeRoomId].members)) {
+            conversationSummaries[activeRoomId].members.forEach(function (member) {
+                add(member, nameFor(member) || String(member));
+            });
+        }
         return list;
     }
 
@@ -7486,5 +7813,19 @@ async function openTicketFromRef(ref) {
         stopDirectoryListener();
         startDirectoryListener();
         loadHrRoster();
+    };
+    /**
+     * A branch room was just seeded (script.js ensureBranchGroupChats): fold
+     * it into THIS device's sidebar immediately — remember it (the denied
+     * list-query fallback re-reads remembered rooms) and attach its document
+     * listener so the title/members arrive without waiting for anything else.
+     * Idempotent: subscribeRoomForList() early-returns for a room already
+     * subscribed, and rememberRoom overwrites the same key.
+     */
+    ChatService.noteBranchRoom = function (roomId) {
+        if (!isMounted || !currentUserEmail || !roomId) return;
+        rememberRoom(roomId);
+        subscribeRoomForList(roomId);
+        startPerRoomConversationListeners();   // no-op unless the list query was denied
     };
 })();

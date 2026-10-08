@@ -1086,3 +1086,101 @@ console.log('\n✅ Area Manager approval + expiry tests passed (approved-only li
     'and a re-access request that writes the SAME two fields the existing superadmin workflow reads; ' +
     'plus a Request Additional Footage form on non-expired tickets that writes the SAME ' +
     'footage_request contract as the public Track page).');
+
+// 8. TICKET REVIEWS PHONE CARD (matches the mobile mockup): Branch + status
+//    pill on top, Incident/Reporter and the two dates in a 2-column grid,
+//    expiry + actions in a footer. The footer STAYS — approve/reject exist
+//    only there, unlike the owner card whose buttons duplicate the row tap.
+console.log('\n=== Ticket Reviews phone card ===');
+{
+    const mainHtml = fs.readFileSync(path.join(ROOT, 'main.html'), 'utf8');
+    const css = fs.readFileSync(path.join(ROOT, 'style.css'), 'utf8');
+    const listAt = scriptJsSrc.indexOf('function renderApprovalList()');
+    assert(listAt > -1, 'renderApprovalList() not found in script.js');
+    const listFn = scriptJsSrc.slice(listAt, scriptJsSrc.indexOf('window.goToApprovalPage', listAt));
+    const headAt = mainHtml.indexOf('id="approvalTable"');
+    const headHtml = mainHtml.slice(headAt, mainHtml.indexOf('</thead>', headAt));
+    const thCount = (headHtml.match(/<th[\s>]/g) || []).length;
+    assert.strictEqual(thCount, 10, 'the approvals table must have 10 header cells (9 + hidden card, found ' + thCount + ')');
+    assert(/<th class="approval-card-th"/.test(headHtml),
+        'the card header cell must exist and stay hidden on desktop');
+    for (const label of ['Ticket No.', 'Branch', 'Incident', 'Reporter', 'Date Created',
+        'Status', 'Approved Date', 'Access Expires']) {
+        assert(listFn.indexOf('data-label="' + label + '"') > -1,
+            'renderApprovalList() must emit data-label="' + label + '" — the phone card prints ' +
+            'attr(data-label), so without it the value is unlabelled');
+    }
+    const phoneAt = css.indexOf('Ticket Reviews phone card swap');
+    assert(phoneAt > -1, 'the phone card swap block must exist in style.css');
+    const phoneCss = css.slice(phoneAt, css.indexOf('Extra-small phones', phoneAt));
+    // Desktop: card cell hidden (rule lives with the card styles, BEFORE the
+    // swap block). Phones: table cells hide, card shows.
+    assert(/#approvalTable \.approval-card-th,\s*#approvalTable \.approval-card-cell\s*\{\s*display:\s*none/.test(css),
+        'the card cell must stay hidden on desktop');
+    assert(/#approvalTable tbody tr\.approval-row > td:not\(\.approval-card-cell\)\s*\{\s*display:\s*none/.test(phoneCss),
+        'on phones the table cells must hide so only the card shows');
+    assert(/#tabApprovals \.table-container\s*\{[^}]*overflow-x:\s*visible/.test(phoneCss),
+        'the card container must not invite a dead horizontal swipe');
+    // The card structure itself: branch + pill header, 2x2 grid, footer.
+    // (Card styles live BEFORE the swap block, so assert against full css.)
+    assert(/\.approval-card-head\s*\{[^}]*justify-content:\s*space-between/.test(css),
+        'the card header must put branch left and the status pill right');
+    assert(/\.approval-card-grid\s*\{[^}]*grid-template-columns:\s*1fr 1fr/.test(css),
+        'the card body must be a 2-column grid like the mockup');
+    assert(/\.approval-card-foot\s*\{[^}]*justify-content:\s*space-between/.test(css),
+        'the card footer must put expiry left and actions right');
+    assert(/\.approval-card-pill--approved\s*\{[^}]*var\(--color-resolved-bg\)/.test(css),
+        'the approved pill must use the resolved token');
+    assert(listFn.indexOf('approval-card-cell') > -1,
+        'renderApprovalList() must emit the card cell mirroring the desktop cells');
+    assert(listFn.indexOf('window.ChatService && window.ChatService.open') > -1,
+        'the card message button must open the existing chat modal');
+    assert(!/sendMessageToReporter|messageReporter|openChatWith/.test(listFn),
+        'the card must NOT call a per-reporter chat API — none exists');
+    // THE ACTIONS FOOTER STAYS: approve/reject have no other surface on a
+    // phone (the row tap only opens details), so hiding it would remove
+    // capability, not height. Fails if the owner-card hiding rule is copied here.
+    assert(!/#approvalTable tbody td(?::last-child|:not\(\[data-label\]\))[^,{]*\{[^}]*display:\s*none/.test(phoneCss),
+        'the approvals Actions footer must NOT be hidden on a phone');
+    assert(/\.approval-card-actions \.action-btn\s*\{[^}]*width:\s*32px[^}]*height:\s*32px/.test(css),
+        'the card buttons must be 32px rounded squares like the mockup');
+    assert(/\.approval-card-actions \.action-btn\.msg\s*\{[^}]*var\(--color-progress-bg\)/.test(css),
+        'the message button must be blue like the mockup');
+    assert(/\.approval-card-actions \.action-btn::after\s*\{\s*display:\s*none/.test(css),
+        'hover tooltips must be suppressed on touch — they stick open and cover the card');
+    // ⚠️ THE TOOLTIP IS RIGHT-ANCHORED — the fix for the phantom horizontal
+    // scrollbar under the Ticket Reviews table. The tooltip is `white-space:
+    // nowrap` and `opacity: 0`: invisible, but STILL IN LAYOUT, so its box
+    // counts toward `.table-container`'s scrollable overflow (`overflow-x:
+    // auto`). The Actions column is the LAST column, and this table's buttons
+    // carry the longest tooltips in the app ("…press to resend to
+    // someone@example.com", "Approve Request & Resend (2-Day Access)") on
+    // buttons in the LEFT half of that column. Centered (`left: 50%` +
+    // `translateX(-50%)`), half of each tooltip stuck out past the table's
+    // right edge and produced a scrollbar under a table whose columns all
+    // fit. Right-anchoring pins the tooltip's right edge to the button's, so
+    // no amount of tooltip text can extend the scroll area to the right
+    // (leftward overflow creates no scrollbar in LTR).
+    const tipRule = (css.match(/\.action-btn::after\s*\{[^}]*\}/) || [''])[0];
+    assert(/right:\s*0/.test(tipRule),
+        'the action tooltip must be right-anchored (`right: 0`) — a nowrap tooltip centered ' +
+        'on a button in the last column extends past the table edge and shows a scrollbar ' +
+        'under a table that fits. Rule: ' + tipRule);
+    assert(!/left:\s*50%|translateX\(-50%\)/.test(tipRule),
+        'the action tooltip must NOT be centered — the centered form is exactly what let the ' +
+        'invisible tooltip overflow the scroll container. Rule: ' + tipRule);
+    // The Status History and Branch Monitor tooltips are copy-paste siblings
+    // of the same pattern and were only a few px from the same bug; they must
+    // stay in step with the rule above.
+    const histTipRule = (css.match(/\.history-action-btn::after\s*\{[^}]*\}/) || [''])[0];
+    assert(/right:\s*0/.test(histTipRule) && !/left:\s*50%/.test(histTipRule),
+        'the history action tooltip must stay right-anchored with its sibling. Rule: ' + histTipRule);
+    const viewTipRule = (css.match(/\.btn-view::after\s*,\s*\.btn-remove::after\s*\{[^}]*\}/) || [''])[0];
+    assert(/right:\s*0/.test(viewTipRule) && !/left:\s*50%/.test(viewTipRule),
+        'the branch action tooltips must stay right-anchored with their sibling. Rule: ' + viewTipRule);
+    assert(/#approvalTable tbody td\.empty-state\s*\{[^}]*border-radius:\s*16px/.test(phoneCss),
+        'the empty state must render as its own rounded card, not the footer style');
+    assert(!/background:\s*rgba\(\s*255\s*,\s*255\s*,\s*255/.test(phoneCss),
+        'the phone card must not hardcode a white surface — use var(--bg-card)');
+    console.log('  PASS  the approvals table becomes a mockup-style card on phones');
+}

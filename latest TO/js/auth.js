@@ -147,9 +147,9 @@ async function resolveLoginDestination(user) {
 
         const role = (data && data.role) || 'operator';
         if (role === 'superadmin') return withTicketParam(next || 'main.html');
-        // 'hr' uses the SAME dashboard as an owner — the only differences
+        // 'hr' and 'rmsm' use the SAME dashboard as an owner — the only differences
         // are the profile label and chat access — so both route here.
-        if (role === 'owner' || role === 'hr') return withTicketParam('ownerdashboard.html');
+        if (role === 'owner' || role === 'hr' || role === 'rmsm') return withTicketParam('ownerdashboard.html');
         return withTicketParam(next || 'main.html');
     } catch (err) {
         console.warn('Role lookup failed, defaulting to main.html:', err && err.message ? err.message : err);

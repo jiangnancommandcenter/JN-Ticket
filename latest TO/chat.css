@@ -452,6 +452,46 @@ body.chat-ticket-open .modal-overlay {
     text-overflow: ellipsis;
 }
 
+/* ---- Thread header: colour-coded ROLE pill (superadmin glance cue) ----
+   Same hues as the avatar fills so one colour = one role everywhere:
+   violet = Area Manager (owner) AND RM/SM (rmsm, which mirrors the
+   manager), green = HR, blue = superadmin. Kept small/subtle — it is a
+   cue, not a banner. */
+.chat-role-pill {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    padding: 1px 8px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    line-height: 1.5;
+    white-space: nowrap;
+}
+.chat-role-pill--owner {
+    color: #7c3aed;
+    background: rgba(124, 58, 237, 0.10);
+    border-color: rgba(124, 58, 237, 0.32);
+}
+/* RM/SM mirrors the Area Manager — same violet, so one colour = one role. */
+.chat-role-pill--rmsm {
+    color: #7c3aed;
+    background: rgba(124, 58, 237, 0.10);
+    border-color: rgba(124, 58, 237, 0.32);
+}
+.chat-role-pill--hr {
+    color: #15803d;
+    background: rgba(22, 163, 74, 0.12);
+    border-color: rgba(22, 163, 74, 0.35);
+}
+.chat-role-pill--superadmin {
+    color: #1d4ed8;
+    background: rgba(37, 99, 235, 0.12);
+    border-color: rgba(37, 99, 235, 0.35);
+}
+
 .chat-thread-avatar {
     width: 32px;
     height: 32px;
@@ -604,11 +644,23 @@ body.chat-ticket-open .modal-overlay {
    like an unrecognised one — so it gets the same violet the .role-badge.owner
    uses elsewhere in the app, keeping one colour for one role. */
 .chat-avatar--owner      { background: var(--chat-role-area-manager, #8B5CF6); }
+/* RM/SM (stored role 'rmsm') mirrors the Area Manager — same violet. */
+.chat-avatar--rmsm       { background: var(--chat-role-area-manager, #8B5CF6); }
 
-/* NOTE: there is deliberately NO .chat-role-badge. A visible "SUPERADMIN"
-   / "HR" chip on every message was too noisy — the role is carried by the
-   avatar colour above and by the optional job title, and is still exposed
-   in the avatar's title tooltip. */
+/* Per-message role chip: reuses the .chat-role-pill palette from the thread
+   header (same hues, one colour = one role everywhere), sized down for the
+   compact sender line so it reads at a glance without competing with the
+   name. Rendered by renderSenderIdentity(); blank when the role is unknown
+   (pre-feature history), never guessed.
+   NOTE: the old "no visible badge" decision (avatar colour only) was
+   reversed at the owner's request — test/chat-access.test.js pins the chip
+   so it cannot silently vanish again. */
+.chat-msg-meta .chat-role-pill {
+    font-size: 0.6rem;
+    padding: 0 6px;
+    line-height: 1.6;
+    align-self: center;
+}
 
 /* Optional job title, muted so it never competes with the name. */
 .chat-msg-title {
@@ -633,7 +685,8 @@ body.chat-ticket-open .modal-overlay {
 }
 
 .chat-msg-grouped .chat-msg-name,
-.chat-msg-grouped .chat-msg-title {
+.chat-msg-grouped .chat-msg-title,
+.chat-msg-grouped .chat-role-pill {
     display: none;
 }
 

@@ -5,7 +5,15 @@
 // ==============================================================
 
 // ===== SOUND =====
-const NOTIFICATION_SOUND_URL = 'https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3';
+// Local-first: the mixkit CDN URLs are the fallback, not the primary.
+// An ad-blocker, a corporate firewall, or plain offline dev (Live Server
+// has no internet guarantee) kills the CDN fetch SILENTLY — `new Audio()`
+// never throws, `.play()` just never makes a sound, and every caller
+// swallows the rejection. The local sounds/notify.mp3 + sounds/mention.mp3
+// are byte-identical copies of the same two mixkit previews, so a blocked
+// CDN changes nothing the user hears.
+const NOTIFICATION_SOUND_URL = 'sounds/notify.mp3';
+const NOTIFICATION_SOUND_FALLBACK_URL = 'https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3';
 const NOTIFICATION_ICON_URL = 'https://jiangnanhotpot.com/cdn/shop/files/jiangnan-logo-transparent_40f90d62-6f5e-4f34-9a1a-cf948a106904.png?v=1721972026';
 let notificationAudio = null;
 
@@ -24,15 +32,59 @@ function preloadNotificationSound() {
 function playNotificationSound() {
     try {
         if (!notificationAudio) {
+            // Single `new Audio` construction: the CDN fallback swaps the SRC
+            // on the same element instead of building a second object.
             notificationAudio = new Audio(NOTIFICATION_SOUND_URL);
+            // If the local file 404s (e.g. an old hosting deploy that lacks
+            // sounds/), fall back to the CDN copy instead of staying silent.
+            notificationAudio.addEventListener('error', function handleSoundError() {
+                notificationAudio.removeEventListener('error', handleSoundError);
+                try {
+                    notificationAudio.src = NOTIFICATION_SOUND_FALLBACK_URL;
+                    notificationAudio.preload = 'auto';
+                    notificationAudio.load();
+                } catch (e) { /* fall through to the warn below */ }
+            });
         }
         notificationAudio.pause();
         notificationAudio.currentTime = 0;
+        // Always play at full volume: the silent autoplay-unlock (see
+        // armAudioUnlockOnLogin) leaves the element at volume 0 for a moment,
+        // and a real notification landing in that window must still be heard.
+        notificationAudio.volume = 1;
         const p = notificationAudio.play();
         if (p && p.catch) p.catch(() => {});
     } catch (e) {
         console.warn('[Desktop Notifications] Sound play failed:', e);
     }
+}
+
+/**
+ * Self-test: run `window.testNotificationSound()` in DevTools to prove the
+ * whole path at once — file reachable, Audio decodable, autoplay allowed.
+ * Logs exactly which step fails instead of staying silent.
+ */
+async function testNotificationSound() {
+    const steps = [];
+    try {
+        const res = await fetch(NOTIFICATION_SOUND_URL, { method: 'HEAD' });
+        steps.push('fetch ' + NOTIFICATION_SOUND_URL + ' → ' + res.status);
+        if (!res.ok) throw new Error('sound file not reachable (HTTP ' + res.status + ')');
+    } catch (e) {
+        console.error('[Desktop Notifications] TEST FAILED at fetch:', e);
+        return false;
+    }
+    try {
+        const audio = new Audio(NOTIFICATION_SOUND_URL);
+        await audio.play();
+        audio.pause();
+        steps.push('Audio.play() ok');
+    } catch (e) {
+        console.error('[Desktop Notifications] TEST FAILED at play (autoplay blocked? click the page first):', e);
+        return false;
+    }
+    console.log('[Desktop Notifications] TEST OK —', steps.join(' | '), '| permission =', ('Notification' in window ? Notification.permission : 'unsupported'));
+    return true;
 }
 
 // ===== TRACKING (prevents duplicate notifications) =====
@@ -485,8 +537,50 @@ function notifyNewTicket(ticket) {
  * permanently lock the site. Permission is requested from a real click on the
  * track page (submit-ticket.html) when the user submits a footage request.
  */
+/**
+ * Autoplay-policy unlock: browsers refuse Audio.play() until the user has
+ * interacted with the page, and the first successful play unlocks sound for
+ * the rest of the session. The dashboard has a single entry gesture (the
+ * password login button) every session — hooking the FIRST click anywhere
+ * unlocks sound without any extra UI.
+ *
+ * ⚠️ THE UNLOCK IS SILENT. It used to call playNotificationSound() outright,
+ * so the first click after EVERY refresh played the full notification chime —
+ * an unnecessary "ding" users heard whenever they reloaded. play() still runs
+ * (inside the real click gesture, which is what satisfies the autoplay
+ * policy), just at volume 0, and the volume is restored right after the
+ * element is paused. Real alerts (new ticket, mention, rejection) still play
+ * at full volume — playNotificationSound() resets volume to 1 before playing.
+ *
+ * Idempotent: safe to call from every login form on every page.
+ */
+function armAudioUnlockOnLogin() {
+    if (window.__rcmsAudioUnlockArmed) return;
+    window.__rcmsAudioUnlockArmed = true;
+    document.addEventListener('click', function unlockOnce() {
+        document.removeEventListener('click', unlockOnce);
+        try {
+            preloadNotificationSound();
+            if (!notificationAudio) return;
+            const prevVolume = notificationAudio.volume;
+            notificationAudio.volume = 0;
+            const restore = function () {
+                try {
+                    notificationAudio.pause();
+                    notificationAudio.currentTime = 0;
+                    notificationAudio.volume = prevVolume;
+                } catch (e) { /* ignore */ }
+            };
+            const p = notificationAudio.play();
+            if (p && p.then) p.then(restore, restore);
+            else restore();
+        } catch (e) { /* ignore */ }
+    });
+}
+
 async function initDesktopNotifications() {
     preloadNotificationSound();
+    armAudioUnlockOnLogin();
     const perm = await ensureNotificationPermission();
 
     if (perm === 'granted') {
@@ -511,3 +605,5 @@ window.notifyTicketStatusChange = notifyTicketStatusChange;
 // Audio object, and the "reuse the shared, preloaded notification sound" path
 // in playIncomingSound() is dead code that can never run.
 window.playNotificationSound = playNotificationSound;
+window.testNotificationSound = testNotificationSound;
+window.armAudioUnlockOnLogin = armAudioUnlockOnLogin;

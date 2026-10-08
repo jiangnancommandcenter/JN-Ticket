@@ -41,12 +41,48 @@ service cloud.firestore {
       return request.auth.token.email.lower();
     }
 
+    // The room id for a per-branch group chat. The client computes the full
+    // slug (lowercase plus hyphens) and the rules only check the prefix.
+    // Note: the rules language has a small string built-in set (lower,
+    // upper, matches, split, size), so slug work stays client side.
+    //
+    // ⚠️ Firestore matches() is a FULL-STRING match, not a prefix search:
+    // '^branch-' alone matches NOTHING (every real id has a slug after the
+    // prefix). The trailing '.*' is what makes this a prefix check — without
+    // it every branch-room read AND write evaluates to DENIED, which is
+    // exactly what production showed (op=read room AND op=seed room both
+    // denied while the client and the rest of the rules were correct).
+    // Covered by test/chat-rules.test.js §15b, which pins the trailing '.*'.
+    function isBranchRoom(chatId) {
+      return chatId.matches('^branch-.*');
+    }
+
+    // Writes into a branch room are only allowed when the caller is a
+    // superadmin (the owner/manager of the room) — never a member. Members
+    // are scoped in through `members`, not through who can edit the room.
+    function canManageBranchRoom(chatId) {
+      return isSuperAdmin() && isBranchRoom(chatId);
+    }
+
     // The user's role lives on their own profile doc: users/<email>.
     // isSuperAdmin() reads that doc inside the rules engine, so no custom
     // claims are required. (Self-read of users/<email> is allowed below.)
     function isSuperAdmin() {
       return isSignedIn() &&
         get(/databases/$(database)/documents/users/$(selfEmail())).data.role == 'superadmin';
+    }
+
+    // The caller's own role, read the same way isSuperAdmin() does. Used by
+    // the per-direction users read clauses so each store-side role can be
+    // paired with EXACTLY its one personal-chat peer (js/chat.js
+    // isStartable/rosterWantedRoles mirror this map). The ternary is the
+    // rules language's conditional — without it a signed-out caller would
+    // error inside get() and evaluate to DENIED anyway, but the guard keeps
+    // that an explicit answer rather than an engine error.
+    function myRole() {
+      return isSignedIn()
+        ? get(/databases/$(database)/documents/users/$(selfEmail())).data.role
+        : '';
     }
 
     // Violation reports are operator + superadmin only. Owners (and anyone
@@ -78,7 +114,7 @@ service cloud.firestore {
     function isChatRole() {
       return isSignedIn() &&
         get(/databases/$(database)/documents/users/$(selfEmail())).data.role
-          in ['hr', 'superadmin', 'owner'];
+          in ['hr', 'superadmin', 'owner', 'rmsm'];
     }
 
     // HR <-> Superadmin ONLY. This is the "All HR" group chat's membership,
@@ -97,14 +133,24 @@ service cloud.firestore {
     // HR + superadmin roster.
     function isAreaManager() {
       return isSignedIn() &&
+        get(/databases/$(database)/documents/users/$(selfEmail())).data.role in ['owner', 'rmsm'];
+    }
+
+    // Area Manager ONLY (stored role 'owner') — for the violations read below.
+    // ⚠️ NOT isAreaManager(): that helper also admits RM/SM ('rmsm') because
+    // RM/SM shares the Area Manager's chat roster and dashboard — but RM/SM
+    // must NEVER read CCTV violation data (their sidebar is Overview +
+    // Tickets only). Keeping the violations branch on this narrower helper
+    // is what makes that a data-level denial, not just a hidden tab.
+    function isOwner() {
+      return isSignedIn() &&
         get(/databases/$(database)/documents/users/$(selfEmail())).data.role == 'owner';
     }
 
     // HR alone (NOT superadmin — that case is already covered by
     // isOperatorOrSuperAdmin()). Used by the violations rule below to let HR
     // read the reports a superadmin explicitly transferred to them, and
-    // nothing else. Unrelated to chat: an Area Manager has no violations access
-    // at all and is not covered by this helper.
+    // nothing else.
     function isHr() {
       return isSignedIn() &&
         get(/databases/$(database)/documents/users/$(selfEmail())).data.role == 'hr';
@@ -115,6 +161,15 @@ service cloud.firestore {
     // existed) simply do not match, so they stay operator/superadmin-only.
     function isTransferredToHr() {
       return resource.data.hrStatus == 'transferred';
+    }
+
+    // A violation report has been handed to an AREA MANAGER by a superadmin.
+    // Deliberately a SEPARATE field from `hrStatus`: the two handoffs are
+    // independent, so one report can sit on HR's list, the manager's list, or
+    // both at once. Reusing `hrStatus` here would make the second transfer
+    // revoke the first.
+    function isTransferredToAreaManager() {
+      return resource.data.managerStatus == 'transferred';
     }
 
     // The room document for a given chat id. Used by the membership helpers
@@ -178,9 +233,21 @@ service cloud.firestore {
       return isHrOrSuperAdmin() && chatId == 'owner-superadmin';
     }
 
-    // Read access to a room: a member, OR the legacy archive.
+    // Read access to a room: a member, OR the legacy archive, OR — for a
+    // BRANCH room — a superadmin (who owns every branch room and may need to
+    // manage one they were not seeded into).
+    //
+    // ⚠️ THE BRANCH CLAUSE USED TO BE A BARE `|| isBranchRoom(chatId)` — no
+    // isSignedIn() anywhere in it — which let ANY caller, logged out or not,
+    // read chats/branch-*/messages. Branch MEMBERS already pass through
+    // isChatMember() (the approval seeds `members`), so the only thing the
+    // clause still needs is the superadmin management read, and isSuperAdmin()
+    // requires both a session and the role. Covered by test/chat-rules.test.js
+    // §15b, which fails if the blanket form ever comes back.
     function canReadChat(chatId) {
-      return isChatMember(chatId) || isLegacyArchive(chatId);
+      return isChatMember(chatId)
+        || isLegacyArchive(chatId)
+        || (isSuperAdmin() && isBranchRoom(chatId));
     }
 
     // ⚠️ Typing indicators now work in the GROUP chat as well as in 1:1.
@@ -289,6 +356,34 @@ service cloud.firestore {
     // `where('hrStatus', '==', 'transferred')` (see listenTransferredViolations
     // in firebase.js). An unfiltered HR query is correctly DENIED by these
     // rules — that is the guarantee working, not a bug.
+    //
+    // AREA MANAGERS READ TRANSFERRED REPORTS ONLY, via `managerStatus`. This is
+    // a THIRD, independent clause — it does not weaken the HR one (a manager
+    // with no `managerStatus` still cannot read a report even if `hrStatus` is
+    // set), and none of them grants a write: the update/delete rules below are
+    // untouched, so an Area Manager can read a transferred report and can do
+    // nothing at all to it.
+    //
+    // ⚠️⚠️ KNOWN GAP — BRANCH SCOPING IS NOT ENFORCED HERE, ONLY IN THE UI.
+    // `js/owner-violations.js` filters the list down to `users/<email>.branches`
+    // (compared against the report's `store`, normalised via ownerBranchKey),
+    // so in normal use an Area Manager only ever SEES their own branches.
+    //
+    // The rule cannot prove that. The branch list lives on the user's document,
+    // and a Firestore query can only constrain fields on the queried collection
+    // — so the rule is not provable and adding `.where('store', 'in', [...])` to
+    // the client query would need TWO filters on different fields, i.e. a
+    // COMPOSITE INDEX. Composite indexes are a **Blaze (paid) plan** feature
+    // (see the note in js/chat.js), and firebase.json declares no `indexes`
+    // block, so on the current plan that query would fail with
+    // FAILED_PRECONDITION.
+    //
+    // Consequence, stated plainly: a determined Area Manager who ignores the UI
+    // and reads another branch's transferred report directly WILL SUCCEED. That
+    // is the same gap the `tickets` collection has (see the TODO above it), so
+    // this is consistent with the rest of the app rather than a new hole — but
+    // it is a real one. Closing it properly means enabling Blaze and filtering
+    // the query on `store` as well.
 
     match /violations/{violationId} {
       function isOwnViolation() {
@@ -296,7 +391,9 @@ service cloud.firestore {
           && resource.data.reportedBy == request.auth.token.email.lower();
       }
 
-      allow read: if isOperatorOrSuperAdmin() || (isHr() && isTransferredToHr());
+      allow read: if isOperatorOrSuperAdmin()
+        || (isHr() && isTransferredToHr())
+        || (isOwner() && isTransferredToAreaManager());
       allow create: if isOperatorOrSuperAdmin();
       // Display rename only (REPORTS DATABASE): any signed-in operator or
       // superadmin may rename a file (attachments[].name) or the report folder
@@ -387,38 +484,41 @@ allow read: if canReadChat(chatId)
       // the message can never be written either, and every retry fails the
       // same way.
       //
-      // ⚠️ `members` is REQUIRED on create and must contain the caller.
-      // A room that did not list its creator could never be read back by
-      // them, and a room that listed somebody else would be a way to open a
-      // thread in another person's name. The legacy archive is explicitly
-      // NOT writable, so this cannot resurrect it as a shared room.
-      //
-      // ⚠️ THE FIELD LIST IS UNCHANGED FROM THE PRE-1:1 RULES ON PURPOSE
-      // (`type, title, lastMessage, lastMessageAt, lastSenderEmail,
-      // members`). chat.js writes exactly these keys and nothing else, so
-      // this rule is compatible with what is ALREADY deployed and the
-      // conversation list works without a rules deploy. Do NOT add a field
-      // here casually: the room is written BEFORE the message, so an unknown
-      // key denies the room create, the room never exists, and the message
-      // that follows it is denied too — sending would silently stop working.
-      allow create: if isChatRole()
-        && !isLegacyArchive(chatId)
-        && request.resource.data.keys().hasOnly(
-             ['type', 'title', 'lastMessage', 'lastMessageAt', 'lastSenderEmail', 'members'])
-        && request.resource.data.members is list
-        && request.resource.data.members.size() == 2
-        && selfEmail() in request.resource.data.members;
+      // ⚠️ BRANCH ROOMS: only a superadmin may create a per-branch room.
+      // The room doc is written FIRST (on its own), then the client
+      // auto-populates `members` from `users/<email>.branches` for every
+      // person assigned to that branch. Branch rooms have `members.size()
+      // >= 2` (a group, not a pair).
+      allow create: if canManageBranchRoom(chatId)
+        || (!isBranchRoom(chatId)
+            && isChatRole()
+            && !isLegacyArchive(chatId)
+            && request.resource.data.keys().hasOnly(
+                 ['type', 'title', 'lastMessage', 'lastMessageAt', 'lastSenderEmail', 'members'])
+            && request.resource.data.members is list
+            && request.resource.data.members.size() == 2
+            && selfEmail() in request.resource.data.members);
 
       // UPDATE may reference resource.data, because the doc exists here.
       //
-      // ⚠️ `members` is frozen: an update may change the summary but never
-      // who the room belongs to. Otherwise either participant could add a
-      // third person to a 1:1 thread (or drop themselves) and take over
-      // its history.
+      // 1:1 rooms: members is FROZEN. An update may change the summary but
+      // never who the room belongs to — otherwise either participant could
+      // add a third person to a 1:1 thread (or drop themselves) and take
+      // over its history. `hasOnly` reflects exactly that.
       allow update: if isChatMember(chatId)
         && !isLegacyArchive(chatId)
+        && !isBranchRoom(chatId)
         && request.resource.data.diff(resource.data).affectedKeys()
              .hasOnly(['type', 'title', 'lastMessage', 'lastMessageAt', 'lastSenderEmail']);
+
+      // BRANCH ROOMS: membership is superadmin-managed. The superadmin (who
+      // owns the branch) may add or remove members — the room doc is written
+      // BEFORE the first message, so `members` is the ONE field that may
+      // change. Everyone else keeps the frozen-summary rule from above: a
+      // room member can change the summary but never who the room belongs to.
+      allow update: if canManageBranchRoom(chatId)
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['type', 'title', 'lastMessage', 'lastMessageAt', 'lastSenderEmail', 'members']);
 
       // Nothing is deleted by anyone in the app: removing a room would orphan
       // its messages, which Firestore does NOT cascade — the room doc goes and
@@ -665,26 +765,30 @@ allow read: if canReadChat(chatId)
       allow read: if isHrOrSuperAdmin()
         && resource.data.role == 'superadmin';
 
-      // THE CONVERSATION LIST, third statement: an AREA MANAGER may discover
-      // the HR **and** superadmin accounts — the two roles they are allowed to
-      // start a thread with (isStartable() in js/chat.js). This is what puts a
-      // brand-new HR or superadmin on an Area Manager's list the moment it is
-      // registered, rather than the moment its owner opens the chat.
+      // THE CONVERSATION LIST, THIRD and FOURTH statements — one per
+      // personal-chat pairing DIRECTION. Personal chat is STRICTLY paired
+      // (isStartable() in js/chat.js): superadmin <-> HR (the clause above),
+      // and Area Manager <-> RM/SM (these two). So an Area Manager may
+      // discover ONLY the RM/SM accounts, and an RM/SM may discover ONLY the
+      // Area Manager accounts — never HR, never superadmin, never a
+      // co-manager. Store personnel meet everyone else in the branch group
+      // chat, per the spec.
       //
-      // ⚠️ DELIBERATELY NOT MERGED WITH THE HR CLAUSE ABOVE. HR reads ONLY
-      // superadmin docs; the Area Manager reads two roles. A shared clause
-      // would have to be the union, which would silently widen every HR's reach
-      // to the whole HR roster — and HRs are not allowed to message each other.
+      // ⚠️ DELIBERATELY NOT MERGED WITH THE HR CLAUSE ABOVE, AND NOT WITH
+      // EACH OTHER. Each statement is per-document, and each covers exactly
+      // ONE direction of ONE pair: a shared clause would have to be the union
+      // (widening every reader to everybody else's reach), and merging with
+      // the HR clause would hand store personnel the whole roster.
       //
-      // ⚠️ NARROW ON PURPOSE, AND IT MUST STAY NARROW: this is per-document, so
-      // Firestore proves it only for a query filtered the same way. The client
-      // asks with `users.where('role', 'in', ['hr', 'superadmin'])`, and an
-      // UNFILTERED Area Manager read cannot be proven and is denied. That is
-      // what keeps every OTHER Area Manager's account — their status and their
-      // branch assignments — out of an Area Manager's reach, so two managers
-      // can never see or reach each other.
-      allow read: if isAreaManager()
-        && resource.data.role in ['hr', 'superadmin'];
+      // ⚠️ NARROW ON PURPOSE: Firestore proves a statement only for a query
+      // filtered the same way. The Area Manager asks with
+      // `users.where('role', 'in', ['rmsm'])`, the RM/SM with
+      // `users.where('role', 'in', ['owner'])`, and an UNFILTERED read of
+      // either cannot be proven and is denied — which is what keeps every
+      // OTHER account's status, branches and permissions out of reach.
+      // Store roles read nothing for personal chat: the pair is superadmin
+      // <-> HR only (the clause above).
+      // STORE ROLES READ NO ACCOUNT DOCS — the pair is SA <-> HR only
 
       // Superadmins may edit anything (approvals). Self-edits are allowed
       // but can never touch role/status/permissions (no privilege escalation).

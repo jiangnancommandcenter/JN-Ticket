@@ -96,8 +96,8 @@ assert.strictEqual(ChatService.canChatOnSurface(undefined, 'operator'), false, '
 // though the contents match. Compare the joined values instead.
 assert.strictEqual(
     ChatService.CHAT_ALLOWED_ROLES.slice().sort().join(','),
-    'hr,owner,superadmin',
-    'CHAT_ALLOWED_ROLES must be exactly hr + superadmin + owner (the Area Manager chats 1:1)'
+    'hr,owner,rmsm,superadmin',
+    'CHAT_ALLOWED_ROLES must be exactly hr + superadmin + owner + rmsm (the Area Manager chats 1:1)'
 );
 assert.strictEqual(
     ChatService.CHAT_ALLOWED_ROLES.indexOf('operator'),
@@ -126,18 +126,19 @@ console.log('✅ Chat access gate tests passed (hr + superadmin + Area Manager c
 // ---------------------------------------------------------------
 // 7b. THE PAIRING MATRIX — "both chat-eligible AND a different role".
 //
-//     This is the rule that produces the whole access picture:
+//     This is the rule that produces the whole access picture — STRICT
+//     PAIRING (spec), so every cell is one of exactly two pairs:
 //
-//                superadmin      HR          Area Manager
-//       superadmin     x           v               v
-//       HR             v           x               v
-//       Area Manager   v           v               x   <-- co-managers
+//                superadmin      HR     Area Manager    RM/SM
+//       superadmin     x           v           .          .
+//       HR             v           x           .          .
+//       Area Manager   .           .           x          .
+//       RM/SM          .           .           .          x
 //
-//     The bottom-right X is the requirement that two Area Managers can
-//     never reach each other. It is NOT a special case bolted on for the
-//     Area Manager — it is the same "different role" rule that already
-//     stopped HR from messaging HR, so there is no second condition to
-//     forget when a role is added later.
+//     The dots are the spec's hard refusals: personal chat is superadmin <->
+//     HR ONLY — nothing else. An Area Manager never pairs, and neither does
+//     HR and the superadmin in the STORE GROUP chat. The x diagonals are the
+//     same-role rule (nobody pairs with themselves), not special cases.
 //
 //     isStartable() lives past the gate block (it needs currentRole and
 //     currentUserEmail), so it is extracted on its own here.
@@ -155,7 +156,7 @@ const pairSandbox = { window: {}, console };
 vm.createContext(pairSandbox);
 vm.runInContext(
     'var CHAT_ALLOWED_ROLES = ' +
-        JSON.stringify(['hr', 'superadmin', 'owner']) + ';\n' +
+        JSON.stringify(['hr', 'superadmin', 'owner', 'rmsm']) + ';\n' +
     'var GROUP_ROOM_ROLES = ' + JSON.stringify(['hr', 'superadmin']) + ';\n' +
     'var currentRole = "";\n' +
     'var currentUserEmail = "";\n' +
@@ -181,15 +182,22 @@ function canPair(me, them) {
 
 const EXPECTED = [
     // [me, them, allowed, why]
-    ['superadmin', 'hr', true, 'superadmin <-> HR (the original pairing)'],
+    ['superadmin', 'hr', true, "superadmin <-> HR (the spec's private pair)"],
     ['hr', 'superadmin', true, 'HR <-> superadmin'],
-    ['owner', 'hr', true, 'Area Manager <-> HR (new)'],
-    ['hr', 'owner', true, 'HR <-> Area Manager (new, and it MUST be symmetric)'],
-    ['owner', 'superadmin', true, 'Area Manager <-> superadmin (new)'],
-    ['superadmin', 'owner', true, 'superadmin <-> Area Manager (new)'],
+    ['owner', 'rmsm', false, 'spec: store roles have NO personal chat at all'],
+    ['rmsm', 'owner', false, 'spec: store roles have NO personal chat at all'],
+    ['owner', 'hr', false, 'spec: store personnel meet HR in the STORE GROUP chat'],
+    ['hr', 'owner', false, 'spec: ...and it MUST be symmetric'],
+    ['owner', 'superadmin', false, 'spec: a superadmin may personal-chat HR ONLY'],
+    ['superadmin', 'owner', false, 'spec: ...symmetric'],
+    ['superadmin', 'rmsm', false, 'spec: no superadmin <-> RM/SM personal chat'],
+    ['rmsm', 'superadmin', false, 'spec: ...symmetric'],
+    ['hr', 'rmsm', false, 'spec: RM/SM meet HR in the STORE GROUP chat'],
+    ['rmsm', 'hr', false, 'spec: ...symmetric'],
     ['hr', 'hr', false, 'HR <-> HR was already forbidden'],
     ['superadmin', 'superadmin', false, 'superadmin <-> superadmin was already forbidden'],
     ['owner', 'owner', false, '⚠️ CO-MANAGERS: two Area Managers must never be paired'],
+    ['rmsm', 'rmsm', false, 'two RM/SM must never be paired with each other either'],
     ['owner', 'operator', false, 'an operator is not a chat role at all'],
     ['hr', 'operator', false, 'an operator is not a chat role at all'],
     ['superadmin', 'operator', false, 'an operator is not a chat role at all'],
@@ -224,26 +232,39 @@ assert.strictEqual(
     '⚠️ CO-MANAGERS: a second, DISTINCT Area Manager must not be startable — this is the ' +
     'requirement, and it must not be passing merely because the two emails differed'
 );
-// Prove it is the ROLE doing the refusing: the very same second person IS
-// startable when they hold an allowed role.
+// Prove it is the ROLE doing the refusing: the very same second person stays
+// refused when they hold RM/SM — under the new spec an Area Manager pairs
+// with NOBODY, so changing the other side to the old peer changes nothing.
 assert.strictEqual(
-    Pair.isStartable({ email: 'hr.person@test.com', role: 'hr' }),
-    true,
-    'an Area Manager must be able to start a thread with a distinct HR'
+    Pair.isStartable({ email: 'rm.person@test.com', role: 'rmsm' }),
+    false,
+    "an Area Manager must NEVER start a thread with an RM/SM under the new spec"
 );
+// ...and the reverse direction also fails now: no two-way store pair exists.
+// under the new spec.
+Pair.setState('rmsm', 'rm.person@test.com');
 assert.strictEqual(
-    Pair.isStartable({ email: 'boss.person@test.com', role: 'superadmin' }),
-    true,
-    'an Area Manager must be able to start a thread with a distinct superadmin'
+    Pair.isStartable({ email: AM1, role: 'owner' }),
+    false,
+    'that RM/SM must also fail to start the thread with the Area Manager now'
 );
-// ...and the reverse direction, so the pair is genuinely two-way.
+// The spec's hard refusals, proved with DISTINCT people (so they fail on the
+// PAIRING rule, never on the never-yourself check): a superadmin may personal
+// chat HR ONLY, and store personnel meet HR + superadmin in the STORE GROUP.
+// under the new spec.
+Pair.setState('superadmin', 'boss.person@test.com');
+assert.strictEqual(
+    Pair.isStartable({ email: AM1, role: 'owner' }),
+    false,
+    'a superadmin must NOT start a thread with an Area Manager (spec: store roles have no personal chat at all)'
+);
 Pair.setState('hr', 'hr.person@test.com');
 assert.strictEqual(
     Pair.isStartable({ email: AM1, role: 'owner' }),
-    true,
-    'that HR must equally be able to start the thread with the Area Manager'
+    false,
+    'an HR must NOT start a thread with an Area Manager — the store team meets in the group chat'
 );
-console.log('  PASS  the co-manager refusal is the ROLE rule, not an email coincidence');
+console.log('  PASS  the refusals are the PAIRING rule, not an email coincidence');
 
 const AM3 = 'am.three@test.com';
 Pair.setState('owner', AM1);
@@ -257,8 +278,8 @@ console.log('  PASS  every co-manager is refused, not just the first');
 // The matrix must be SYMMETRIC. A one-way pairing is worse than useless
 // here: the room is authorised by MEMBERSHIP, so if only one side can
 // start it, the other side can never find the conversation that exists.
-['hr', 'superadmin', 'owner'].forEach((a) => {
-    ['hr', 'superadmin', 'owner'].forEach((b) => {
+['hr', 'superadmin', 'owner', 'rmsm'].forEach((a) => {
+    ['hr', 'superadmin', 'owner', 'rmsm'].forEach((b) => {
         assert.strictEqual(
             canPair(a, b),
             canPair(b, a),
@@ -266,7 +287,7 @@ console.log('  PASS  every co-manager is refused, not just the first');
         );
     });
 });
-console.log('  PASS  pairing is symmetric for all three chat roles');
+console.log('  PASS  pairing is symmetric for all four chat roles');
 
 // Never yourself, whatever the stored role says.
 Pair.setState('owner', 'me@test.com');
@@ -1944,9 +1965,10 @@ assert(directoryCallback, 'the people directory listener should be started on mo
 seedExistingConversation(Live.dmRoomIdFor('hr@test.com', 'super@test.com'));
 Live.selectConversation(Live.dmRoomIdFor('hr@test.com', 'super@test.com'));
 
-// 43. Roles must be distinguishable WITHOUT a visible badge: the role is
-//     carried by the avatar colour. A "SUPERADMIN" / "HR" chip on every
-//     single message was removed as too noisy.
+// 43. The role IS spelled out on every message: a small role chip BEFORE
+//     the name (`[HR] Maria`), reusing the .chat-role-pill palette (one
+//     colour = one role). The avatar colour stays as the second cue; the
+//     chip is the readable one.
 pushMessages([
     { id: 'p1', text: 'from hr', senderEmail: 'someone@else.com', senderName: 'someone',
       senderRole: 'hr', sentAt: T.now },
@@ -1958,12 +1980,12 @@ assert(
     'each sender must get a role-tinted avatar so HR and superadmin are still distinguishable'
 );
 assert(
-    !/chat-role-badge/.test(receiptLog.innerHTML),
-    'the role badge was removed from the chat — no .chat-role-badge may be rendered'
+    />HR<\/span><span class="chat-msg-name">/.test(receiptLog.innerHTML),
+    'the HR chip must come BEFORE the name ([HR] Maria), not after it'
 );
 assert(
-    !/>HR</.test(receiptLog.innerHTML) && !/>Superadmin</.test(receiptLog.innerHTML),
-    'the role must not be spelled out as a visible label in the message meta row'
+    />Superadmin<\/span><span class="chat-msg-name">/.test(receiptLog.innerHTML),
+    'the Superadmin chip must come BEFORE the name, not after it'
 );
 
 // 44. An old message with NO senderRole must not crash and must fall back

@@ -147,7 +147,7 @@ var PLAN = [
     { id: 'violations',  label: 'Violation reports',          del: true },
     { id: 'status_logs', label: 'Status history',             del: true },
     { id: 'chats',       label: 'Chat rooms',                del: true, readable: false },
-    { id: 'users',       label: 'Area Manager / HR accounts', del: 'userRoles' }
+    { id: 'users',       label: 'Area Manager / HR / RM/SM accounts', del: 'userRoles' }
 ];
 
 /* Roles an account must have to be removed. `superadmin` and `operator` are
@@ -156,7 +156,7 @@ var PLAN = [
    every superadmin would leave the project un-bootstrappable all over again.
    Operators are absent because they are made directly in Firestore and are not
    recreatable from the UI either. */
-var DELETE_ROLES = ['owner', 'hr'];
+var DELETE_ROLES = ['owner', 'hr', 'rmsm'];
 
 /* Hard blocklist. Never read, never written, never listed. */
 var PROTECTED = {
@@ -427,7 +427,7 @@ function deleteChatRooms() {
         // listed" but "delete any account whose role is owner/hr". A superadmin or
         // an operator cannot be removed by this path even if something changed
         // between the scan and now — or if a bug above handed us the wrong query.
-        return step('Area Manager / HR accounts', 'users', function (data) {
+        return step('Area Manager / HR / RM/SM accounts', 'users', function (data) {
           return DELETE_ROLES.indexOf(String(data.role || '').toLowerCase()) > -1;
         });
       });

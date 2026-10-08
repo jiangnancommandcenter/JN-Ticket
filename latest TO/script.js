@@ -107,7 +107,7 @@ function refreshPermissionUI() {
     // Violations Report tab: operators + superadmin only — never owners.
     // (Owners are redirected to ownerdashboard.html anyway; this is a
     //  defensive guard for transient auth states.)
-    if (violationsNavItem) violationsNavItem.style.display = (currentUserRole === 'owner') ? 'none' : 'flex';
+    if (violationsNavItem) violationsNavItem.style.display = (currentUserRole === 'operator' || currentUserRole === 'superadmin') ? 'flex' : 'none';
 
     // Manage Branches button (superadmin only)
     if (btnManageBranches) btnManageBranches.style.display = isAdmin ? 'inline-flex' : 'none';
@@ -532,6 +532,11 @@ const btnDeleteViolation = $('#btnDeleteViolation');
 const btnTransferViolation = $('#btnTransferViolation');
 const btnTransferViolationLabel = $('#btnTransferViolationLabel');
 const btnTransferViolationIcon = $('#btnTransferViolationIcon');
+// The Area Manager handoff is a SECOND, independent transfer — its own button,
+// label and icon, stamping `managerStatus` instead of `hrStatus`.
+const btnTransferViolationToManager = $('#btnTransferViolationToManager');
+const btnTransferViolationToManagerLabel = $('#btnTransferViolationToManagerLabel');
+const btnTransferViolationToManagerIcon = $('#btnTransferViolationToManagerIcon');
 const btnGenerateViolationReport = $('#btnGenerateViolationReport');
 const violationFormModal = $('#violationFormModal');
 const closeViolationFormModalBtn = $('#closeViolationFormModal');
@@ -622,6 +627,13 @@ const cancelResolve = $('#cancelResolve');
 const resolveModalTitle = $('#resolveModalTitle');
 const resolutionNotesEl = $('#resolutionNotes');
 const resolveAttachmentInput = $('#resolveAttachmentInput');
+// ⚠️ THIS MUST BE DECLARED. It used to be used at the submit handler without ever
+// being declared, and it only resolved because `<span id="resolveUploadStatus">`
+// creates an implicit `window` property (named element access). Rename that id --
+// or wrap this file as a module, where `window` is not reachable -- and every
+// reference throws a ReferenceError that kills the whole Resolve submit handler
+// BEFORE its try/catch, so the ticket silently never gets resolved.
+const resolveUploadStatus = $('#resolveUploadStatus');
 const submitResolutionBtn = $('#submitResolutionBtn');
 const rejectModal = $('#rejectModal');
 const closeRejectModal = $('#closeRejectModal');
@@ -987,7 +999,7 @@ auth.onAuthStateChanged(async (user) => {
         await syncCurrentUserRole();
 
         // ===== Role guard: owners belong in the Owner Dashboard =====
-        if (currentUserRole === 'owner') {
+        if (currentUserRole === 'owner' || currentUserRole === 'hr' || currentUserRole === 'rmsm') {
             window.location.href = 'ownerdashboard.html';
             return;
         }
@@ -1024,6 +1036,18 @@ auth.onAuthStateChanged(async (user) => {
 
             await restoreLastMainState(savedMainState);
             mainStateRestored = true;
+        }
+
+        // ===== Branch group chat backfill (superadmin, once per page load) =====
+        // Seed chats/branch-<slug> for EVERY distinct branch in ANY approved
+        // account's `branches` — existing users predate the approve/save
+        // hooks, and a deleted or drifted room would never heal on its own.
+        // Fire-and-forget with its own catch: dashboard load must never wait
+        // on — or break because of — chat bookkeeping; the next full page
+        // load retries anything that failed here.
+        if (currentUserRole === 'superadmin' && !branchBackfillAttempted) {
+            branchBackfillAttempted = true;
+            backfillBranchGroupChats().catch(err => console.warn('[Chat] branch chat backfill failed:', err));
         }
 
         // ===== Approval-email deep link: main.html?ticket=BNW-TIX007 =====
@@ -1076,6 +1100,10 @@ const MAIN_VALID_TABS = ['dashboard', 'branches', 'history', 'tickets', 'violati
 // after each page load so a later auth callback can never snap the user away
 // from the view they are currently using.
 let mainStateRestored = false;
+// The branch-chat backfill (auth callback above) runs at most once per page
+// load — auth can fire repeatedly within a session, the union sweep only
+// needs one pass; the next full page load re-checks for drift/deletions.
+let branchBackfillAttempted = false;
 
 function getActiveMainTab() {
     // The sidebar nav item for the active tab carries the .active class.
@@ -1237,9 +1265,6 @@ async function initApp() {
         await loadBranchData();
         
         if (branchesTableBody) {
-            renderDashboard();
-            renderBranchesTable();
-            renderHistory();
             populateHistoryBranchFilter();
             populateGroupFilter();
             populateTicketBranchFilter();
@@ -1247,10 +1272,25 @@ async function initApp() {
         
         populateSubmitBranchSelect();
         await loadTicketsDirect();
+        setupTicketListener();
+        await setupViolationListener();
+        
+        // ===== Render dashboard AFTER all data sources are loaded =====
+        // Branches: loaded via loadBranchData()
+        // Tickets: loaded via loadTicketsDirect()
+        // Violations: loaded via setupViolationListener (first snapshot)
+        // This ensures the attention queue shows real data, not stale "empty" state.
+        if (branchesTableBody) {
+            renderDashboard();
+            renderBranchesTable();
+            renderHistory();
+            populateTicketBranchFilter();
+            // Re-run attention queue in case violations loaded after initial render
+            renderAttentionQueue();
+        }
+        
         // ===== Keep the sidebar Approvals badge in sync on initial load =====
         updateApprovalsBadge();
-        setupTicketListener();
-        setupViolationListener();
     } catch (e) {
         console.error('initApp error:', e);
     }
@@ -1387,7 +1427,7 @@ async function loadSuperadminUsers() {
         });
 
         if (!users.length) {
-            usersListBody.innerHTML = '<tr><td colspan="6" class="empty-state"><em>No pending approvals.</em></td></tr>';
+            usersListBody.innerHTML = '<tr><td colspan="7" class="empty-state"><em>No pending approvals.</em></td></tr>';
             return;
         }
 
@@ -1404,7 +1444,7 @@ async function loadSuperadminUsers() {
                 <tr class="user-row" data-email="${escapeHTML(user.email || '')}" style="cursor:pointer;">
                     <td>${escapeHTML(user.email || user.id)}</td>
                     <td>${escapeHTML(user.name || '—')}</td>
-                    <td><span class="role-badge ${currentUserRoleLabel(user) === 'hr' ? 'hr' : 'owner'}">${currentUserRoleLabel(user) === 'hr' ? 'HR' : 'Area Manager'}</span></td>
+                    <td><span class="role-badge ${currentUserRoleLabel(user) === 'hr' ? 'hr' : 'owner'}">${roleDisplayName(user)}</span></td>
                     <td>${escapeHTML(branchText)}</td>
                     <td><span class="status-badge ${statusClass}">${escapeHTML(status[0].toUpperCase() + status.slice(1))}</span></td>
                     <td>
@@ -1413,11 +1453,33 @@ async function loadSuperadminUsers() {
                             <button type="button" class="btn btn-icon action-btn view" data-tooltip="Review / Configure" data-toggle-user="${escapeHTML(user.email || '')}"><i class="fas fa-chevron-down"></i></button>
                         </div>
                     </td>
+                    <td class="approval-card-cell" data-label="Card">
+                        <div class="approval-card">
+                            <div class="approval-card-head">
+                                <span class="approval-card-branch"><i class="fas fa-user"></i>${escapeHTML(user.name || user.email || user.id)}</span>
+                                <span class="approval-card-pill approval-card-pill--${statusClass}">${escapeHTML(status[0].toUpperCase() + status.slice(1))}</span>
+                            </div>
+                            <div class="approval-card-grid">
+                                <div class="approval-card-field"><span class="approval-card-label">User</span><span class="approval-card-value">${escapeHTML(user.email || user.id)}</span></div>
+                                <div class="approval-card-field"><span class="approval-card-label">Name</span><span class="approval-card-value">${escapeHTML(user.name || '—')}</span></div>
+                                <div class="approval-card-field"><span class="approval-card-label">Role</span><span class="approval-card-value">${roleDisplayName(user)}</span></div>
+                                <div class="approval-card-field"><span class="approval-card-label">Requested Branches</span><span class="approval-card-value">${escapeHTML(branchText)}</span></div>
+                            </div>
+                            <div class="approval-card-foot">
+                                <div class="approval-card-actions">
+                                    <div class="approval-action-stack">
+                                        <button type="button" class="btn btn-icon btn-danger" data-delete-user="${escapeHTML(user.email || '')}" title="Delete user"><i class="fas fa-trash"></i></button>
+                                        <button type="button" class="btn btn-icon action-btn view" data-tooltip="Review / Configure" data-toggle-user="${escapeHTML(user.email || '')}"><i class="fas fa-chevron-down"></i></button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </td>
                 </tr>
 
                 <!-- Expandable details row: branch + permission checkboxes (hidden by default) -->
                 <tr class="user-detail-row" id="userDetail-${safeEmail}" style="display:none;">
-                    <td colspan="6" style="padding:0;background:var(--bg-hover);">
+                    <td colspan="7" style="padding:0;background:var(--bg-hover);">
                         <div class="user-detail-panel">
                             <div class="detail-head">
                                 <strong>${escapeHTML(user.name || user.email)}</strong>
@@ -1430,6 +1492,7 @@ async function loadSuperadminUsers() {
                                     <select id="roleSelect-${safeEmail}" class="role-select" data-role-select="${escapeHTML(user.email || '')}">
                                         <option value="owner" ${currentUserRoleLabel(user) === 'owner' ? 'selected' : ''}>Area Manager</option>
                                         <option value="hr" ${currentUserRoleLabel(user) === 'hr' ? 'selected' : ''}>HR</option>
+                                        <option value="rmsm" ${currentUserRoleLabel(user) === 'rmsm' ? 'selected' : ''}>RM/SM</option>
                                     </select>
                                     <p class="role-select-hint" id="roleHint-${safeEmail}">${roleHintHtml(user)}</p>
                                 </div>
@@ -1496,7 +1559,7 @@ async function loadSuperadminUsers() {
         });
     } catch (error) {
         console.error('Failed to load users:', error);
-        usersListBody.innerHTML = '<tr><td colspan="6" class="empty-state"><em>Unable to load approvals.</em></td></tr>';
+        usersListBody.innerHTML = '<tr><td colspan="7" class="empty-state"><em>Unable to load approvals.</em></td></tr>';
     }
 }
 
@@ -1507,16 +1570,19 @@ function sanitizeUserId(email) {
 function userEmailKey(user) { return user.email || user.id || ''; }
 
 /**
- * The two roles a superadmin can assign from this screen.
- * `hr` members use the same Area Manager Dashboard as the Area Manager; the
- * only differences are the label shown on their profile and chat access.
+ * The assignable roles a superadmin can assign from this screen.
+ * `owner` (Area Manager) and `hr` (HR) share the same dashboard but differ
+ * only in profile label and chat access. `rmsm` (RM/SM) mirrors the Area
+ * Manager role exactly — same dashboard, same branch/feature permissions,
+ * same ticket filing — with no chat access.
  *
- * ⚠️ `owner` is the STORED value and is deliberately unchanged. The role was
- * renamed "Area Manager" for display only, so every existing user document —
- * and the rules, the chat allowlist and the login redirect that all compare the
- * value — keeps working untouched. Do not "tidy" the value to 'area_manager'.
+ * ⚠️ `owner` is the STORED value and is deliberately unchanged for the
+ * Area Manager role. The role was renamed "Area Manager" for display only,
+ * so every existing user document — and the rules, the chat allowlist and
+ * the login redirect that all compare the value — keeps working untouched.
+ * Do not "tidy" the value to 'area_manager'.
  */
-const ASSIGNABLE_ROLES = ['owner', 'hr'];
+const ASSIGNABLE_ROLES = ['owner', 'hr', 'rmsm'];
 
 /**
  * Read a user's role, normalised and clamped to an assignable role.
@@ -1528,11 +1594,25 @@ function currentUserRoleLabel(user) {
     return ASSIGNABLE_ROLES.indexOf(role) > -1 ? role : 'owner';
 }
 
+/** Human-readable label for a role, used in the UI (badge, dropdown, hints). */
+function roleDisplayName(user) {
+    const role = currentUserRoleLabel(user);
+    if (role === 'hr') return 'HR';
+    if (role === 'rmsm') return 'RM/SM';
+    // 'owner' (Area Manager) and any unknown fallback are all shown as Area Manager.
+    return 'Area Manager';
+}
+
 /** One-line explanation of what the currently selected role means. */
 function roleHintHtml(user) {
-    return currentUserRoleLabel(user) === 'hr'
-        ? '<i class="fas fa-comments"></i> HR can use the HR &amp; Superadmin chat. Branches and feature permissions are the same as an Area Manager.'
-        : 'Area Manager has no chat access, and is the one role that can file a new ticket from the dashboard. Branches and feature permissions are the same as an HR member.';
+    const label = currentUserRoleLabel(user);
+    if (label === 'hr') {
+        return '<i class="fas fa-comments"></i> HR can use the HR &amp; Superadmin chat. Branches and feature permissions are the same as an Area Manager.';
+    }
+    if (label === 'rmsm') {
+        return '<i class="fas fa-user-cog"></i> RM/SM has the same dashboard, branches and ticket access as an Area Manager, but no extra messaging.';
+    }
+    return 'Area Manager has no chat access, and is the one role that can file a new ticket from the dashboard. Branches and feature permissions are the same as an HR member.';
 }
 
 // Exposed for the unit test (test/set-role.test.js), which runs this block
@@ -1663,6 +1743,186 @@ async function approveUser(email) {
     } catch (error) {
         console.error('Failed to approve user:', error);
         showToast('Unable to approve user.', 'error');
+        return;
+    }
+
+    // The account IS approved at this point, so the per-branch group chat is
+    // best-effort: it runs AFTER the try/catch and never throws, so a chat
+    // failure can only log — it can never be reported as "Unable to approve".
+    // For every branch the member was just assigned, chats/branch-<slug> is
+    // created if missing (or its `members` reseeded if the team changed) with
+    // Superadmin + the assigned Area Manager/HR/RM/SM — the store group the
+    // approval screen is for.
+    await ensureBranchGroupChats(lower, Array.isArray(detail.branches) ? detail.branches : []);
+}
+
+/**
+ * Ensure chats/branch-<slug> exists for every branch in `branches`, seeded
+ * with that store's team — Superadmin + the Area Manager/HR/RM/SM assigned
+ * to THIS branch (see ChatService.branchGroupMembers in js/chat.js).
+ *
+ * This is what makes "approve a member → the store group chat is already
+ * there" automatic: approveUser() and updateUserPermissions() both call it
+ * after the account write succeeds — and backfillBranchGroupChats() reuses
+ * it for the dashboard-load sweep over ALL existing accounts. The room id
+ * comes from ChatService.branchKey so client, rules and approval agree on
+ * the slug.
+ *
+ * `approvedEmail` is optional: the approve/save paths pass the account they
+ * just wrote (added to the room even if the roster snapshot has not caught
+ * up yet); the backfill passes null because nobody is being approved — the
+ * roster alone decides membership. `allUsers` is an optional pre-loaded
+ * roster: given it, NO users read happens, so the backfill's N branches
+ * cost one `users` read in total.
+ *
+ * Idempotent, and deliberately never throws (it runs after the approval
+ * succeeded, so it must not be able to report the approval as failed):
+ *   - the room doc is written with `{ merge: true }`, so a re-run can only
+ *     ever converge — it never duplicates or resets anything;
+ *   - if the room exists and `members` is ALREADY the computed team, the
+ *     write is skipped outright (re-approving the same branch is a no-op);
+ *   - if the team CHANGED (another RM/SM assigned since), `members` is
+ *     reseeded — the room's `members` is the superadmin-managed list the
+ *     rules read, and canManageBranchRoom() is what permits this write.
+ * Only `type`, `title` and `members` are written, so the update stays inside
+ * the branch-room rule's hasOnly() allowlist and never touches the preview.
+ */
+async function ensureBranchGroupChats(approvedEmail, branches, allUsers) {
+    if (!Array.isArray(branches) || branches.length === 0) return;
+
+    const chat = window.ChatService;
+    if (!chat || typeof chat.branchGroupMembers !== 'function' || typeof chat.branchKey !== 'function') {
+        // Chat is optional: never block (or fail) an approval on it.
+        console.warn('[Chat] ChatService unavailable — branch group chats skipped.');
+        return;
+    }
+
+    if (!Array.isArray(allUsers)) {
+        let usersSnap;
+        try {
+            usersSnap = await db.collection('users').get();
+        } catch (error) {
+            console.warn('[Chat] could not load users for branch group chat:', error);
+            return;
+        }
+        allUsers = usersSnap.docs.map(function (d) { return { id: d.id, ...d.data() }; });
+    }
+
+    for (const branch of branches) {
+        // Which step denied the write shows up in the catch log, so a
+        // "Missing or insufficient permissions" is debuggable without
+        // guessing: 'read room' = the roomRef.get() below (the READ rule),
+        // 'seed room' = the roomRef.set() (the CREATE/UPDATE rule).
+        let op = 'read room';
+        try {
+            const roomId = chat.branchKey(branch);
+            const members = chat.branchGroupMembers(branch, allUsers, approvedEmail);
+
+            const roomRef = db.collection('chats').doc(roomId);
+            // The pre-read is a duplicate-skip optimisation, NOT a gate: a
+            // denied get() must never abort the seed — the set() below has
+            // its own CREATE/UPDATE rule and is the operation that matters.
+            let existing = null;
+            try {
+                existing = await roomRef.get();
+            } catch (readError) {
+                console.warn('[Chat] branch room pre-read denied for', branch, '— proceeding to seed anyway:', readError);
+                existing = null;
+            }
+            const roomExists = !!(existing && existing.exists);
+            // `members.length < 2` blocks only CREATING a near-empty room (an
+            // approved person + at least one superadmin). An EXISTING room is
+            // still compared and RESEEDED when the team shrank — e.g. the last
+            // assigned member was just unticked and only superadmins remain —
+            // because that reseed is exactly what drops the removed account
+            // from `members`, the list both the rules and the sidebar query
+            // read.
+            if (!roomExists && members.length < 2) continue;
+            if (roomExists) {
+                const current = ((existing.data() || {}).members || [])
+                    .map(function (e) { return String(e || '').toLowerCase(); })
+                    .sort()
+                    .join('\n');
+                if (current === members.slice().sort().join('\n')) {
+                    // Duplicate-skip: the room already holds this exact team.
+                    if (chat.noteBranchRoom) chat.noteBranchRoom(roomId);
+                    continue;
+                }
+            }
+            // Missing room, or a team that changed since — (re)seed it. `title`
+            // is the bare branch name ("SM Fairview"): the (Store name) the
+            // member sees in the sidebar and the open header.
+            op = 'seed room';
+            await roomRef.set({
+                type: 'group',
+                title: String(branch),
+                members: members
+            }, { merge: true });
+            if (chat.noteBranchRoom) chat.noteBranchRoom(roomId);
+            console.log('[Chat] branch group chat ready:', roomId, '(' + members.length + ' members)');
+        } catch (error) {
+            // One branch failing must never break the approval or the others.
+            console.error('[Chat] could not seed branch group chat for', branch, 'op=' + op, error);
+        }
+    }
+}
+
+// ==============================================================
+//  DASHBOARD-LOAD BACKFILL
+//  approveUser()/updateUserPermissions() only seed branches you actively
+//  touch. Accounts created BEFORE those hooks existed — and any room
+//  deleted or team-drifted since — would otherwise never get their store
+//  group chat. So a superadmin's Command Center load sweeps the UNION of
+//  every approved account's branch access: one `users` read, then
+//  ensureBranchGroupChats() per distinct branch, with the duplicate-skip
+//  making a converged pass a pure no-op. Never throws; the auth callback
+//  fires it once per page load (see branchBackfillAttempted).
+// ==============================================================
+async function backfillBranchGroupChats() {
+    if (!currentUserIsSuperAdmin()) return;   // operators never write rooms
+
+    const chat = window.ChatService;
+    if (!chat || typeof chat.branchGroupMembers !== 'function' || typeof chat.branchKey !== 'function') return;
+
+    let usersSnap;
+    try {
+        usersSnap = await db.collection('users').get();
+    } catch (error) {
+        console.warn('[Chat] could not load users for branch chat backfill:', error);
+        return;
+    }
+    const allUsers = usersSnap.docs.map(function (d) { return { id: d.id, ...d.data() }; });
+
+    // The union of all branch access: every distinct branch named in an
+    // APPROVED account's `branches` (trimmed, case-insensitively deduped —
+    // "SM Fairview" and "sm fairview" are one store, one room).
+    const seen = {};
+    const branches = [];
+    allUsers.forEach(function (u) {
+        if (!u) return;
+        const status = String(u.status || 'approved').trim().toLowerCase();
+        if (status !== 'approved') return;
+        if (!Array.isArray(u.branches)) return;
+        u.branches.forEach(function (b) {
+            const raw = String(b || '').trim();
+            if (!raw) return;
+            const key = raw.toLowerCase();
+            if (seen[key]) return;
+            seen[key] = true;
+            branches.push(raw);
+        });
+    });
+
+    for (const branch of branches) {
+        try {
+            // approvedEmail is deliberately null — nobody is being approved
+            // here; the roster alone decides membership (branchGroupMembers
+            // still adds every assigned account plus the superadmins).
+            await ensureBranchGroupChats(null, [branch], allUsers);
+        } catch (error) {
+            // One branch failing must never break the backfill or the others.
+            console.error('[Chat] branch chat backfill failed for', branch, error);
+        }
     }
 }
 
@@ -1672,13 +1932,32 @@ async function updateUserPermissions(email) {
 
     // Same reasoning as approveUser(): saving with an empty branch list silently
     // strips the user's access. Refuse rather than write it.
-    if (!Array.isArray(detail.branches) || detail.branches.length === 0) {
+    // An empty branch list is allowed: the user is removing ALL branch access
+    // (e.g. converting HR → RM/SM with no store assigned). The diff logic below
+    // will prune every previous branch room, dropping the user from all branch
+    // group chat lists. Do NOT refuse an empty list.
+    if (!Array.isArray(detail.branches)) {
         showToast(
-            'Cannot save: assign at least one branch first. '
-            + 'If none are listed, the branch list has not loaded — reload this page.',
+            'Cannot save: the branch list has not loaded — reload this page.',
             'error'
         );
         return;
+    }
+
+    // Read the branches this account HOLDS right now, BEFORE the update
+    // overwrites them. The diff against the saved list is what tells us which
+    // branch rooms must be reseeded WITHOUT this account later — without the
+    // prior value there is no way to know which rooms to prune. Best-effort:
+    // an unreadable doc skips only the removal reseed, never the save itself.
+    let prevBranches = [];
+    try {
+        const prevSnap = await db.collection('users').doc(lower).get();
+        if (prevSnap.exists) {
+            const prevData = prevSnap.data() || {};
+            if (Array.isArray(prevData.branches)) prevBranches = prevData.branches;
+        }
+    } catch (readError) {
+        console.warn('[Chat] could not read prior branches for', lower, '— removal reseed skipped:', readError);
     }
 
     try {
@@ -1696,7 +1975,45 @@ async function updateUserPermissions(email) {
     } catch (error) {
         console.error('Failed to save user permissions:', error);
         showToast('Unable to save permissions.', 'error');
+        return;
     }
+
+    // Saving is how branches get CHANGED on an existing account, so the same
+    // auto-generation runs here (see ensureBranchGroupChats): a newly ticked
+    // branch gets its store group chat with everyone currently assigned to it.
+    await ensureBranchGroupChats(lower, Array.isArray(detail.branches) ? detail.branches : []);
+
+    // AND an UNTICKED branch must be pruned from its room. Recompute those
+    // rooms from the FRESH roster (approvedEmail = null — nobody is being
+    // approved here, the roster alone decides) so this account drops out of
+    // `members`. That is what makes the store chat disappear from their
+    // sidebar live — and stay gone on a hard refresh, because the sidebar
+    // query is `chats where members array-contains me`.
+    const keptBranches = {};
+    (Array.isArray(detail.branches) ? detail.branches : []).forEach(function (b) {
+        keptBranches[String(b || '').trim().toLowerCase()] = true;
+    });
+    const removedBranches = prevBranches.filter(function (b) {
+        const key = String(b || '').trim().toLowerCase();
+        return key && !keptBranches[key];
+    });
+    if (removedBranches.length) {
+        await ensureBranchGroupChats(null, removedBranches);
+    }
+
+    // Remove any locally‑remembered copy of the rooms we just dropped,
+    // so the conversation list sheds them immediately (no need for the
+    // user to clear browser storage or reload).
+    const knownKey = `rcms_chat_known_${lower}`;
+    let known = JSON.parse(localStorage.getItem(knownKey) || '{}');
+    removedBranches.forEach(function (branch) {
+        const roomId = 'chats/branch-' + String(branch).trim().toLowerCase();
+        delete known[roomId];
+    });
+    localStorage.setItem(knownKey, JSON.stringify(known));
+// Forget all remembered conversation rooms so the next snapshot rebuilds
+    // from the new role + branch state (no need for the user to reload or clear cache).
+    localStorage.removeItem(`rcms_chat_known_${lower}`)
 }
 
 async function rejectUser(email) {
@@ -1719,6 +2036,23 @@ async function rejectUser(email) {
 async function deleteUser(email) {
     const lower = getUserEmailLower(email);
     if (!confirm('Delete this user permanently from the system? This action cannot be undone.')) return;
+
+    // Read the account's branch access BEFORE the delete, so every store room
+    // it sits in can be reseeded without it afterwards — `members` is the list
+    // both the rules and the sidebar query read, so a stale entry would keep
+    // the deleted account visible in the store chat on every refresh.
+    // Best-effort: an unreadable doc skips only the reseed, never the delete.
+    let prevBranches = [];
+    try {
+        const prevSnap = await db.collection('users').doc(lower).get();
+        if (prevSnap.exists) {
+            const prevData = prevSnap.data() || {};
+            if (Array.isArray(prevData.branches)) prevBranches = prevData.branches;
+        }
+    } catch (readError) {
+        console.warn('[Chat] could not read branches before delete for', lower, '— room reseed skipped:', readError);
+    }
+
     try {
         await db.collection('users').doc(lower).delete();
         showToast('User deleted.', 'success');
@@ -1726,6 +2060,13 @@ async function deleteUser(email) {
     } catch (error) {
         console.error('Failed to delete user:', error);
         showToast('Unable to delete user.', 'error');
+        return;
+    }
+
+    // Recompute every room the deleted account was assigned to: the roster no
+    // longer contains them, so the reseed drops them from `members`.
+    if (prevBranches.length) {
+        await ensureBranchGroupChats(null, prevBranches);
     }
 }
 
@@ -2499,7 +2840,7 @@ async function renderTrendChart() {
     trendChart = new Chart(ctx, {
         type: 'line',
         data: { labels, datasets: [{ label: 'Downtime (min)', data: dd, borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', fill: true, tension: 0.3, pointBackgroundColor: '#ef4444', pointRadius: 3, borderWidth: 2 }] },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#64748B', font: { family: 'Inter', size: 11 } } } }, scales: { x: { grid: { color: 'rgba(148,163,184,0.25)' }, ticks: { color: '#64748B', font: { family: 'Inter', size: 10 } }, title: { display: true, text: 'Day', color: '#64748B' } }, y: { grid: { color: 'rgba(148,163,184,0.25)' }, ticks: { color: '#64748B', font: { family: 'Inter', size: 10 } }, title: { display: true, text: 'Minutes', color: '#64748B' }, beginAtZero: true } } }
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#64748B', font: { family: 'Inter', size: 11 } } } }, scales: { x: { grid: { color: 'rgba(148,163,184,0.25)' }, ticks: { color: '#64748B', font: { family: 'Inter', size: 10 }, maxRotation: 0, autoSkip: true, maxTicksLimit: window.innerWidth <= 640 ? 7 : undefined }, title: { display: true, text: 'Day', color: '#64748B' } }, y: { grid: { color: 'rgba(148,163,184,0.25)' }, ticks: { color: '#64748B', font: { family: 'Inter', size: 10 } }, title: { display: true, text: 'Minutes', color: '#64748B' }, beginAtZero: true } } }
     });
 }
 
@@ -2565,6 +2906,39 @@ function renderBranchesTable() {
         return `<span class="uptime-chip ${uptimeClass(u.uptimePct)}" title="This month's uptime">${u.uptimePct.toFixed(1)}%</span>`;
     };
 
+    // The row's action buttons, built once and used by BOTH the desktop
+    // Actions cell and the trailing card cell: below 900px the desktop cells
+    // hide and only the card shows (ROW CARD SWAP in style.css), so each row
+    // needs its controls in both places. Both copies are wired by the
+    // querySelectorAll('.btn-view'/'.btn-remove') passes at the end of this
+    // function, so whichever cell is visible has working buttons.
+    const branchActionsHtml = (name) => `
+                    <button class="btn-view" data-tooltip="Details" data-branch="${escapeHTML(name)}"><i class="fas fa-eye"></i></button>
+                    ${isAdmin ? `<button class="btn-remove" data-tooltip="Remove" data-branch="${escapeHTML(name)}"><i class="fas fa-trash-alt"></i></button>` : ''}`;
+
+    // The trailing card cell — the same facts as the row, laid out in the
+    // shared mockup-style card (head = branch + status pill, grid = the four
+    // data columns, foot = actions). Emitted by BOTH row shapes, so a phone
+    // sees identical cards whether the table is sorted flat or grouped.
+    const branchCardCell = (b, sc, lu, dt, upChip) => `
+                <td class="approval-card-cell" data-label="Card">
+                    <div class="approval-card">
+                        <div class="approval-card-head">
+                            <span class="approval-card-branch"><i class="fas fa-store"></i>${escapeHTML(b.branchName)}</span>
+                            <span class="approval-card-pill approval-card-pill--${sc === 'online' ? 'online' : 'offline'}">${escapeHTML(b.currentStatus)}</span>
+                        </div>
+                        <div class="approval-card-grid">
+                            <div class="approval-card-field"><span class="approval-card-label">Group</span><span class="approval-card-value">${escapeHTML(getBranchGroup(b.branchName))}</span></div>
+                            <div class="approval-card-field"><span class="approval-card-label">Uptime</span><span class="approval-card-value">${upChip}</span></div>
+                            <div class="approval-card-field"><span class="approval-card-label">Last Updated</span><span class="approval-card-value">${lu}</span></div>
+                            <div class="approval-card-field"><span class="approval-card-label">Current Downtime</span><span class="approval-card-value">${dt}</span></div>
+                        </div>
+                        <div class="approval-card-foot">
+                            <div class="approval-card-actions">${branchActionsHtml(b.branchName)}</div>
+                        </div>
+                    </div>
+                </td>`;
+
     let filtered = [...branches];
     if (searchTerm) filtered = filtered.filter(b => b.branchName.toLowerCase().includes(searchTerm));
     if (filter !== 'all') filtered = filtered.filter(b => b.currentStatus === filter);
@@ -2597,7 +2971,7 @@ function renderBranchesTable() {
     filtered = filteredBranches.slice(branchStart, branchEnd);
 
     if (filtered.length === 0) {
-        branchesTableBody.innerHTML = `<tr><td colspan="5" class="empty-state"><i class="fas fa-search"></i><p>No branches match.</p></td></tr>`;
+        branchesTableBody.innerHTML = `<tr><td colspan="7" class="empty-state"><i class="fas fa-search"></i><p>No branches match.</p></td></tr>`;
         renderBranchPagination();
         return;
     }
@@ -2617,7 +2991,7 @@ function renderBranchesTable() {
             const totalDT = members.reduce((sum, m) => sum + getCurrentDowntimeMinutes(m), 0);
 
             html += `<tr class="group-header-row" data-group="${escapeHTML(groupName)}">
-                <td colspan="6">
+                <td colspan="7">
                     <span class="group-toggle"><i class="fas ${arrowIcon}"></i></span>
                     <strong class="group-name">${escapeHTML(groupName)}</strong>
                     <span class="group-stats">
@@ -2642,9 +3016,9 @@ function renderBranchesTable() {
                     <td>${lu}</td>
                     <td>${dt}</td>
                     <td class="actions-cell">
-                        <button class="btn-view" data-tooltip="Details" data-branch="${escapeHTML(b.branchName)}"><i class="fas fa-eye"></i></button>
-                        ${isAdmin ? `<button class="btn-remove" data-tooltip="Remove" data-branch="${escapeHTML(b.branchName)}"><i class="fas fa-trash-alt"></i></button>` : ''}
+                        ${branchActionsHtml(b.branchName)}
                     </td>
+                    ${branchCardCell(b, sc, lu, dt, upChip)}
                 </tr>`;
             });
         });
@@ -2670,9 +3044,9 @@ function renderBranchesTable() {
                 <td>${lu}</td>
                 <td>${dt}</td>
                 <td class="actions-cell">
-                    <button class="btn-view" data-tooltip="Details" data-branch="${escapeHTML(b.branchName)}"><i class="fas fa-eye"></i></button>
-                    ${isAdmin ? `<button class="btn-remove" data-tooltip="Remove" data-branch="${escapeHTML(b.branchName)}"><i class="fas fa-trash-alt"></i></button>` : ''}
+                    ${branchActionsHtml(b.branchName)}
                 </td>
+                ${branchCardCell(b, sc, lu, dt, upChip)}
             </tr>`;
         }).join('');
     }
@@ -2912,7 +3286,7 @@ function renderHistory() {
     if (dateTo) { const to = new Date(dateTo + 'T23:59:59'); filtered = filtered.filter(log => { const d = log.dateTime?.toDate ? log.dateTime.toDate() : new Date(log.dateTime); return d <= to; }); }
 
     if (filtered.length === 0) {
-        historyTableBody.innerHTML = `<tr><td colspan="6" class="empty-state"><i class="fas fa-history"></i><p>No records found.</p></td></tr>`;
+        historyTableBody.innerHTML = `<tr><td colspan="7" class="empty-state"><i class="fas fa-history"></i><p>No records found.</p></td></tr>`;
         return;
     }
 
@@ -2928,6 +3302,12 @@ function renderHistory() {
                     <button class="history-action-btn delete-hist" data-logid="${escapeHTML(logId)}" data-tooltip="Delete" onclick="window.deleteHistoryLog('${escapeHTML(logId)}')"><i class="fas fa-trash"></i></button>
                 </div>
             ` : '\u2014';
+        // The card's foot only carries the action stack when there is one —
+        // a non-superadmin has no actions, so an empty footer would be a
+        // border with nothing above it.
+        const cardFoot = isAdmin
+            ? `<div class="approval-card-foot"><div class="approval-card-actions">${actionsHTML}</div></div>`
+            : '';
         return `<tr>
             <td>${formatDate(d)}</td>
             <td>${formatTime(d)}</td>
@@ -2935,6 +3315,21 @@ function renderHistory() {
             <td><span class="status-badge ${sc}">${escapeHTML(log.status)}</span></td>
             <td>${escapeHTML(log.remarks || '\u2014')}</td>
             <td>${actionsHTML}</td>
+            <td class="approval-card-cell" data-label="Card">
+                <div class="approval-card">
+                    <div class="approval-card-head">
+                        <span class="approval-card-branch"><i class="fas fa-code-branch"></i>${escapeHTML(log.branchName)}</span>
+                        <span class="approval-card-pill approval-card-pill--${sc === 'online' ? 'online' : 'offline'}">${escapeHTML(log.status)}</span>
+                    </div>
+                    <div class="approval-card-grid">
+                        <div class="approval-card-field"><span class="approval-card-label">Date</span><span class="approval-card-value">${formatDate(d)}</span></div>
+                        <div class="approval-card-field"><span class="approval-card-label">Time</span><span class="approval-card-value">${formatTime(d)}</span></div>
+                        <div class="approval-card-field"><span class="approval-card-label">Branch</span><span class="approval-card-value">${escapeHTML(log.branchName)}</span></div>
+                        <div class="approval-card-field"><span class="approval-card-label">Remarks</span><span class="approval-card-value">${escapeHTML(log.remarks || '\u2014')}</span></div>
+                    </div>
+                    ${cardFoot}
+                </div>
+            </td>
         </tr>`;
     }).join('');
 }
@@ -3379,7 +3774,7 @@ function displayTickets(tickets) {
     ticketList.innerHTML = '';
 
     if (tickets.length === 0) {
-        ticketList.innerHTML = `<tr><td colspan="8" class="empty-state"><i class="fas fa-ticket-alt"></i><p>No tickets found.</p></td></tr>`;
+        ticketList.innerHTML = `<tr><td colspan="9" class="empty-state"><i class="fas fa-ticket-alt"></i><p>No tickets found.</p></td></tr>`;
         return;
     }
 
@@ -3444,6 +3839,20 @@ function displayTickets(tickets) {
         const createdDate = ticket.createdAt?.toDate ? formatDateTime(ticket.createdAt.toDate()) : (ticket.createdAt || '-');
         const statusClass = displayStatus.toLowerCase().replace(/\s+/g, '-');
 
+        // The card's foot carries the workflow buttons (which exist ONLY
+        // there on a phone — the desktop Actions cell is hidden below 900px)
+        // plus the priority as text, since the desktop table shows priority
+        // as a dot with no word. Resolved tickets have no actions at all, so
+        // the foot — and with it the border around nothing — is left out.
+        const cardFoot = actionHTML ? `
+            <div class="approval-card-foot">
+                <div class="approval-card-expiry">
+                    <span class="approval-card-label">Priority</span>
+                    <span class="approval-card-value">${escapeHTML(priority)}</span>
+                </div>
+                <div class="approval-card-actions">${actionHTML}</div>
+            </div>` : '';
+
         const row = document.createElement('tr');
         // ===== Desktop Notification Feature: Add data-ticket-id for scroll targeting =====
         row.setAttribute('data-ticket-id', ticket.id);
@@ -3456,6 +3865,21 @@ function displayTickets(tickets) {
             <td>${escapeHTML(ticket.incident || '')}</td>
             <td><span class="status-badge ${statusClass}">${escapeHTML(displayStatus)}</span></td>
             <td>${actionHTML}</td>
+            <td class="approval-card-cell" data-label="Card">
+                <div class="approval-card">
+                    <div class="approval-card-head">
+                        <span class="approval-card-branch"><span class="priority-dot"><span class="dot ${dotClass}"></span></span><i class="fas fa-ticket-alt"></i>${escapeHTML(ticket.ticketNumber || ticket.id)}</span>
+                        <span class="approval-card-pill approval-card-pill--${statusClass}">${escapeHTML(displayStatus)}</span>
+                    </div>
+                    <div class="approval-card-grid">
+                        <div class="approval-card-field"><span class="approval-card-label">Branch</span><span class="approval-card-value">${escapeHTML(ticket.branch || '\u2014')}</span></div>
+                        <div class="approval-card-field"><span class="approval-card-label">Reporter</span><span class="approval-card-value">${escapeHTML(ticket.name || '\u2014')}</span></div>
+                        <div class="approval-card-field"><span class="approval-card-label">Date Created</span><span class="approval-card-value approval-card-muted">${createdDate}</span></div>
+                        <div class="approval-card-field"><span class="approval-card-label">Incident</span><span class="approval-card-value">${escapeHTML(ticket.incident || '\u2014')}</span></div>
+                    </div>
+                    ${cardFoot}
+                </div>
+            </td>
         `;
         ticketList.appendChild(row);
         // ===== Click anywhere on the row (except buttons/checkboxes/links) opens the ticket =====
@@ -4296,6 +4720,19 @@ window.approveResolution = async function(id) {
     // pre-feature ticket — and the legacy `approvedAt + window` fallback would
     // restart the countdown at approval anyway.
     const accessStartsOnOpen = true;
+    // ⚠️ RE-APPROVAL AFTER AN ADDITIONAL-FOOTAGE CYCLE MUST RE-ARM THE CLOCK.
+    // Flow: approved → manager opens (accessOpenedAt stamped, window runs) →
+    // manager requests footage (status 'Insufficient Footage', approval undone)
+    // → operator re-resolves → superadmin approves again HERE. The old stamp
+    // survives all of that, so without a clear the deadline stays
+    // `oldOpenedAt + window` — already lapsed — and the ticket returns
+    // already-expired. Clearing the stamp puts the ticket back to
+    // "approved, never opened": the manager's next open starts a fresh window,
+    // exactly like a Resend re-arm. Scoped to footage cycles only
+    // (hasFootageRequestComment) so a plain duplicate approve of an
+    // already-approved ticket cannot silently hand out extra time.
+    const needsFreshWindow = typeof hasFootageRequestComment === 'function'
+        && hasFootageRequestComment(approvedTicket);
 
     try {
         await firestoreService.updateTicket(id, {
@@ -4305,8 +4742,26 @@ window.approveResolution = async function(id) {
             // ⚠️ NO `accessExpiresAt` HERE. The window has not started — it starts
             // when the Area Manager first opens the ticket, so writing a
             // deadline now would expire a report nobody has read yet.
-            accessWindowStartsOnOpen: accessStartsOnOpen
+            accessWindowStartsOnOpen: accessStartsOnOpen,
+            // Re-arm only: delete() is a no-op when the fields are absent, so a
+            // first-time approval is unaffected.
+            ...(needsFreshWindow ? {
+                accessOpenedAt: firebase.firestore.FieldValue.delete(),
+                accessOpenedBy: firebase.firestore.FieldValue.delete(),
+                accessExpiresAt: firebase.firestore.FieldValue.delete()
+            } : {})
         });
+        // Keep the in-memory copy in sync (listener is only a backup): mirror
+        // the re-arm so badge/filter/expiry checks see the fresh state at once.
+        if (needsFreshWindow) {
+            const syncIdx = allTickets.findIndex(t => t && t.id === id);
+            if (syncIdx > -1) {
+                delete allTickets[syncIdx].accessOpenedAt;
+                delete allTickets[syncIdx].accessOpenedBy;
+                delete allTickets[syncIdx].accessExpiresAt;
+                allTickets[syncIdx].accessWindowStartsOnOpen = true;
+            }
+        }
         console.log('Resolution approved');
         if (approvalDetailsModal) approvalDetailsModal.classList.remove('active');
         currentApprovalTicketId = null;
@@ -4404,12 +4859,20 @@ async function notifyRequesterOfApproval(ticket, ctx) {
         // Mirror the values just written to Firestore so the message reflects
         // THIS approval rather than the stale in-memory copy. The ticket is
         // mirrored as APPROVED-AND-NOT-YET-OPENED, which is what it now is.
+        // (On a footage-cycle re-approval the accessOpenedAt stamp was just
+        // cleared above, so the snapshot drops it too — otherwise the email
+        // would promise the OLD, already-lapsed deadline.)
         const snapshot = Object.assign({}, ticket, {
             approvalStatus: 'approved',
             approvedAt: new Date(),
             approvedBy: ctx.approvedBy,
             accessWindowStartsOnOpen: true
         });
+        if (typeof hasFootageRequestComment === 'function' && hasFootageRequestComment(ticket)) {
+            delete snapshot.accessOpenedAt;
+            delete snapshot.accessOpenedBy;
+            delete snapshot.accessExpiresAt;
+        }
 
         const recipient = window.EmailService.resolveRecipient(snapshot);
         if (!recipient) {
@@ -4431,13 +4894,11 @@ async function notifyRequesterOfApproval(ticket, ctx) {
             if (result.ok) {
                 showToast('Approved — notification email sent to ' + recipient + '.', 'success');
             } else if (result.timeout) {
-                // Keep the toast short — the full explanation lives in the console
-                // and in the ✉ tooltip; a paragraph does not fit on screen.
-                showToast('Approved, but the email bridge did not answer (timed out). '
-                    + 'Press ✉ on the row to retry.', 'error');
+                // Keep the toast short — the full explanation lives in the console.
+                showToast('Approved, but the email bridge did not answer (timed out).', 'error');
             } else {
                 showToast('Approved, but the email to ' + recipient + ' failed ('
-                    + (result.error || result.status) + '). Press the ✉ action on the row to retry.', 'error');
+                    + (result.error || result.status) + ').', 'error');
             }
         }
         applyApprovalFilters(false);
@@ -4752,7 +5213,7 @@ function renderApprovalList() {
     const pageItems = filteredApprovalTickets.slice(start, end);
 
     if (pageItems.length === 0) {
-        approvalListBody.innerHTML = `<tr><td colspan="9" class="empty-state"><i class="fas fa-check-circle"></i><p>No approval records found.</p></td></tr>`;
+        approvalListBody.innerHTML = `<tr><td colspan="10" class="empty-state"><i class="fas fa-check-circle"></i><p>No approval records found.</p></td></tr>`;
     } else {
         approvalListBody.innerHTML = pageItems.map(ticket => {
             const statusText = getApprovalStatusText(ticket);
@@ -4801,22 +5262,10 @@ function renderApprovalList() {
                 ? `<button class="action-btn resend" data-tooltip="Approve Request &amp; Resend (${trackingWindowLabel()})" onclick="event.stopPropagation(); window.resendTrackingAccess('${ticket.id}')"><i class="fas fa-check-double"></i></button>`
                 : '';
 
-            // ===== Automated approval email: delivery status + manual retry =====
-            // Reads the `approvalEmail` record written by notifyRequesterOfApproval()
-            // so the ✉ action can say "sent / failed / no address" and retry.
-            const emailInfo = ticket.approvalEmail || null;
-            const emailRecipient = (window.EmailService && typeof window.EmailService.resolveRecipient === 'function')
-                ? window.EmailService.resolveRecipient(ticket)
-                : null;
-            const emailStatusText = !emailInfo
-                ? 'No approval email on record'
-                : (emailInfo.status === 'dispatched'
-                    ? 'Email sent ' + formatDateTime(emailInfo.sentAt && emailInfo.sentAt.toDate ? emailInfo.sentAt.toDate() : emailInfo.sentAt)
-                    : (emailInfo.status === 'skipped_no_recipient'
-                        ? 'No email address on this ticket'
-                        : 'Email failed' + (emailInfo.error ? ': ' + emailInfo.error : '')));
+            // ===== Delete ticket (replaces old ✉ email retry) =====
+            // Same slot in the row — now calls window.deleteTicket() with confirm.
             const emailBtn = (isApprovedTicket(ticket) && currentUserIsSuperAdmin())
-                ? `<button class="action-btn email" data-tooltip="${escapeAttr(emailStatusText + ' \u2014 press to ' + (emailInfo ? 'resend' : 'send') + ' to ' + (emailRecipient || 'the requester'))}" onclick="event.stopPropagation(); window.resendApprovalEmail('${ticket.id}')"><i class="fas fa-envelope"></i></button>`
+                ? `<button class="action-btn delete-action" data-tooltip="Delete" onclick="event.stopPropagation(); window.deleteTicket('${ticket.id}')"><i class="fas fa-trash"></i></button>`
                 : '';
 
 
@@ -4834,17 +5283,50 @@ function renderApprovalList() {
                     <button class="action-btn view" data-tooltip="Details" onclick="event.stopPropagation(); window.openApprovalDetails('${ticket.id}')"><i class="fas fa-eye"></i></button>
                 </div>`;
             }
+            // Phone card bits (mirrors the desktop cells above — same values,
+            // no new data path). The message button OPENS the existing chat
+            // modal only; there is no per-reporter conversation API to call.
+            const msgBtn = `<button class="action-btn msg" data-tooltip="Open chat" onclick="event.stopPropagation(); window.ChatService && window.ChatService.open && window.ChatService.open()"><i class="fas fa-envelope"></i></button>`;
+            const cardStatusDot = statusClass === 'approved'
+                ? '<i class="fas fa-circle approval-card-dot approval-card-dot--ok"></i>'
+                : '<i class="fas fa-circle approval-card-dot"></i>';
+            const cardExpiry = reopenReq
+                ? `<span class="access-reopen-badge"><i class="fas fa-envelope-open-text"></i> Reopen requested`
+                    + (Number(reopenReq.requestCount) > 1 ? ` \u00d7${reopenReq.requestCount}` : '') + `</span>`
+                : expiryCell;
 
-            return `<tr onclick="window.openApprovalDetails('${ticket.id}')">
-                <td><span class="ticket-link">${escapeHTML(ticket.ticketNumber || ticket.id)}</span></td>
-                <td>${escapeHTML(ticket.branch || '\u2014')}</td>
-                <td>${escapeHTML(ticket.incident || '\u2014')}</td>
-                <td>${escapeHTML(ticket.name || '\u2014')}</td>
-                <td>${created}</td>
-                <td><span class="status-badge ${statusClass}">${escapeHTML(statusText)}</span></td>
-                <td>${approvedAt}</td>
-                <td>${expiryCell}</td>
+            return `<tr class="approval-row" onclick="window.openApprovalDetails('${ticket.id}')">
+                <td data-label="Ticket No."><span class="ticket-link">${escapeHTML(ticket.ticketNumber || ticket.id)}</span></td>
+                <td data-label="Branch">${escapeHTML(ticket.branch || '\u2014')}</td>
+                <td data-label="Incident">${escapeHTML(ticket.incident || '\u2014')}</td>
+                <td data-label="Reporter">${escapeHTML(ticket.name || '\u2014')}</td>
+                <td data-label="Date Created">${created}</td>
+                <td data-label="Status"><span class="status-badge ${statusClass}">${escapeHTML(statusText)}</span></td>
+                <td data-label="Approved Date">${approvedAt}</td>
+                <td data-label="Access Expires">${expiryCell}</td>
                 <td>${actions}</td>
+                <td class="approval-card-cell" data-label="Card">
+                    <div class="approval-card">
+                        <div class="approval-card-head">
+                            <span class="approval-card-branch"><i class="fas fa-store"></i>${escapeHTML(ticket.branch || '\u2014')}</span>
+                            <span class="approval-card-pill approval-card-pill--${statusClass}">${cardStatusDot}${escapeHTML(statusText)}</span>
+                        </div>
+                        <div class="approval-card-grid">
+                            <div class="approval-card-field"><span class="approval-card-label">Incident</span><span class="approval-card-value">${escapeHTML(ticket.incident || '\u2014')}</span></div>
+                            <div class="approval-card-field"><span class="approval-card-label">Reporter</span><span class="approval-card-value">${escapeHTML(ticket.name || '\u2014')}</span></div>
+                            <div class="approval-card-field"><span class="approval-card-label">Date Created</span><span class="approval-card-value approval-card-muted">${created}</span></div>
+                            <div class="approval-card-field"><span class="approval-card-label">Approved Date</span><span class="approval-card-value approval-card-muted">${approvedAt}</span></div>
+                        </div>
+                        <div class="approval-card-foot">
+                            <div class="approval-card-expiry"><span class="approval-card-label">Access Expires</span>${cardExpiry}</div>
+                            <div class="approval-card-actions">
+                                ${msgBtn}
+                                <button class="action-btn edit" title="Edit Approval Info" onclick="event.stopPropagation(); window.openEditApprovalModal('${ticket.id}')"><i class="fas fa-pen-to-square"></i></button>
+                                <button class="action-btn view" title="Details" onclick="event.stopPropagation(); window.openApprovalDetails('${ticket.id}')"><i class="fas fa-eye"></i></button>
+                            </div>
+                        </div>
+                    </div>
+                </td>
             </tr>`;
         }).join('');
     }
@@ -4978,10 +5460,17 @@ if (submitResolutionBtn) {
         }
 
 const btn = submitResolutionBtn;
-        if (btn) btn.disabled = true;
+        // Double-tap guard. `btn.disabled` already blocks a second click on a
+        // real button, but the click could still land from a queued event before
+        // the flag was read, and a second run would resolve the ticket twice.
+        if (btn && btn.disabled) return;
+        setSubmitBusy(btn, true);
 
         const resolveWidget = fileInput ? fileInput.closest('.upload-widget') : null;
-        if (resolveWidget) resetUploadProgress(resolveWidget);
+        // ⚠️ NO resetUploadProgress() HERE, ON PURPOSE. It removes `.visible`,
+        // so calling it on submit HID the progress bar at the exact moment the
+        // operator clicked Submit -- the indicator they needed most. The bar is
+        // only cleared when the modal is opened (resolveTicket/reviseTicket).
         if (resolveUploadStatus) { resolveUploadStatus.textContent = ''; resolveUploadStatus.classList.remove('success', 'error'); }
 
 try {
@@ -5001,20 +5490,29 @@ try {
                         if (resolveWidget) finishUploadProgress(resolveWidget, false);
                         return;
                     }
-                    for (const file of files) {
+                    for (let i = 0; i < files.length; i++) {
                         try {
-                            const att = await cloudinaryUpload(file, id, (pct) => {
-                                if (resolveWidget) setUploadProgress(resolveWidget, pct);
+                            const att = await cloudinaryUpload(files[i], id, (pct) => {
+                                // Monotonic across the batch, not per-file 0->100.
+                                if (resolveWidget) setUploadProgress(resolveWidget, aggregateUploadPercent(i, pct, files.length));
+                                if (resolveUploadStatus) resolveUploadStatus.textContent = `Uploading ${i + 1} of ${files.length}…`;
                             });
                             attachmentList.push(att);
                         } catch (e) { console.error('Attachment upload error:', e); }
                     }
                 }
             }
-            // Mark progress as complete (100%) — handles both "no files" and "files uploaded" cases
-            if (resolveWidget) finishUploadProgress(resolveWidget, true);
 
-            // 2) Merge with existing ticket attachments
+            // 2) Indeterminate "Submitting for approval…" state. Deliberately
+            // BEFORE the Firestore write rather than a flat 100% after the
+            // uploads: XHR reports nothing once the body is sent, so a bar
+            // pinned at 100% during the write tells the operator nothing is
+            // happening -- and this write can sit behind a slow connection for
+            // several seconds with the modal apparently frozen.
+            if (resolveWidget) setUploadProgressIndeterminate(resolveWidget);
+            if (resolveUploadStatus) resolveUploadStatus.textContent = 'Submitting for approval…';
+
+            // 3) Merge with existing ticket attachments
             const ticket = allTickets.find(t => t.id === id);
             const existingAtt = (ticket && Array.isArray(ticket.attachments)) ? ticket.attachments : [];
             const mergedAtt = existingAtt.concat(attachmentList);
@@ -5073,9 +5571,23 @@ try {
             if (resolveWidgetRoot) resetAutoUpload(resolveWidgetRoot);
         } catch (error) {
             console.error('Failed to submit resolution:', error);
-            console.log('Failed to submit resolution. Please try again.');
+            // The operator must be able to tell "sent" from "failed" without
+            // reading the console. This branch only used to console.log, so a
+            // failed submit silently closed over the same greyed-out button the
+            // success path used -- the ticket just never moved.
+            if (resolveWidget) finishUploadProgress(resolveWidget, false);
+            if (resolveUploadStatus) {
+                resolveUploadStatus.textContent = 'Could not submit. Please try again.';
+                resolveUploadStatus.classList.add('error');
+            }
+            if (typeof showToast === 'function') {
+                showToast('Failed to submit resolution. Please try again.', 'error');
+            }
         } finally {
-            if (btn) btn.disabled = false;
+            // Restore the button label from the stashed idle markup. Assigning
+            // `disabled = false` alone would leave the spinner on a button the
+            // operator can now click again.
+            setSubmitBusy(btn, false);
             if (resolutionNotesEl) resolutionNotesEl.style.borderColor = '';
             if (fileInput) fileInput.value = '';
         }
@@ -5156,11 +5668,15 @@ if (submitRevisionBtn) {
         }
 
 const btn = submitRevisionBtn;
-        if (btn) btn.disabled = true;
+        // Double-tap guard -- same reason as the Resolve handler: a queued second
+        // click would resubmit (and re-resolve) the ticket.
+        if (btn && btn.disabled) return;
+        setSubmitBusy(btn, true);
         if (revisionUploadStatus) { revisionUploadStatus.textContent = ''; revisionUploadStatus.classList.remove('success', 'error'); }
 
 const revisionWidget = fileInput ? fileInput.closest('.upload-widget') : null;
-        if (revisionWidget) resetUploadProgress(revisionWidget);
+        // NO resetUploadProgress() here — it removes `.visible` and would hide
+        // the bar the instant Submit is pressed. Same reason as Resolve.
 
 try {
             // 1) Upload any new attachments (optional) to Cloudinary
@@ -5179,18 +5695,24 @@ try {
                         if (revisionWidget) finishUploadProgress(revisionWidget, false);
                         return;
                     }
-                    for (const file of files) {
+                    for (let i = 0; i < files.length; i++) {
                         try {
-                            const att = await cloudinaryUpload(file, id, (pct) => {
-                                if (revisionWidget) setUploadProgress(revisionWidget, pct);
+                            const att = await cloudinaryUpload(files[i], id, (pct) => {
+                                // Monotonic across the batch, not per-file 0->100.
+                                if (revisionWidget) setUploadProgress(revisionWidget, aggregateUploadPercent(i, pct, files.length));
+                                if (revisionUploadStatus) revisionUploadStatus.textContent = `Uploading ${i + 1} of ${files.length}…`;
                             });
                             attachmentList.push(att);
                         } catch (e) { console.error('Attachment upload error:', e); }
                     }
                 }
             }
-            // Mark progress as complete (100%) — handles both "no files" and "files uploaded" cases
-            if (revisionWidget) finishUploadProgress(revisionWidget, true);
+
+            // Indeterminate "Resubmitting…" state before the Firestore write --
+            // a bar pinned at 100% during the write is indistinguishable from
+            // "already done". Same reasoning as the Resolve handler.
+            if (revisionWidget) setUploadProgressIndeterminate(revisionWidget);
+            if (revisionUploadStatus) revisionUploadStatus.textContent = 'Resubmitting for approval…';
 
             // 2) Merge with existing ticket attachments (keep prior evidence)
             const ticket = allTickets.find(t => t.id === id);
@@ -5247,8 +5769,20 @@ try {
                 revisionError.textContent = 'Failed to submit revised resolution. Please try again.';
                 revisionError.style.display = 'block';
             }
+            // Mirror the error onto the upload row too: #revisionError is a
+            // validation box styled for missing notes, and the validation passed
+            // here, so without this the failure had no indicator at all.
+            if (revisionWidget) finishUploadProgress(revisionWidget, false);
+            if (revisionUploadStatus) {
+                revisionUploadStatus.textContent = 'Could not resubmit. Please try again.';
+                revisionUploadStatus.classList.add('error');
+            }
+            if (typeof showToast === 'function') {
+                showToast('Failed to submit revised resolution. Please try again.', 'error');
+            }
         } finally {
-            if (btn) btn.disabled = false;
+            // Restores the stashed idle label as well as re-enabling the button.
+            setSubmitBusy(btn, false);
             if (revisionNotesEl) revisionNotesEl.style.borderColor = '';
             if (fileInput) fileInput.value = '';
         }
@@ -5804,7 +6338,7 @@ function resetUploadProgress(widget) {
     const bar = widget.querySelector('.upload-progress-bar');
     const text = widget.querySelector('.upload-progress-text');
     const status = widget.querySelector('.attachment-upload-status');
-    if (wrap) { wrap.classList.remove('visible', 'success', 'error'); }
+    if (wrap) { wrap.classList.remove('visible', 'success', 'error', 'indeterminate'); }
     if (bar) bar.style.width = '0%';
     if (text) text.textContent = '0%';
     if (status) { status.textContent = ''; status.classList.remove('success', 'error'); }
@@ -5832,7 +6366,9 @@ function finishUploadProgress(widget, ok) {
     const status = widget.querySelector('.attachment-upload-status');
     if (wrap) {
         wrap.classList.add('visible');
-        wrap.classList.remove('success', 'error');
+        // Drop the indeterminate sweep: it animates the bar indefinitely, so
+        // leaving it on would keep a finished 100% bar crawling.
+        wrap.classList.remove('success', 'error', 'indeterminate');
         wrap.classList.add(ok ? 'success' : 'error');
     }
     if (bar) bar.style.width = ok ? '100%' : '0%';
@@ -5840,6 +6376,76 @@ function finishUploadProgress(widget, ok) {
     if (status) {
         status.classList.remove('success', 'error');
         status.classList.add(ok ? 'success' : 'error');
+    }
+}
+
+/**
+ * Switch a widget's progress bar into the indeterminate "working, no real
+ * percentage known" state, used for the Firestore write after the files have
+ * finished uploading. `XHR.upload.onprogress` reports nothing once the request
+ * body is sent, so a bar frozen at 100% reads as "done" while the ticket is
+ * still being written -- this keeps the row visibly alive instead.
+ * @param {HTMLElement} widget root `.upload-widget` element
+ */
+function setUploadProgressIndeterminate(widget) {
+    const wrap = widget.querySelector('.upload-progress-wrap');
+    const bar = widget.querySelector('.upload-progress-bar');
+    if (!wrap) return;
+    wrap.classList.add('visible', 'indeterminate');
+    wrap.classList.remove('success', 'error');
+    // Reset the width too: the animation only reads as motion if the fill is
+    // part-grown, and coming from a 100% bar it would look stuck.
+    if (bar) bar.style.width = '100%';
+}
+
+/**
+ * Fold one file's own 0-100 progress into a single monotonic bar across the
+ * whole batch. Without this the `for (const file of files)` loops fed each
+ * file's raw percentage into the same bar, so three files produced 0->100,
+ * 0->100, 0->100 -- the indicator appeared to restart three times and the
+ * operator could not tell whether it was making progress.
+ * @param {number} done   files already finished (0-based count)
+ * @param {number} pct    the current file's own progress, 0-100
+ * @param {number} total  how many files are being uploaded
+ * @returns {number} the batch percentage, 0-100
+ */
+function aggregateUploadPercent(done, pct, total) {
+    if (!total || total <= 0) return 0;
+    const own = Math.min(100, Math.max(0, Number(pct) || 0));
+    return Math.min(100, ((done + own / 100) / total) * 100);
+}
+
+/**
+ * Show the spinner + "Submitting…" state on a submit button, and put the
+ * original label back afterwards. The operator's Resolve / Revise modals only
+ * ever did `btn.disabled = true`, which greys the button out and says nothing
+ * -- for the whole of a slow Cloudinary upload AND a Firestore write, with no
+ * way to tell a working button from a broken one. Mirrors setBusy() in
+ * js/owner-ticket-form.js so both dashboards behave the same.
+ *
+ * The original markup is stashed in `data-idle-html` rather than rebuilt as a
+ * string, so the two buttons keep their own icon and wording and a future edit
+ * to the markup cannot drift out of sync with a hard-coded copy here.
+ * @param {HTMLElement} btn
+ * @param {boolean} busy
+ */
+function setSubmitBusy(btn, busy) {
+    if (!btn) return;
+    if (busy) {
+        // Capture the idle label ONCE. Re-running this on an already-busy button
+        // would overwrite the stashed copy with the spinner markup, so the
+        // button could never be restored.
+        if (!btn.dataset.idleHtml) btn.dataset.idleHtml = btn.innerHTML;
+        btn.disabled = true;
+        btn.classList.add('is-busy');
+        btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> <span>Submitting…</span>';
+    } else {
+        btn.disabled = false;
+        btn.classList.remove('is-busy');
+        if (btn.dataset.idleHtml) {
+            btn.innerHTML = btn.dataset.idleHtml;
+            delete btn.dataset.idleHtml;
+        }
     }
 }
 
@@ -5927,14 +6533,23 @@ async function autoUploadSelectedFiles(widget, files) {
 
     const btn = widget.querySelector('.btn-upload-now');
     if (btn) btn.disabled = true;
-    if (statusEl) { statusEl.textContent = 'Uploading...'; statusEl.classList.remove('success', 'error'); }
+    // ⚠️ ORDER MATTERS. resetUploadProgress() clears `.attachment-upload-status`
+    // too, so calling it AFTER the "Uploading…" line below deleted that text on
+    // the very next line -- the operator selected a file and saw NOTHING at all,
+    // which is the "no indicator" this indicator work was asked to fix. Reset
+    // first, then announce.
     if (widget) resetUploadProgress(widget);
+    if (statusEl) { statusEl.textContent = 'Uploading…'; statusEl.classList.remove('success', 'error'); }
 
     try {
         const ticketId = autoUploadTicketId.get(widget) || 'resolve';
-        for (const file of arr) {
+        for (let i = 0; i < arr.length; i++) {
+            const file = arr[i];
             const att = await cloudinaryUpload(file, ticketId, (pct) => {
-                if (widget) setUploadProgress(widget, pct);
+                // Aggregate across the batch so the bar climbs monotonically
+                // instead of restarting at 0% for every file.
+                if (widget) setUploadProgress(widget, aggregateUploadPercent(i, pct, arr.length));
+                if (statusEl) statusEl.textContent = `Uploading ${i + 1} of ${arr.length}…`;
             });
             autoUploadedAttachments[key].push(att);
         }
@@ -6653,6 +7268,100 @@ navItems.forEach(item => {
     if (backdrop) backdrop.addEventListener('click', close);
 })();
 
+// ==============================================================
+//  OPTION-2 MOBILE HEADER + COMMAND BANNER (phone only)
+//  main.html carries two pasted "Option 2" blocks that ship as
+//  markup ONLY (their original modals/scripts were not copied):
+//    - header.jn2-mobile-only
+//    - section.jn2-mobile-only (Command Center banner)
+//  This wires their buttons to the features this app already has
+//  so none of them is an inert tap target. Every lookup is guarded:
+//  the blocks are hidden on desktop (but still in the DOM) and are
+//  absent from every other page.
+// ==============================================================
+(function initOption2MobileHeader() {
+    const byId = (id) => document.getElementById(id);
+    const clickFirst = (selector) => {
+        const el = document.querySelector(selector);
+        if (el) el.click();
+    };
+    const on = (id, handler) => {
+        const el = byId(id);
+        if (el) el.addEventListener('click', handler);
+    };
+
+    // Hamburger → the app's off-canvas sidebar (initMobileMainNav above).
+    on('openDrawer', () => clickFirst('#sidebarToggle'));
+
+    // Moon / sun → the real theme toggle. theme.js owns data-theme; the pasted
+    // icons follow it on their own via Tailwind's `dark:` variant (kept in sync
+    // by the small head script in main.html), so no icon swapping is needed here.
+    on('toggleDark', () => clickFirst('[data-theme-toggle]'));
+
+    // Chat bubble → the HR chat launcher (js/chat.js opens its modal on click).
+    on('openChatModal', () => clickFirst('#chatLauncher'));
+
+    // Profile avatar → open the sidebar, where account + logout live.
+    on('openProfile', () => clickFirst('#sidebarToggle'));
+
+    // Search → Branch Monitor, whose search box is #searchInput.
+    // (The pasted expandable search bar itself was deliberately not copied.)
+    on('toggleSearch', () => {
+        if (typeof switchTab === 'function') switchTab('branches');
+        setTimeout(() => { const s = byId('searchInput'); if (s) s.focus(); }, 0);
+    });
+
+    // Banner actions: Monitor → Branch Monitor; Add Status → the REAL Add
+    // Status modal, whose trigger (#btnAddStatus) lives in .top-header, which
+    // is display:none on phones — a programmatic click still opens it.
+    on('openBranchMonitor', () => { if (typeof switchTab === 'function') switchTab('branches'); });
+    on('openStatusModal', () => clickFirst('#btnAddStatus'));
+
+    // ===== Title mirroring =====
+    // The pasted phone header shows on EVERY tab now, so its heading
+    // must follow #pageTitle instead of staying hardcoded to Dashboard.
+    // switchTab keeps writing to #pageTitle even while .top-header is
+    // hidden, so observing it is enough; switchTab itself is untouched
+    // because the test suite pins the shape of its lines.
+    const jn2Title = byId('jn2HeaderTitle');
+    const appPageTitle = byId('pageTitle');
+    const syncJn2Title = () => {
+        if (jn2Title && appPageTitle) jn2Title.textContent = appPageTitle.textContent;
+    };
+    syncJn2Title();
+    if (window.MutationObserver && appPageTitle) {
+        new MutationObserver(syncJn2Title).observe(appPageTitle, { childList: true, characterData: true, subtree: true });
+    };
+
+    // ===== Hanging plus -> Report Violation (phone only) =====
+    // The real #btnNewViolation lives in the classic header, which is
+    // hidden on phones - a programmatic click still opens the form.
+    // No Add Status equivalent is added: that action stays Dashboard-only,
+    // on the pasted banner, by design.
+    on('jn2ReportFab', () => {
+        const btn = byId('btnNewViolation');
+        if (btn) { btn.click(); return; }
+        if (typeof openViolationFormModal === 'function') openViolationFormModal(null);
+    });
+
+    // Gate the hanging button on Violations access instead of a role list:
+    // applyRole hides #violationsNavItem for roles that must never file a
+    // report (it ships visible for everyone else), so mirror that state.
+    const fab = byId('jn2ReportFab');
+    const violationsNav = byId('violationsNavItem');
+    const syncFabVisibility = () => {
+        if (!fab) return;
+        const allowed = !violationsNav || getComputedStyle(violationsNav).display !== 'none';
+        // Empty string hands control back to the stylesheet (phone-only
+        // media query); 'none' wins outright for a role without access.
+        fab.style.display = allowed ? '' : 'none';
+    };
+    syncFabVisibility();
+    if (window.MutationObserver && violationsNav) {
+        new MutationObserver(syncFabVisibility).observe(violationsNav, { attributes: true, attributeFilter: ['style'] });
+    };
+})();
+
 if (userStatusFilter) {
     userStatusFilter.addEventListener('change', loadSuperadminUsers);
 }
@@ -6970,16 +7679,17 @@ async function violationCloudinaryUpload(file, folderPath, onProgress) {
 
 /** Real-time listener for the violations collection (operator + superadmin). */
 function setupViolationListener() {
-    if (violationListenerStarted) return;
+    if (violationListenerStarted) return Promise.resolve();
     violationListenerStarted = true;
+    let firstSnapshotResolved = false;
 
     // Load the persisted "seen" report ids BEFORE the first snapshot arrives,
     // otherwise the very first render would treat every existing report as
     // unseen and flash a bogus badge.
     loadViolationsSeen();
 
-    firestoreService.listenViolations(
-        (violations) => {
+    return new Promise((resolve) => {
+        const snapshotHandler = (violations) => {
             allViolations = violations;
             filterViolations();
             updateViolationsBadge();
@@ -6988,17 +7698,16 @@ function setupViolationListener() {
             // The REPORTS DATABASE panel is independent of the table filters, so it is
             // refreshed straight from the live data (always showing every report).
             renderViolationFolderTree();
-        },
-        (error) => {
-            console.error('Violations listener error:', error);
-        }
-    );
+            if (!firstSnapshotResolved) {
+                firstSnapshotResolved = true;
+                resolve(allViolations);
+            }
+        };
 
-    // Re-apply the period window on its own so "Today" rolls over at midnight
-    // without a page refresh (checked every 5 minutes while the dashboard is open).
-    setInterval(() => {
-        if (allViolations.length) filterViolations();
-    }, 5 * 60 * 1000);
+        firestoreService.listenViolations(snapshotHandler, (error) => {
+            console.error('Violations listener error:', error);
+        });
+    });
 }
 
 // ==============================================================
@@ -7371,6 +8080,130 @@ async function toggleViolationTransfer(id) {
         if (btnTransferViolation) btnTransferViolation.disabled = false;
     }
 }
+// ==============================================================
+//  VIOLATION → AREA MANAGER TRANSFER
+// ==============================================================
+//  A SECOND, INDEPENDENT handoff. Pressing it stamps
+//  `managerStatus: 'transferred'` on the same document, which makes the report
+//  readable in the Area Manager's own Violations tab (js/owner-violations.js).
+//
+//  INDEPENDENT OF THE HR TRANSFER, ON PURPOSE. The two write disjoint field
+//  groups — `hrStatus`/`transferred*` vs `managerStatus`/`managerTransferred*` —
+//  so a report can be on HR's list, the manager's list, or both, and reverting
+//  one never disturbs the other. Reusing the single `hrStatus` field would make
+//  this button silently revoke an existing HR handoff, which is exactly the kind
+//  of cross-wiring that stays invisible until someone needs both.
+//
+//  Like the HR transfer, nothing is copied or deleted: the report stays in this
+//  list (with a "Transferred to Area Manager" pill) and the manager reads the
+//  very same record, attachments and generated PDF included.
+//
+//  Only a superadmin may transfer. firestore.rules grants the `owner` role read
+//  access and NO write access to `violations` at all, so an Area Manager can
+//  never push a report onto anyone's desk — including their own.
+// ==============================================================
+
+/** True once a superadmin has handed this report to an Area Manager. */
+function isViolationTransferredToManager(v) {
+    return !!v && v.managerStatus === 'transferred';
+}
+
+/** The pill shown in the violations table and inside the details modal. */
+function violationManagerTransferBadgeHtml(v) {
+    if (!isViolationTransferredToManager(v)) return '';
+    return '<span class="violation-hr-pill" title="This report was transferred to an Area Manager">'
+        + '<i class="fas fa-share-nodes"></i> Transferred to Area Manager</span>';
+}
+
+/**
+ * The manager-handoff audit line inside the details modal: WHO transferred it
+ * and WHEN, so a superadmin can tell at a glance whether the Area Manager
+ * actually has it — the same assurance the HR status line gives.
+*/
+function violationManagerTransferStatusHtml(v) {
+    if (isViolationTransferredToManager(v)) {
+        const when = v.managerTransferredAt
+            ? formatViolationDateTime(violationReportDate({ reportDateTime: v.managerTransferredAt }))
+            : null;
+        const who = v.managerTransferredByName || v.managerTransferredBy;
+        return violationManagerTransferBadgeHtml(v)
+            + (who ? ` <span style="color:var(--text-muted);font-size:0.85rem;">by ${escapeHTML(who)}</span>` : '')
+            + (when ? ` <span style="color:var(--text-muted);font-size:0.85rem;">on ${escapeHTML(when)}</span>` : '');
+    }
+    return '<span style="color:var(--text-muted);">Not transferred — this report is only visible to operators and superadmins.</span>';
+}
+/**
+ * Show the "Transfer to Area Manager" / "Revert Transfer" button in the right
+ * state. Hidden entirely for anyone who is not a superadmin.
+ *
+ * ⚠️ MUST BE CALLED ALONGSIDE refreshTransferButtonState(), NEVER INSTEAD OF
+ * IT. The two write different fields and read different keys off the report, so
+ * each needs its own call; folding them together is how one button's state ends
+ * up driving the other's.
+ */
+function refreshManagerTransferButtonState(v) {
+    if (!btnTransferViolationToManager) return;
+    if (!currentUserIsSuperAdmin()) {
+        btnTransferViolationToManager.style.display = 'none';
+        return;
+    }
+
+    const transferred = isViolationTransferredToManager(v);
+    btnTransferViolationToManager.style.display = 'inline-flex';
+    btnTransferViolationToManager.classList.toggle('btn-success', !transferred);
+    btnTransferViolationToManager.classList.toggle('btn-secondary', transferred);
+    if (btnTransferViolationToManagerLabel) {
+        btnTransferViolationToManagerLabel.textContent = transferred
+            ? 'Revert Transfer'
+            : 'Transfer to Area Manager';
+    }
+    if (btnTransferViolationToManagerIcon) {
+        btnTransferViolationToManagerIcon.className = transferred ? 'fas fa-undo' : 'fas fa-share-nodes';
+    }
+    btnTransferViolationToManager.title = transferred
+        ? 'Take this report back off the Area Manager dashboard'
+        : 'Send this report to the Area Manager so they can review it for their branches';
+}
+
+/** Hand the open report to an Area Manager, or take it back. */
+async function toggleViolationTransferToManager(id) {
+    const v = allViolations.find(x => x.id === id);
+    if (!v) return;
+    if (!currentUserIsSuperAdmin()) {
+        showToast('Only a superadmin can transfer reports to an Area Manager.', 'error');
+        return;
+    }
+
+    const label = v.violationNumber || v.id;
+    const wasTransferred = isViolationTransferredToManager(v);
+    const question = wasTransferred
+        ? `Take report ${label} back off the Area Manager dashboard?\n\nThey will no longer see it.`
+        : `Transfer report ${label} to the Area Manager?\n\nThe Area Manager responsible for this branch will be able to view the details, the CCTV evidence and print the report. They cannot edit it.`;
+
+    if (!confirm(question)) return;
+
+    const me = auth.currentUser || {};
+    try {
+        if (btnTransferViolationToManager) btnTransferViolationToManager.disabled = true;
+        if (wasTransferred) {
+            await firestoreService.revertViolationTransferFromAreaManager(id, me.email, me.displayName);
+            showToast(`Report ${label} removed from the Area Manager dashboard.`, 'success');
+        } else {
+            await firestoreService.transferViolationToAreaManager(id, me.email, me.displayName);
+            showToast(`Report ${label} transferred to the Area Manager.`, 'success');
+        }
+        // The real-time listener re-renders the table, the details modal and
+        // this button, so there is nothing to update by hand here.
+    } catch (error) {
+        console.error('Failed to update the Area Manager transfer state:', error);
+        showToast('Could not update the transfer: ' + ((error && error.message) || 'unknown error'), 'error');
+    } finally {
+        if (btnTransferViolationToManager) btnTransferViolationToManager.disabled = false;
+    }
+}
+
+// Exposed for the inline handlers / tests.
+window.toggleViolationTransferToManager = toggleViolationTransferToManager;
 
 // Exposed for the inline handlers / tests.
 window.toggleViolationTransfer = toggleViolationTransfer;
@@ -7569,7 +8402,7 @@ function displayViolations(violations) {
             ? `<p class="empty-state-hint"><i class="fas fa-calendar-day"></i> ${violationHiddenByPeriod} report${violationHiddenByPeriod === 1 ? '' : 's'} outside the selected period &mdash; still in the database. Choose &ldquo;All reports&rdquo; to view ${violationHiddenByPeriod === 1 ? 'it' : 'them'}.</p>`
             : '';
         violationList.innerHTML = `
-            <tr><td colspan="9" class="empty-state"><i class="fas fa-video"></i><p>No violation reports found.</p>${periodHint}</td></tr>`;
+            <tr><td colspan="10" class="empty-state"><i class="fas fa-video"></i><p>No violation reports found.</p>${periodHint}</td></tr>`;
         return;
     }
 
@@ -7578,6 +8411,19 @@ function displayViolations(violations) {
         const report = violationReportDate(v);
         const attCount = Array.isArray(v.attachments) ? v.attachments.length : 0;
         const canModify = canModifyViolation(v);
+
+        // The action stack, built once and used by BOTH the desktop Actions
+        // cell and the card's footer — below 900px the desktop cells hide and
+        // only the card is on screen (ROW CARD SWAP in style.css).
+        const actionsGroup = `
+                <div class="action-group">
+                    <button class="action-btn view" title="View" onclick="window.openViolationModal('${v.id}')"><i class="fas fa-eye"></i></button>
+                    <button class="action-btn report" title="Download &amp; save report PDF" onclick="window.generateViolationReport('${v.id}')"><i class="fas fa-file-pdf"></i></button>
+                    ${canModify ? `
+                        <button class="action-btn edit" title="Edit" onclick="window.openViolationFormModal('${v.id}')"><i class="fas fa-edit"></i></button>
+                        <button class="action-btn delete-action" title="Delete" onclick="window.deleteViolationById('${v.id}')"><i class="fas fa-trash"></i></button>
+                    ` : ''}
+                </div>`;
 
         const row = document.createElement('tr');
         // Highlight reports THIS user has not opened yet. The tab is shared
@@ -7594,14 +8440,27 @@ function displayViolations(violations) {
             <td>${escapeHTML(v.location || '—')}</td>
             <td>${escapeHTML(v.reportedByName || v.reportedBy || '—')}</td>
             <td>${attCount > 0 ? `<i class="fas fa-paperclip"></i> ${attCount}` : '—'}</td>
-            <td>
-                <div class="action-group">
-                    <button class="action-btn view" title="View" onclick="window.openViolationModal('${v.id}')"><i class="fas fa-eye"></i></button>
-                    <button class="action-btn report" title="Download &amp; save report PDF" onclick="window.generateViolationReport('${v.id}')"><i class="fas fa-file-pdf"></i></button>
-                    ${canModify ? `
-                        <button class="action-btn edit" title="Edit" onclick="window.openViolationFormModal('${v.id}')"><i class="fas fa-edit"></i></button>
-                        <button class="action-btn delete-action" title="Delete" onclick="window.deleteViolationById('${v.id}')"><i class="fas fa-trash"></i></button>
-                    ` : ''}
+            <td>${actionsGroup}</td>
+            <td class="approval-card-cell" data-label="Card">
+                <div class="approval-card">
+                    <div class="approval-card-head">
+                        <span class="approval-card-branch"><i class="fas fa-store"></i>${escapeHTML(v.store || '—')}</span>
+                        <span class="approval-card-pill approval-card-pill--neutral">${escapeHTML(v.violationNumber || v.id)}${unseen ? '<span class="violation-new-dot" title="Not opened yet" aria-label="Not opened yet"></span>' : ''}</span>
+                    </div>
+                    <div class="approval-card-grid">
+                        <div class="approval-card-field"><span class="approval-card-label">Report Date</span><span class="approval-card-value">${report ? formatDate(report) : '—'}</span></div>
+                        <div class="approval-card-field"><span class="approval-card-label">Incident Date/Time</span><span class="approval-card-value">${incident ? formatDate(incident) + ', ' + formatTime(incident) : '—'}</span></div>
+                        <div class="approval-card-field"><span class="approval-card-label">Subject</span><span class="approval-card-value">${escapeHTML(v.subject || '—')}</span></div>
+                        <div class="approval-card-field"><span class="approval-card-label">Location</span><span class="approval-card-value">${escapeHTML(v.location || '—')}</span></div>
+                    </div>
+                    <div class="approval-card-foot">
+                        <div class="approval-card-expiry">
+                            <span class="approval-card-label">Reporter</span>
+                            <span class="approval-card-value">${escapeHTML(v.reportedByName || v.reportedBy || '—')}</span>
+                            <span class="approval-card-note">${attCount > 0 ? `<i class="fas fa-paperclip"></i> ${attCount} file${attCount === 1 ? '' : 's'}` : 'No attachments'}</span>
+                        </div>
+                        <div class="approval-card-actions">${actionsGroup}</div>
+                    </div>
                 </div>
             </td>
         `;
@@ -7732,6 +8591,7 @@ function violationDetailsHtml(v) {
         <div class="modal-field"><label>Report Date/Time</label><p>${report ? formatViolationDateTime(report) : '—'}</p></div>
         <div class="modal-field"><label>Reported By</label><p>${escapeHTML(v.reportedByName || v.reportedBy || '—')}</p></div>
         <div class="modal-field" style="grid-column:1 / -1;"><label>HR Status</label><p>${violationTransferStatusHtml(v)}</p></div>
+        <div class="modal-field" style="grid-column:1 / -1;"><label>Area Manager Status</label><p>${violationManagerTransferStatusHtml(v)}</p></div>
         <div class="modal-field" style="grid-column:1 / -1;"><label>Subject</label><p style="font-weight:600;">${escapeHTML(v.subject || '—')}</p></div>
         <div class="modal-field" style="grid-column:1 / -1;"><label>Details of Observation</label><p style="white-space:pre-wrap;line-height:1.6;">${escapeHTML(v.details || '—')}</p></div>
     `;
@@ -7762,6 +8622,10 @@ function openViolationModal(id) {
     // The HR handoff button is superadmin-only and reflects the current state
     // (Transfer to HR <-> Revert Transfer).
     refreshTransferButtonState(v);
+    // ⚠️ BOTH transfer buttons, never one or the other. They are independent
+    // handoffs reading different fields, so a report can sit on HR's list, the
+    // manager's list, or both — and each button must reflect only its own.
+    refreshManagerTransferButtonState(v);
 
     if (violationModal) violationModal.classList.add('active');
     captureMainState({ tab: 'violations', modal: 'violation', id });
@@ -7786,6 +8650,9 @@ function renderViolationDetailsIfOpen() {
     // Keep the transfer button in sync too: a transfer made from another tab (or
     // by a second superadmin) arrives here through this same listener.
     refreshTransferButtonState(v);
+    // Both handoffs can arrive this way independently — see the note above the
+    // call in openViolationDetails().
+    refreshManagerTransferButtonState(v);
 }
 
 // ===== VIOLATION FORM MODAL (Add / Edit) =====
@@ -7798,7 +8665,12 @@ function resetViolationFormUI() {
     resetUploadProgress(violationUploadWidget);
     if (violationUploadStatus) { violationUploadStatus.textContent = ''; violationUploadStatus.classList.remove('success', 'error'); }
     if (violationFormWarning) violationFormWarning.style.display = 'none';
-    if (btnSubmitViolation) btnSubmitViolation.disabled = false;
+    // setSubmitBusy(false), not a bare `disabled = false`: a submit that was
+    // interrupted (modal closed mid-upload) leaves the button showing the
+    // spinner. Re-enabling it alone would leave a live-looking button whose
+    // label still reads "Submitting…". Resetting here guarantees the modal
+    // always opens in its clean, idle, green state.
+    setSubmitBusy(btnSubmitViolation, false);
 }
 
 /**
@@ -7905,7 +8777,13 @@ async function saveViolationForm(e) {
     const reportedByName = me.displayName || me.email.split('@')[0];
 
     try {
-        if (btnSubmitViolation) btnSubmitViolation.disabled = true;
+        // ⚠️ MUST BE THE FIRST THING IN THE TRY, BEFORE ANY `await`. Every await
+        // below (the number generator, the two Firestore writes, the PDF build)
+        // yields to the event loop, so a queued second click could otherwise
+        // re-enter and save the same report twice. setSubmitBusy also greys the
+        // button and shows the spinner — that is the indicator the operator
+        // asked for, and it makes the greyed state self-explanatory.
+        setSubmitBusy(btnSubmitViolation, true);
         showViolationFormWarning('');
 
         let reportId = editId;
@@ -7955,9 +8833,15 @@ async function saveViolationForm(e) {
                 incident: incidentForPath
             });
             const widget = violationUploadWidget;
-            for (const file of files) {
-                const att = await violationCloudinaryUpload(file, folderPath, (pct) => {
-                    setUploadProgress(widget, pct);
+            for (let i = 0; i < files.length; i++) {
+                const att = await violationCloudinaryUpload(files[i], folderPath, (pct) => {
+                    // Aggregated, not raw: feeding each file's own 0-100 straight
+                    // into the bar made three files produce 0->100, 0->100, 0->100,
+                    // so the bar visibly restarted and read as a stuck upload.
+                    setUploadProgress(widget, aggregateUploadPercent(i, pct, files.length));
+                    if (violationUploadStatus) {
+                        violationUploadStatus.textContent = `Uploading ${i + 1} of ${files.length}…`;
+                    }
                 });
                 uploaded.push(att);
             }
@@ -7985,7 +8869,20 @@ async function saveViolationForm(e) {
                 reportedByName,
                 attachments: uploaded.slice()
             };
+            // Indeterminate for the PDF build + upload. This is the LONGEST silent
+            // step in the whole submit and it used to show nothing at all — the
+            // bar sat finished at 100% from the evidence upload while jsPDF built
+            // the document and Cloudinary took the file. No percentage is knowable
+            // here, so the sweeping bar keeps the row visibly alive instead.
+            setUploadProgressIndeterminate(violationUploadWidget);
+            if (violationUploadStatus) violationUploadStatus.textContent = 'Generating PDF report…';
             await autoSaveViolationReportPdf(reportId, vForPdf);
+        } else if (files.length === 0) {
+            // No evidence and no PDF to build: still say the write is in flight,
+            // because evidence is optional and the operator otherwise cannot
+            // tell "nothing attached" from "still saving".
+            setUploadProgressIndeterminate(violationUploadWidget);
+            if (violationUploadStatus) violationUploadStatus.textContent = 'Saving report…';
         }
 
         closeViolationFormModal();
@@ -7993,8 +8890,25 @@ async function saveViolationForm(e) {
     } catch (error) {
         console.error('Failed to save violation report:', error);
         showViolationFormWarning(error && error.message ? error.message : 'Failed to save the violation report.');
+        // Mirror the failure onto the upload row too. showViolationFormWarning
+        // IS visible, but it sits at the BOTTOM of the form while the operator's
+        // eyes are on the progress bar they just watched, so the error has to
+        // land there as well. finishUploadProgress also drops the indeterminate
+        // class — a sweeping animation on a failed submit reads as "still going".
+        finishUploadProgress(violationUploadWidget, false);
+        if (violationUploadStatus) {
+            violationUploadStatus.textContent = 'Upload failed. Please try again.';
+            violationUploadStatus.classList.add('error');
+        }
+        if (typeof showToast === 'function') {
+            showToast('Failed to save the violation report.', 'error');
+        }
     } finally {
-        if (btnSubmitViolation) btnSubmitViolation.disabled = false;
+        // Restores the stashed idle markup as well as re-enabling the button, so
+        // the spinner is never left on a button the operator can click again.
+        // On success this runs after closeViolationFormModal(), which is
+        // harmless — the button is hidden anyway, and the next open resets it.
+        setSubmitBusy(btnSubmitViolation, false);
     }
 }
 
@@ -8038,7 +8952,41 @@ function addViolationPendingFiles(fileList) {
     renderUploadFileList(violationUploadWidget, violationPendingFiles, (name) => {
         violationPendingFiles = violationPendingFiles.filter(f => f.name !== name);
         renderUploadFileList(violationUploadWidget, violationPendingFiles);
+        // Re-state the count after a removal, otherwise the line below would
+        // keep claiming a file that is no longer attached.
+        updateViolationAttachStatus();
     });
+    updateViolationAttachStatus();
+}
+
+/**
+ * Confirm how many files are attached.
+ *
+ * ⚠️ THIS IS NOT A PROGRESS BAR, DELIBERATELY. Nothing uploads when a file is
+ * attached here — `violationPendingFiles` only STAGES them and the real
+ * `violationCloudinaryUpload()` calls happen in saveViolationForm(). The report's
+ * Cloudinary folder is built from store/subject/incident-date, none of which are
+ * guaranteed to be filled in yet at attach time, so there is no honest byte
+ * count to show. The real per-file progress bar is driven at submit time; this
+ * line only reports what is staged.
+ *
+ * The count matters because evidence is OPTIONAL: with no files attached the
+ * operator needs to see that "nothing attached" is a valid state, not a
+ * half-finished form.
+ */
+function updateViolationAttachStatus() {
+    if (!violationUploadStatus) return;
+    if (violationPendingFiles.length === 0) {
+        violationUploadStatus.textContent = '';
+        violationUploadStatus.classList.remove('success', 'error');
+        return;
+    }
+    const totalBytes = violationPendingFiles.reduce((sum, f) => sum + (f.size || 0), 0);
+    const sizeText = totalBytes > 0 ? ' · ' + formatFileSize(totalBytes) : '';
+    violationUploadStatus.textContent = '✓ ' + violationPendingFiles.length +
+        ' file(s) attached' + sizeText + ' — uploads on submit';
+    violationUploadStatus.classList.remove('error');
+    violationUploadStatus.classList.add('success');
 }
 
 function bindViolationUploadWidget() {
@@ -8047,10 +8995,23 @@ function bindViolationUploadWidget() {
     const input = violationUploadWidget.querySelector('input[type="file"]');
     if (!dropzone || !input) return;
 
-    dropzone.addEventListener('click', (e) => {
-        e.preventDefault();
-        input.click();
-    });
+    // ⚠️ DELIBERATELY NO `click` HANDLER. The dropzone is a <label> that WRAPS
+    // the <input type="file"> (main.html), so the browser already forwards a
+    // click on it to the input natively — no JS required.
+    //
+    // There used to be `dropzone.addEventListener('click', e => { e.preventDefault();
+    // input.click(); })`, and that is exactly why clicking did nothing while
+    // drag-and-drop worked. preventDefault() cancelled the label's own native
+    // forwarding, leaving only a synthetic `input.click()` — and the input is
+    // visually hidden with `clip: rect(0 0 0 0)` (style.css), which several
+    // browsers refuse to open a file dialog for. Drag-and-drop kept working
+    // because that path never touches the input; it reads e.dataTransfer.files
+    // directly, which is why only one of the two paths was broken.
+    //
+    // Do not "restore" this handler to make the zone clickable — deleting it is
+    // the fix. If a future change makes the input a sibling of the label rather
+    // than a child, the native forwarding is gone and this must come back.
+
     dropzone.addEventListener('dragover', (e) => {
         e.preventDefault();
         dropzone.classList.add('dragover');
@@ -8691,6 +9652,13 @@ function bindViolationEvents() {
         // record, so the listener can stay in sync without any extra state.
         btnTransferViolation.addEventListener('click', () => {
             if (currentViolationId) toggleViolationTransfer(currentViolationId);
+        });
+    }
+    if (btnTransferViolationToManager) {
+        // The SECOND, independent toggle. Same shape as the HR one, but it
+        // stamps managerStatus and leaves any HR transfer alone.
+        btnTransferViolationToManager.addEventListener('click', () => {
+            if (currentViolationId) toggleViolationTransferToManager(currentViolationId);
         });
     }
 

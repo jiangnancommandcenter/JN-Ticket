@@ -382,6 +382,14 @@ console.log('\n=== Every read is filtered (HR cannot read unfiltered) ===');
 
 // The real rule, quoted so a future widening of it fails HERE rather than in
 // production: this suite assumes an unfiltered query is denied for HR.
+//
+// ⚠️ THE RULE HAS SINCE GAINED A THIRD CLAUSE for the Area Manager handoff
+// (`managerStatus`, see js/owner-violations.js). That does NOT weaken what this
+// file guards: the HR branch is still gated on isTransferredToHr(), so an
+// unfiltered HR query is still DENIED. This assertion therefore pins the HR
+// clause specifically rather than the whole expression — matching the entire
+// rule would fail on a legitimate, unrelated addition and invite someone to
+// "fix" it by deleting the clause that matters.
 const violationsRule = (() => {
     const start = rules.indexOf('match /violations/{violationId}');
     assert(start > -1, 'firestore.rules must still contain the violations block');
@@ -389,10 +397,17 @@ const violationsRule = (() => {
     return rules.slice(start, end > -1 ? end : undefined);
 })();
 assert(
-    /allow read: if isOperatorOrSuperAdmin\(\) \|\| \(isHr\(\) && isTransferredToHr\(\)\)/.test(violationsRule),
-    'the violations read rule must still be operator/superadmin OR transferred-HR. ' +
-    'This suite relies on an unfiltered query being DENIED for HR, so if that ' +
-    'rule is widened the filtered queries here are no longer required.'
+    /\(isHr\(\) && isTransferredToHr\(\)\)/.test(violationsRule),
+    'the violations read rule must still gate HR on isTransferredToHr(). ' +
+    'This suite relies on an unfiltered query being DENIED for HR, so if THAT ' +
+    'clause is widened the filtered queries here are no longer required.'
+);
+
+// The added clause must itself be transfer-gated. A bare `isAreaManager()` in
+// the read rule would hand every Area Manager the entire raw operator feed.
+assert(
+    !/\(isAreaManager\(\) && !isTransferredToAreaManager\(\)\)/.test(violationsRule),
+    'the Area Manager read clause must be gated on isTransferredToAreaManager()'
 );
 
 assert(

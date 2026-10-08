@@ -52,10 +52,27 @@ assert(
     /function isTransferredToHr\(\)\s*\{[\s\S]*?resource\.data\.hrStatus == 'transferred'/.test(rules),
     'isTransferredToHr() must require resource.data.hrStatus == "transferred"'
 );
+// ⚠️ THE READ RULE NOW HAS A THIRD CLAUSE. It also admits an Area Manager whose
+// report carries `managerStatus == 'transferred'` (js/owner-violations.js). That
+// addition must NOT change what this file guards: HR stays gated on the transfer
+// flag, so an unfiltered HR query is still denied. These assertions therefore
+// pin the two clauses that matter rather than matching the whole expression —
+// an exact match on the entire rule would fail on any future, legitimate extra
+// clause and tempt someone to "fix" it by deleting the HR gate.
 assert(
-    /allow read: if isOperatorOrSuperAdmin\(\) \|\| \(isHr\(\) && isTransferredToHr\(\)\);/.test(violationsBlock),
-    'the violations read rule must be: operator/superadmin, OR hr AND transferred. ' +
-    'Got: ' + violationsBlock
+    /allow read: if isOperatorOrSuperAdmin\(\)/.test(violationsBlock),
+    'the violations read rule must still open with operator/superadmin. '
+    + 'Got: ' + violationsBlock
+);
+assert(
+    /\(isHr\(\) && isTransferredToHr\(\)\)/.test(violationsBlock),
+    'the violations read rule must still admit HR only when isTransferredToHr() '
+    + 'holds — HR\'s whole privacy guarantee is that clause. Got: ' + violationsBlock
+);
+assert(
+    !/isOperatorOrSuperAdmin\(\)\s*\|\|\s*isHr\(\)/.test(violationsBlock),
+    'HR must not be folded into the operator/superadmin branch — that would hand '
+    + 'HR the entire raw operator feed, not just transferred reports'
 );
 
 // HR must NOT be folded into the write-side helper: that would let HR edit.

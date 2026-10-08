@@ -586,9 +586,9 @@ try {
 
     // --- Who may be messaged -----------------------------------------
     // 2. The DIRECTORY decides, and conversations are strictly 1:1: an HR
-    //    may only start a thread with a DIFFERENT role — a superadmin, or an
-    //    Area Manager. Never with another HR.
-    //    That is what keeps every thread between exactly one of each role.
+    //    may only start a thread with a SUPERADMIN (the spec's only HR
+    //    pairing — the store team meets in the branch group chat). Never
+    //    with another HR, never with a store role.
     directoryCallback({
         forEach(fn) {
             fn({ id: 'boss', data: () => ({ email: 'boss@test.com', role: 'superadmin', displayName: 'Boss', title: 'Superadmin', active: true }) });
@@ -692,14 +692,15 @@ try {
         'an empty search must say so rather than showing a blank list'
     );
     Live.filterConversations('');
-    // Four rows: the existing Boss thread, the never-started Second Boss, the
-    // never-started AREA MANAGER (an HR may now start a thread with one — it
-    // is a different role), and the pinned group row.
+    // Three rows: the existing Boss thread, the never-started Second Boss,
+    // and the pinned group row. The roster ALSO holds an Area Manager
+    // ('An Owner') — refused by the spec's pairing for an HR (HR's only
+    // personal-chat peer is a superadmin), so it must NOT come back.
     assert.strictEqual(
         Live.conversationRows().length,
-        4,
-        'clearing the search must restore the full list (it was 3 before the Area Manager ' +
-        'became a chat role, which added the "An Owner" row)'
+        3,
+        "clearing the search must restore the full list — minus the Area Manager, which the spec's " +
+        'pairing refuses for an HR (superadmin <-> HR only)'
     );
 
     // --- Switching rooms ----------------------------------------------
@@ -1209,11 +1210,10 @@ try {
     assert.strictEqual(newHrRow.name, 'New HR', 'the roster supplies the registration name, so the row is not an email prefix');
     assert.strictEqual(
         rosterRows.filter((r) => r.peerEmail === 'someowner@test.com').length,
-        1,
-        'a superadmin MUST now be offered the Area Manager — an owner account is a chat role, and ' +
-        'it is a different role from superadmin, so the pairing rule accepts it. (This was 0 before ' +
-        'the Area Manager became a chat participant.) What must never appear is a SECOND manager ' +
-        'being reachable FROM a manager, which the pairing matrix in test/chat-access.test.js proves'
+        0,
+        "a superadmin must NOT be offered the Area Manager — the spec's pairing is superadmin <-> " +
+        'HR only, and personal chat with store personnel lives in the branch group chat (every ' +
+        'cell is proved by the pairing matrix in test/chat-access.test.js)'
     );
     assert.strictEqual(
         rosterRows.filter((r) => r.peerEmail === 'boss@test.com').length,
@@ -1739,11 +1739,10 @@ try {
         'a superadmin registered while the chat is open must appear with no reload and no refresh call'
     );
     assert(
-        Live.conversationRows().some((r) => r.peerEmail === 'someowner@test.com'),
-        'the live snapshot must still honour the pairing rule: a superadmin IS offered the Area ' +
-        'Manager, because it is a chat role AND a different role. (This asserted the opposite while ' +
-        'owners were excluded from chat.) The real invariant is the NEXT assertion — a live read ' +
-        'must not widen the list to your OWN role'
+        !Live.conversationRows().some((r) => r.peerEmail === 'someowner@test.com'),
+        "the live snapshot must still honour the PAIRING rule: a superadmin is NOT offered the " +
+        'Area Manager — the spec restricts personal chat to superadmin <-> HR, and a live read ' +
+        'may not widen the list'
     );
     assert(
         !Live.conversationRows().some((r) => r.peerEmail === 'newhr@test.com'),
@@ -1763,17 +1762,13 @@ try {
         'an HR approved while the chat is open must appear for a superadmin with no reload either'
     );
 
+    // Under the new spec the Area Manager is NOT a 1:1 personal-chat
+    // participant — store roles meet HR and the superadmin in the branch
+    // group chat instead. What must never regress: no personal-chat row and
+    // no group-chat row for the manager; the refusal holds at the data
+    // layer. An Area Manager still mounts chat on their dashboard.
     // ================================================================
-    // ⚠️ THE AREA MANAGER, end to end.
-    //
-    // The one guarantee that must never regress: an Area Manager is a full
-    // 1:1 chat participant, yet must NOT be offered the "All HR" group chat
-    // and must NOT be offered another Area Manager. Both are user-visible
-    // (a row they can click) and both are denied at the data layer, so
-    // showing either row is a guaranteed permission error the moment it is
-    // clicked — not a cosmetic issue.
-    // ================================================================
-    console.log('\n=== An Area Manager: 1:1 yes, group no, co-managers no ===');
+    console.log('\n=== An Area Manager: no personal chat, group no, co-managers no ===');
 
     const amEmail = 'manager.one@test.com';
     const otherAmEmail = 'manager.two@test.com';
@@ -1787,9 +1782,9 @@ try {
     );
     await settle();
 
-    // The roster query. `in` is a TWO-role filter, and it is the ONLY shape the
-    // isAreaManager() users clause is provable from — an unfiltered read is
-    // denied, so getting this wrong empties the manager's entire list.
+    // The roster query. `in` is the ONLY shape the per-direction users
+    // so their roster is empty even though the users read stays provable.
+    // An Area Manager still mounts chat on the dashboard; what must never regress: no personal-chat row and no group-chat row for the manager — the refusal holds at the data layer.
     const amRosterRead = fakeDb.__usersReads[fakeDb.__usersReads.length - 1];
     assert.strictEqual(
         amRosterRead.length,
@@ -1803,40 +1798,51 @@ try {
         "the Area Manager's roster read must be where('role','in',[...]) — the only shape the " +
         "isAreaManager() users clause is provable from (got: " + amRosterRead[0] + ')'
     );
-    // Both roles they may message must be in that filter, and their OWN role
-    // must not be — which is what keeps one manager out of another's list.
+    // The ONE role an Area Manager may message (RM/SM) must be in that
+    // filter, and their OWN role must not — which is what keeps one manager
+    // out of another's list.
     // (The fake records `field op value` as a plain string, so the array is
     // rendered unquoted — the assertion matches the ROLE NAMES, not the
     // punctuation, which is the fake's business and not the client's.)
-    ['hr', 'superadmin'].forEach((role) => {
-        assert(
-            new RegExp('(^|[,\\s])' + role + '($|[,\\s])').test(amRosterRead[0]),
-            `the Area Manager's roster filter must include '${role}' — a manager may message both ` +
-            `(got: ${amRosterRead[0]})`
-        );
-    });
-    assert(
-        !new RegExp('(^|[,\\s])owner($|[,\\s])').test(amRosterRead[0]),
-        "the Area Manager's roster filter must NOT include their own role 'owner' — that is what " +
-        `keeps two managers from ever seeing each other (got: ${amRosterRead[0]})`
+    // Under the new spec the Area Manager never starts a personal thread,
+    // so their roster is empty even though the users read stays provable.
+    // ⚠️ The check is on the ROSTER-derived rows (`started: false` — the
+    // "tap to start" rows fed by `startableEmails()`), NOT on every row and
+    // NOT on `fakeDb.__usersReads` (that array holds the query FILTERS, and
+    // the read above deliberately carries one so Firestore can prove it).
+    // Room-derived rows from earlier sections in this suite are still in
+    // `conversationSummaries` and must not be counted against this role.
+    assert.strictEqual(
+        Live.conversationRows().filter(function (r) { return !r.started && r.peerEmail; }).length,
+        0,
+        "an Area Manager roster must be EMPTY (no personal-chat roster; got: " +
+        JSON.stringify(Live.conversationRows().filter(function (r) { return !r.started; })) + ")"
     );
-    console.log('  PASS  the roster query is the two-role `in` filter, with no manager role in it');
+    console.log('  PASS  the roster is EMPTY for the Area Manager — no personal chat under the new spec');
 
-    // The people they ARE offered.
+    // The people they might be offered — under the spec every personal-chat
+    // pairing for a store role is refused; the branch group chat carries them.
+    const amRmEmail = 'rm.one@test.com';
     fakeDb.__emitUsers([
         { id: 'newhr@test.com', data: () => ({ email: 'newhr@test.com', name: 'New HR', role: 'hr' }) },
         { id: 'boss@test.com', data: () => ({ email: 'boss@test.com', name: 'Boss', role: 'superadmin' }) },
         { id: otherAmEmail, data: () => ({ email: otherAmEmail, name: 'Other Manager', role: 'owner' }) },
+        { id: amRmEmail, data: () => ({ email: amRmEmail, name: 'RM One', role: 'rmsm' }) },
         { id: 'operator@test.com', data: () => ({ email: 'operator@test.com', name: 'An Operator', role: 'operator' }) }
     ]);
     const amRows = Live.conversationRows();
     assert(
-        amRows.some((r) => r.peerEmail === 'newhr@test.com'),
-        'an Area Manager must be offered an HR'
+        !amRows.some((r) => r.peerEmail === amRmEmail),
+        "an Area Manager must NOT be offered an RM/SM — spec: store personnel meet in the BRANCH GROUP chat, " +
+        'never in a personal thread (Rule 5)'
     );
     assert(
-        amRows.some((r) => r.peerEmail === 'boss@test.com'),
-        'an Area Manager must be offered a superadmin'
+        !amRows.some((r) => r.peerEmail === 'newhr@test.com'),
+        'an Area Manager must NOT be offered an HR — the spec moves that pairing into the STORE GROUP chat'
+    );
+    assert(
+        !amRows.some((r) => r.peerEmail === 'boss@test.com'),
+        'an Area Manager must NOT be offered a superadmin (spec: superadmin <-> HR only)'
     );
     assert(
         !amRows.some((r) => r.peerEmail === otherAmEmail),
@@ -1846,7 +1852,7 @@ try {
         !amRows.some((r) => r.peerEmail === 'operator@test.com'),
         'an operator is not a chat role and must never be offered'
     );
-    console.log('  PASS  offered: HR + superadmin; refused: co-manager + operator');
+    console.log('  PASS  offered: none; refused: RM/SM + HR + superadmin + co-manager + operator (all in the branch group chat)');
 
     // ⚠️ THE GROUP ROW. This is the row that must be absent.
     assert(
@@ -1877,21 +1883,22 @@ try {
         'the group row must STILL be offered to an HR — the Area Manager gate must not have broken ' +
         'the group chat for everybody else'
     );
-    // Symmetry, seen from the HR side. The manager reaches the HR through the
-    // DIRECTORY, not through `users`: the HR's roster clause is still
-    // `role == 'superadmin'`, so an owner account is (deliberately) NOT in an
-    // HR's `users` reach. The pairing rule is what makes the row appear.
+    // The REFUSAL, seen from the HR side. An Area Manager appears in the
+    // DIRECTORY (profiles are readable by any chat role), so the only thing
+    // keeping them off an HR's list is the PAIRING rule — and by the spec
+    // that pairing is refused in BOTH directions: an HR's only personal-chat
+    // peer is a superadmin.
     directoryCallback({
         forEach(fn) {
             fn({ id: amEmail, data: () => ({ email: amEmail, role: 'owner', displayName: 'Manager One' }) });
         }
     });
     assert(
-        Live.conversationRows().some((r) => r.peerEmail === amEmail),
-        'an HR must be able to start a thread with an Area Manager — the pairing is symmetric, so ' +
-        'the manager can reach the HR and the HR must be able to reach them back'
+        !Live.conversationRows().some((r) => r.peerEmail === amEmail),
+        'an HR must NOT be offered an Area Manager — the pairing is symmetric, so the refusal ' +
+        'holds from both sides (store personnel meet HR in the branch group chat)'
     );
-    console.log('  PASS  the group chat still works for HR, and HR can reach the manager');
+    console.log('  PASS  the group chat still works for HR, and the Area Manager stays refused');
 
     // --- A BRAND-NEW FIRESTORE: THE GROUP CHAT'S FIRST EVER MESSAGE --------
     // 17. ⚠️⚠️ THE BUG THIS GUARDS AGAINST — the reported one.
@@ -1990,9 +1997,10 @@ try {
     );
     console.log('  PASS  the first group message on a FRESH Firestore saves, writing no room document');
 
-    console.log('✅ Conversation list tests passed (symmetric room ids; strict 1:1 role pairing; ' +
-        'an AREA MANAGER may chat 1:1 with HR + superadmin but is offered neither the group row nor ' +
-        'another manager; ' +
+    console.log('✅ Conversation list tests passed (symmetric room ids; strict 1:1 role pairing ' +
+        'superadmin <-> HR only — an AREA MANAGER is offered NO personal chat (never RM/SM, ' +
+        'never HR, never superadmin, never the group row, never another manager — store personnel ' +
+        'meet in the BRANCH GROUP chat); ' +
         'the role-gated All HR GROUP chat (pinned, live, no per-room writes attempted in it — ' +
         'including its FIRST message on a brand-new Firestore); ' +
         'search by name and message; listeners follow the open room; ' +
@@ -2014,4 +2022,7 @@ try {
 }
 process.exitCode = 0;
 })();
+
+
+
 
