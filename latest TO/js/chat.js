@@ -118,11 +118,14 @@
      * tab (applyRole() allows only 'hr' and 'superadmin'), and firestore.rules
      * denies the read. Chat was the ONE surface that ignored it:
      *
-     *   - linkifyViolationRefs() is a PURE REGEX over the sender's own text, so
-     *     it needed no read and no permission — an Area Manager typing
-     *     "violation VIO-0007" got a real, clickable chip written into the
-     *     message. The rules stopped them RESOLVING it, but the chip existed
-     *     and the recipient clicked into a wall.
+     *   - linkifyViolationRefs() is a PURE REGEX over the message text, so it
+     *     needs no read and no permission of its own — nothing downstream can
+     *     undo what it renders. It must therefore gate on the RIGHT question:
+     *     who may CLICK a chip (canOpenViolations, VIOLATION_OPEN_ROLES below),
+     *     not who may CREATE one. Gating it on this list was the original bug
+     *     in the other direction: the Area Manager saw PLAIN TEXT where every
+     *     other reader saw a clickable chip, so a violation mentioned in the
+     *     store chat could not be clicked by the one person it concerned.
      *   - "@violation" opened a picker whose read was denied, so it always
      *     came up empty and showed "No reports have been transferred to HR
      *     yet" — a message written for HR, shown to someone who by design can
@@ -144,6 +147,57 @@
      */
     function canMentionViolations() {
         return VIOLATION_MENTION_ROLES.indexOf(normalizeRole(currentRole)) !== -1;
+    }
+
+    /**
+     * Who may OPEN a violation chip they SEE in a message — the VIEW side of
+     * the feature, deliberately SEPARATE from VIOLATION_MENTION_ROLES above.
+     *
+     * ⚠️ CREATE ≠ CLICK, and conflating them broke the Area Manager's side of
+     * the store-chat handoff. The chip is rendered per-viewer by
+     * linkifyViolationRefs(), which performs no Firestore read of its own — so
+     * when it consulted canMentionViolations(), the Area Manager (who must not
+     * CREATE a mention) was shown PLAIN TEXT where everyone else saw a
+     * clickable chip. When HR or a superadmin said "violation VIO-0007" in the
+     * store chat there was literally nothing for them to click.
+     *
+     * The two questions are different and must stay different:
+     *
+     *   MAY YOU CREATE ONE?  canMentionViolations() — the "@violation" picker,
+     *                        the index read and the composer placeholder.
+     *                        Area Manager: NO.
+     *   MAY YOU CLICK ONE?    canOpenViolations()   — the rendered chip.
+     *                        Area Manager: YES, and what they may actually
+     *                        OPEN from there is enforced where it belongs: by
+     *                        firestore.rules (isOwner() &&
+     *                        isTransferredToAreaManager()), by
+     *                        isMentionableViolation() on the resolver, and by
+     *                        OwnerViolations.openModal() on the modal — not by
+     *                        hiding the link.
+     *
+     * An allowlist again, for the same reason as every list above: an operator
+     * has no chat, and an unknown role must never inherit a capability by
+     * accident.
+     *
+     * ⚠️ RM/SM ('rmsm') IS ON THE CLICK LIST, BUT ONLY THE CLICK LIST. RM/SM has
+     * NO violations tab (js/owner-violations.js hides it), so there is no list
+     * to browse and no picker to open — the ONLY way an RM/SM ever reaches a
+     * report is a chip that HR/superadmin MENTIONED in the store chat, which is
+     * exactly the handoff this feature is for. What they may OPEN is enforced
+     * where it belongs: firestore.rules now admits 'rmsm' via
+     * (isRmsm() && isTransferredToAreaManager()), isMentionableViolation() keys
+     * 'rmsm' on managerStatus, and OwnerViolations.openModal() re-checks branch
+     * scope — NOT by hiding the link. RM/SM still may not CREATE a mention
+     * (canMentionViolations()), so the picker/index/placeholder stay closed.
+     */
+    var VIOLATION_OPEN_ROLES = ['hr', 'superadmin', 'owner', 'rmsm'];
+
+    /**
+     * May the signed-in person click a violation chip? True only for the roles
+     * above; FALSE for an operator, and for anything unknown.
+     */
+    function canOpenViolations() {
+        return VIOLATION_OPEN_ROLES.indexOf(normalizeRole(currentRole)) !== -1;
     }
 
     // The LEGACY shared room, kept READ-ONLY as an archive.
@@ -2864,6 +2918,88 @@
         updateLauncherBadgeFromList();
     }
 
+    // Branch rooms this device has already re-seeded this page-load. A repair
+    // reads the whole `users` collection (superadmin-only) and may write the
+    // room doc, so it runs at most ONCE per room per load — opening the same
+    // store twice must not repeat it. Membership still converges on the next
+    // load, and an approval re-seeds live (script.js ensureBranchGroupChats).
+    var repairedBranchRooms = {};
+
+    /**
+     * Re-seed a branch room's `members` to the authoritative team when it has
+     * drifted — specifically when an OLDER client wrote `everyoneKnownForGroup()`
+     * into it (that helper feeds the GROUP send path, and `isGroupRoom()` is
+     * true for branch rooms too).
+     *
+     * ⚠️ WHY THIS MATTERS BEYOND THE PICKER. `members` is not just the @mention
+     * roster — it is what `firestore.rules` authorises a room READ on
+     * (`selfEmail() in resource.data.members`). A branch room polluted with
+     * EVERY account therefore leaked its messages to other branches' teams, not
+     * merely offered them in the picker. Repairing the array fixes both, and it
+     * is a security repair, not a cosmetic one.
+     *
+     * SUPERADMIN-ONLY, enforced twice over by the rules: reading the whole
+     * `users` collection is `isSuperAdmin()`, and writing a branch room's
+     * `members` is `canManageBranchRoom()` (isSuperAdmin && isBranchRoom). A
+     * non-superadmin caller is refused before any write lands, so the client
+     * never even attempts it for them.
+     *
+     * CONVERGES, NEVER RESETS: it compares the computed team to the room's
+     * current `members` (the SAME normalisation script.js uses) and writes ONLY
+     * on a real difference. `{ merge: true }` touches `members` alone — inside
+     * the branch update rule's hasOnly() allowlist, so it can never clobber the
+     * summary.
+     */
+    function repairBranchRoomMembers(roomId) {
+        if (!roomId || !isBranchRoom(roomId)) return;
+        if (normalizeRole(currentRole) !== 'superadmin') return;
+        if (repairedBranchRooms[roomId]) return;
+        if (typeof db === 'undefined' || !db || typeof db.collection !== 'function') return;
+        const summary = conversationSummaries[roomId];
+        if (!summary) return;                       // room not known yet — nothing to compare
+        repairedBranchRooms[roomId] = true;         // one attempt per room per load
+
+        // The branch NAME (the room `title`) is what branchGroupMembers matches
+        // against each user's `branches`. Fall back to the slug-derived name,
+        // exactly like activeRoomBranch(), when the title has not arrived.
+        const branch = String(summary.title || '').trim()
+            || roomId.slice('branch-'.length).replace(/-/g, ' ').trim();
+        if (!branch) return;
+
+        const norm = function (arr) {
+            return (Array.isArray(arr) ? arr : [])
+                .map(function (e) { return String(e || '').trim().toLowerCase(); })
+                .sort().join('\n');
+        };
+        const currentMembers = norm(summary.members);
+
+        db.collection('users').get().then(function (snap) {
+            const allUsers = [];
+            snap.forEach(function (doc) {
+                allUsers.push(Object.assign({ id: doc.id }, doc.data() || {}));
+            });
+            const team = branchGroupMembers(branch, allUsers);
+            if (norm(team) === currentMembers) return;   // already correct — never rewrite
+            return db.collection('chats').doc(roomId)
+                .set({ members: team }, { merge: true })
+                .then(function () {
+                    // Reflect the fix locally at once, so the @mention picker is
+                    // correct without waiting for the next room snapshot.
+                    if (conversationSummaries[roomId]) {
+                        conversationSummaries[roomId].members = team.slice();
+                    }
+                    renderConversationList();
+                });
+        }).catch(function (error) {
+            // Best-effort: a denied read (non-superadmin despite the guard), an
+            // offline moment, or a refused write must NEVER break opening the
+            // room. The flag stays set so it is not retried in a loop this load;
+            // the next load — or an approval re-seed — converges it.
+            console.warn('[Chat] branch-room membership repair skipped:', error && error.message);
+        });
+    }
+
+
     /**
      * Open a conversation.
      *
@@ -2942,6 +3078,15 @@
                 '</p>';
         }
         renderConversationList();
+
+        // A branch room whose `members` was polluted by an older client (it
+        // wrote everyoneKnownForGroup() into group rooms, and isGroupRoom() is
+        // true for branch rooms too) shows EVERY user in the @mention picker —
+        // and, worse, leaks its messages to other branches via the read rule.
+        // A superadmin opening the room re-seeds it to the real team. Gated on
+        // superadmin + branch inside the helper, and best-effort (never blocks
+        // opening). No-op for 1:1 / the All-HR group.
+        repairBranchRoomMembers(roomId);
 
         // Opening IS reading: everything currently in this thread is seen.
         stampLastSeen();
@@ -6422,22 +6567,26 @@ async function openTicketFromRef(ref) {
     //  VIOLATION MENTIONS  ("violation VIO-0007" — clickable)
     //
     //  The mirror of the ticket feature above: a superadmin hands HR a
-    //  specific CCTV report by reference, and either side can click it to
-    //  open that report's modal on their own page.
+    //  specific CCTV report by reference, or hands one to the AREA
+    //  MANAGER (`managerStatus`) for the store chat — and either side
+    //  can click it to open that report's modal on their own page.
     //
     //  ⚠️ WHY A COPY OF THE TICKET CODE IS NOT A DROP-IN REPLACEMENT.
     //  Tickets are readable by any signed-in user, so the index is one
     //  unfiltered read. Violations are NOT (firestore.rules,
     //  `match /violations`):
     //      allow read: if isOperatorOrSuperAdmin()
-    //                   || (isHr() && isTransferredToHr());
+    //                   || (isHr() && isTransferredToHr())
+    //                   || (isOwner() && isTransferredToAreaManager());
     //  An UNFILTERED query is therefore DENIED for HR by design — the
     //  privacy guarantee, not a bug (see README-interface.md). So:
     //
-    //    1. Every read here is filtered on `hrStatus == 'transferred'`,
-    //       which BOTH roles may run: HR through isTransferredToHr(),
-    //       superadmin through isOperatorOrSuperAdmin(). One query shape
-    //       serves both, with no role branching and no denied path.
+    //    1. Every read here is filtered on a transfer flag: `hrStatus`
+    //       for HR/superadmin (isTransferredToHr), `managerStatus` for
+    //       the Area Manager (isTransferredToAreaManager). The query
+    //       shape must be one the rules can PROVE for the role doing
+    //       the clicking, or Firestore refuses it before it runs — see
+    //       resolveViolationRef().
     //    2. There is no direct-document read in the resolver. Ticket doc ids
     //       ARE the lowercased ticket number, which is what makes
     //       resolveTicketRef() step 2 possible; violations are created with
@@ -6531,15 +6680,37 @@ async function openTicketFromRef(ref) {
      * them.
      */
     function isMentionableViolation(v) {
-        // ⚠️ ROLE FIRST, THEN hrStatus. An Area Manager must not be able to
-        // mention a violation at all, and this is the predicate both the picker
-        // and the resolver trust — so the role belongs here, not at one call
-        // site. Defence in depth: the picker, the index and the linkifier are
-        // each gated separately, because the linkifier in particular runs with
-        // no permission check of its own and would otherwise be the one path
-        // through.
-        if (!canMentionViolations()) return false;
         if (!v) return false;
+        // ⚠️ ROLE FIRST, AND THE STATUS FIELD DEPENDS ON THE ROLE — because the
+        // two handoffs are independent (firestore.rules: `hrStatus` gates HR,
+        // `managerStatus` gates the Area Manager, and neither helper reads the
+        // other's flag):
+        //
+        //   hr / superadmin -> hrStatus == 'transferred'. The picker AND the
+        //                      resolver for both, exactly as before.
+        //   owner (mgr)     -> managerStatus == 'transferred' — a report a
+        //                      superadmin handed to THEM, i.e. one that is on
+        //                      their own Violations tab. They never get the
+        //                      picker (still canMentionViolations()), but a
+        //                      chip referencing a report transferred to them
+        //                      must resolve when they CLICK it: that click is
+        //                      the store-chat handoff.
+        //   rmsm            -> managerStatus == 'transferred', IDENTICAL to the
+        //                      Area Manager. RM/SM has no tab and no picker, so
+        //                      a chip is the ONLY way they ever reach a report;
+        //                      they read the same transferred-to-the-store set,
+        //                      and firestore.rules admits them via isRmsm().
+        //   anything else   -> false. an operator has no chat, and rules refuse
+        //                      them the read outright.
+        //
+        // Defence in depth, as before: the picker, the index and the linkifier
+        // are each gated separately, because the linkifier in particular runs
+        // with no permission check of its own.
+        var role = normalizeRole(currentRole);
+        if (role === 'owner' || role === 'rmsm') {
+            return String(v.managerStatus || '').trim().toLowerCase() === 'transferred';
+        }
+        if (VIOLATION_MENTION_ROLES.indexOf(role) === -1) return false;
         return String(v.hrStatus || '').trim().toLowerCase() === 'transferred';
     }
 
@@ -6704,10 +6875,14 @@ async function openTicketFromRef(ref) {
      * Resolve a typed reference to a violation document.
      *
      * Cheapest and most exact first:
-     *   1. the cached index, by document id then by violationNumber
+     *   1. the cached index, by document id then by violationNumber — and a
+     *      cached hit is RE-CHECKED against isMentionableViolation(), so a
+     *      report cached under one role is never handed back under another
      *   2. ONE filtered collection read matched on `violationNumber` — the
      *      fallback for a reference the cache does not hold (an older report
-     *      beyond the 50, or a number typed with unusual casing)
+     *      beyond the 50, or a number typed with unusual casing). The filter
+     *      field is chosen for the CLICKING role: `managerStatus` for the
+     *      Area Manager, `hrStatus` for HR/superadmin (see below)
      *
      * ⚠️ THERE IS NO DIRECT-DOCUMENT READ HERE, and that is not an omission.
      * resolveTicketRef() can read `tickets/<ref>` because a ticket's document
@@ -6724,12 +6899,23 @@ async function openTicketFromRef(ref) {
         if (!key) return null;
         lastViolationWasUntransferred = false;
 
+        // ⚠️ A CACHED HIT IS RE-CHECKED, not trusted. The index is filled by
+        // whoever ran first, and the role can change without a reload: a
+        // report cached under `hrStatus` must not be handed back once the
+        // session becomes 'owner', whose readable set is `managerStatus`.
+        // The modal would refuse it anyway (OwnerViolations.openModal only has
+        // its own list), but the gate belongs here too — one predicate, every
+        // path.
         var cached = violationIndexById[key];
-        if (cached) return inActiveRoomScope(cached) ? cached : null;
+        if (cached && isMentionableViolation(cached)) {
+            return inActiveRoomScope(cached) ? cached : null;
+        }
         var cachedId = violationIndexByNumber[key];
-        if (cachedId && violationIndexById[cachedId.toLowerCase()]) {
+        if (cachedId) {
             var cachedHit = violationIndexById[cachedId.toLowerCase()];
-            return inActiveRoomScope(cachedHit) ? cachedHit : null;
+            if (cachedHit && isMentionableViolation(cachedHit)) {
+                return inActiveRoomScope(cachedHit) ? cachedHit : null;
+            }
         }
 
         if (typeof db === 'undefined' || !db || typeof db.collection !== 'function') {
@@ -6738,12 +6924,22 @@ async function openTicketFromRef(ref) {
 
         // The number does not line up with a cached id, so look it up. An
         // UNFILTERED read is deliberately never attempted here: for HR it is
-        // denied by the rules, and for a superadmin it would surface reports
-        // they are not allowed to hand over in chat anyway.
+        // denied by the rules, for an Area Manager likewise, and for a
+        // superadmin it would surface reports they are not allowed to hand
+        // over in chat anyway.
+        //
+        // ⚠️ WHICH FIELD IS FILTERED DEPENDS ON WHO IS CLICKING, and it is not
+        // cosmetic: Firestore only runs a query it can PROVE against the
+        // rules. HR/superadmin use `hrStatus` (isTransferredToHr); the Area
+        // Manager AND RM/SM must use `managerStatus` (isTransferredToAreaManager)
+        // — an owner/rmsm running the hrStatus shape is REFUSED before it
+        // executes, which is exactly why their chip used to die on click.
         try {
-            var snapshot = await db.collection('violations')
-                .where('hrStatus', '==', 'transferred')
-                .get();
+            var viewerRole = normalizeRole(currentRole);
+            var snapshot = await ((viewerRole === 'owner' || viewerRole === 'rmsm')
+                ? db.collection('violations').where('managerStatus', '==', 'transferred')
+                : db.collection('violations').where('hrStatus', '==', 'transferred')
+            ).get();
             var match = null;
             snapshot.forEach(function (doc) {
                 if (match) return;
@@ -6814,7 +7010,23 @@ async function openTicketFromRef(ref) {
         var opener = null;
         var modalEl = null;
         var doc = (typeof document !== 'undefined') ? document : null;
-        if (typeof window.openViolationModal === 'function') {
+        // ⚠️ THE STORE-SIDE BRANCH COMES FIRST, and the ROLE picks the
+        // module — not mere availability. ownerdashboard.html loads
+        // hr-violations.js AND owner-violations.js together, so the HR module
+        // exists even for an Area Manager or RM/SM: its listener never starts
+        // for role 'owner'/'rmsm' (applyRole only arms it for 'hr'/'superadmin'),
+        // its list stays empty, and its openModal() would return false for every
+        // chip — "That report has not finished loading yet", forever, with no
+        // report ever arriving. The manager's own module (the managerStatus
+        // listener, #ownerViolationModal) is the one that actually holds the
+        // report — and RM/SM reaches a report ONLY through this branch, since it
+        // has no violations tab of its own.
+        var openerRole = normalizeRole(currentRole);
+        if ((openerRole === 'owner' || openerRole === 'rmsm') &&
+            window.OwnerViolations && typeof window.OwnerViolations.openModal === 'function') {
+            opener = function () { return window.OwnerViolations.openModal(id); };
+            modalEl = doc ? doc.getElementById('ownerViolationModal') : null;
+        } else if (typeof window.openViolationModal === 'function') {
             opener = function () { return window.openViolationModal(id); };
             modalEl = doc ? doc.getElementById('violationModal') : null;
         } else if (window.HrViolations && typeof window.HrViolations.openModal === 'function') {
@@ -6864,10 +7076,22 @@ async function openTicketFromRef(ref) {
         var violation = await resolveViolationRef(ref);
         var label = String(ref || '').toUpperCase();
         if (!violation) {
+            // ⚠️ THE STORE-SIDE MISS MEANS SOMETHING DIFFERENT. An Area
+            // Manager's or RM/SM's filtered query only ever sees reports
+            // transferred to their store, and the unfiltered probe in
+            // resolveViolationRef() is DENIED for those roles by design — so
+            // `lastViolationWasUntransferred` can never be set for them. A bare
+            // "not found" would send them hunting a typo when the real answer is
+            // "not handed to your store yet"; say it plainly instead, without
+            // claiming the report does not exist (it may simply not be on their
+            // list).
+            var ownerView = normalizeRole(currentRole) === 'owner' || normalizeRole(currentRole) === 'rmsm';
             showToast(
                 lastViolationWasUntransferred
                     ? 'Report ' + label + ' has not been transferred to HR yet — transfer it before mentioning it.'
-                    : 'Report "' + label + '" was not found.',
+                    : (ownerView
+                        ? 'Report "' + label + '" is not on your violations list yet — ask the superadmin to transfer it to you.'
+                        : 'Report "' + label + '" was not found.'),
                 lastViolationWasUntransferred ? 'info' : 'error'
             );
             return false;
@@ -6889,14 +7113,22 @@ async function openTicketFromRef(ref) {
      * escaped data attribute rather than inline JS.
      */
     function linkifyViolationRefs(escapedBody) {
-        // ⚠️ THE GATE THAT ACTUALLY MATTERS, and it is here — not in the
-        // picker — because this function needs NO Firestore read and NO
-        // permission check to succeed. It is a regex over the sender's own
-        // text, so the rules could never have stopped it: an Area Manager
-        // typing "violation VIO-0007" got a real, clickable chip written into
-        // the message, and the recipient clicked straight into "not found".
-        // Gating the picker alone would have left this wide open.
-        if (!canMentionViolations()) return String(escapedBody || '');
+        // ⚠️ THE GATE THAT ACTUALLY MATTERS — and it is the VIEW gate, not the
+        // mention gate. This function needs NO Firestore read and NO permission
+        // check of its own, so nothing downstream can undo what it renders:
+        // whatever it decides here is what the reader sees.
+        //
+        // It used to consult canMentionViolations(), which asked the WRONG
+        // question and broke the Area Manager's side of the store-chat
+        // handoff: they must not CREATE a mention (the picker, the index and
+        // the placeholder are all still gated on canMentionViolations()), but
+        // a chip that does not render is a chip nobody can click — when HR or
+        // a superadmin said "violation VIO-0007" in the store chat, the
+        // manager saw plain text. canOpenViolations() is the right gate;
+        // what they may actually OPEN is still enforced elsewhere, three
+        // times over: firestore.rules on the read, isMentionableViolation()
+        // on the resolver, and OwnerViolations.openModal() on the modal.
+        if (!canOpenViolations()) return String(escapedBody || '');
         return String(escapedBody || '').replace(
             violationRefPattern('gi'),
             function (whole, at, token, offset) {
@@ -7238,11 +7470,25 @@ async function openTicketFromRef(ref) {
         (lastRenderedMessages || []).forEach(function (msg) {
             add(msg.senderEmail, msg.senderName);
         });
-        // Branch rooms are ALL-MEMBERS groups. The room summary (built by
-        // applyRoomSummaryToList) carries the full membership when it is a
-        // branch room, so a superadmin who is in the branch can mention
-        // anyone else in that branch. Area Managers are excluded from the
-        // list above, so they never see branch members either.
+        // Branch rooms are ALL-MEMBERS groups: the @mention roster is EXACTLY
+        // the room's `members` array (the live room document, carried into the
+        // summary by applyRoomSummaryToList / startConversationListListener /
+        // syncSummaryFromMessage). So whoever is in the store chat may mention
+        // whoever else is in it — the Area Manager and RM/SM of THAT branch, the
+        // company-wide HR and superadmins (who are seeded into every branch
+        // room), and nobody from another branch's team.
+        //
+        // ⚠️ `members` IS THE AUTHORITY, and it must be the REAL team: it is also
+        // what firestore.rules authorises a room read on. A room polluted with
+        // everyone (an older client wrote everyoneKnownForGroup() into group
+        // rooms, and isGroupRoom() is true for branch rooms) would both offer
+        // every user here AND leak the thread to other branches — so a superadmin
+        // opening the room re-seeds it (see repairBranchRoomMembers).
+        //
+        // No 1:1/All-HR fallback here: those rooms are not `members`-scoped for
+        // mentions, so they rely on the thread senders above. If a branch room's
+        // summary has not loaded `members` yet, the picker simply shows the
+        // senders until the next snapshot — it never invents a roster.
         if (activeRoomId && isBranchRoom(activeRoomId) &&
             conversationSummaries[activeRoomId] &&
             Array.isArray(conversationSummaries[activeRoomId].members)) {

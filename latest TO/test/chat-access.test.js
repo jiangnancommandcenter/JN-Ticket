@@ -1917,6 +1917,109 @@ assert.strictEqual(mentionMenu.hidden, true, 'picking a person must close the pi
 
 console.log('✅ Mention picker tests passed (opens on @, filters, closes on space/email, inserts on pick).');
 
+// ---------------------------------------------------------------
+// 40b. BRANCH ROOM: the @mention roster is EXACTLY the room's
+//      `members` — the whole store team, from the first keystroke,
+//      with nobody from another branch's team.
+//
+//      This is the behaviour the store chat is for: an HR/superadmin
+//      mentioning "violation ..." can @ the Area Manager and every
+//      RM/SM of THAT store immediately, before any of them has posted.
+//      `members` is also the room READ authority, so it must be the
+//      real team — the send path is guarded (test/chat-rules.test.js)
+//      and a superadmin opening the room re-seeds a polluted array
+//      (repairBranchRoomMembers); this proves the PICKER reads it.
+// ---------------------------------------------------------------
+{
+    const BRANCH = 'branch-sm-fairview';
+    const team = ['hr@test.com', 'am@test.com', 'rm1@test.com', 'boss@test.com'];
+
+    // Put the branch room in the conversation list WITH its `members`,
+    // then open it. A branch room is a group room, so it opens even
+    // before any message exists; repairBranchRoomMembers is a no-op
+    // here because the sandbox is HR (superadmin-gated).
+    seedExistingConversation(BRANCH, team);
+    Live.selectConversation(BRANCH);
+    // Clear any thread senders carried over from the 1:1 tests above,
+    // so the roster below is members-only.
+    pushMessages([]);
+
+    typeIntoComposer('@', 1);
+    assert.strictEqual(mentionMenu.hidden, false, 'typing "@" in a branch room must open the picker');
+
+    const offered = [];
+    const re = /data-mention-email="([^"]+)"/g;
+    let m;
+    while ((m = re.exec(mentionMenu.innerHTML)) !== null) offered.push(m[1]);
+
+    team.forEach((email) => {
+        assert(
+            offered.indexOf(email) > -1,
+            'a branch room must offer its member ' + email + ' from the first keystroke, before any ' +
+            'post. offered=' + JSON.stringify(offered)
+        );
+    });
+    assert.strictEqual(
+        offered.length,
+        team.length,
+        'a branch room must offer EXACTLY its members — no cross-branch user and no phantom. ' +
+        'offered=' + JSON.stringify(offered)
+    );
+
+    // A name that is not one of the room's members must never be offered.
+    typeIntoComposer('@outsider', 9);
+    assert.strictEqual(
+        mentionMenu.hidden,
+        true,
+        'a query matching no member must close the picker — a branch room never invents a roster from ' +
+        'the directory'
+    );
+
+    // A branch room whose `members` has not loaded yet must DEGRADE to the
+    // thread senders (never to the whole directory): seed a second branch
+    // room with NO members array, post from two people, and assert the
+    // picker offers exactly those senders + the signed-in user.
+    const BRANCH2 = 'branch-banawe';
+    conversationCallback({
+        forEach(fn) {
+            fn({
+                id: BRANCH2,
+                data: () => ({
+                    // deliberately NO `members` — a summary that has not loaded it yet
+                    lastMessage: 'hi',
+                    lastMessageAt: { toDate: () => new Date() },
+                    lastSenderEmail: 'am.banawe@test.com'
+                })
+            });
+        }
+    });
+    Live.selectConversation(BRANCH2);
+    pushMessages([
+        { id: 'bn1', text: 'hi', senderEmail: 'am.banawe@test.com', senderName: 'AM Banawe', sentAt: T.now },
+        { id: 'bn2', text: 'yo', senderEmail: 'rm.banawe@test.com', senderName: 'RM Banawe', sentAt: T.now }
+    ]);
+    typeIntoComposer('@', 1);
+    assert.strictEqual(
+        mentionMenu.hidden,
+        false,
+        'the picker must still open in a branch room whose members have not loaded'
+    );
+    const offered2 = [];
+    const re2 = /data-mention-email="([^"]+)"/g;
+    let m2;
+    while ((m2 = re2.exec(mentionMenu.innerHTML)) !== null) offered2.push(m2[1]);
+    assert(offered2.indexOf('am.banawe@test.com') > -1, 'a sender must be offerable even before members load');
+    assert(offered2.indexOf('rm.banawe@test.com') > -1, 'a sender must be offerable even before members load');
+    assert(offered2.indexOf('hr@test.com') > -1, 'the signed-in user is always in the roster');
+    assert(
+        offered2.indexOf('ghost@test.com') === -1,
+        'the picker must never invent a roster from the directory — offered=' + JSON.stringify(offered2)
+    );
+
+    console.log('✅ Branch-room @mention roster tests passed (exactly the members; no members yet → ' +
+        'senders only; never a directory-wide roster).');
+}
+
 // 42. The mention colour must be BLUE and must theme automatically.
 //     Guards two regressions at once: someone re-styling the mention with
 //     the green brand primary, and someone hardcoding a hex (which would

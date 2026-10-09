@@ -7,15 +7,21 @@
 // The behaviour most worth locking down here:
 //   1. the reference is matched in the TEXT (no new persisted field), so old
 //      messages link too and no rules deploy is needed;
-//   2. ONLY TRANSFERRED reports can be mentioned — an untransferred one would
-//      hand HR a chip that opens nothing they are allowed to read;
-//   3. every read is FILTERED on hrStatus, because an unfiltered `violations`
-//      query is denied for HR by design — the privacy guarantee, not a bug;
+//   2. ONLY TRANSFERRED reports can be opened — hrStatus for HR/superadmin,
+//      managerStatus for the Area Manager (the two handoffs are independent),
+//      so a chip never opens nothing its reader is allowed to read;
+//   3. every read is FILTERED on a transfer flag, because an unfiltered
+//      `violations` query is denied for HR by design — the privacy
+//      guarantee, not a bug;
 //   4. there is no direct-document read in the resolver, because a violation's
 //      id is a Firestore auto-id, not its report number;
 //   5. the "@ticket" / "@violation" triggers work, and the "@" is never
 //      inserted into the text (it would be recorded as a mentioned PERSON);
-//   6. a reference that resolves to nothing says WHY instead of dead-ending.
+//   6. a reference that resolves to nothing says WHY instead of dead-ending;
+//   7. ⚠️ CREATE ≠ CLICK. The Area Manager may not mention a violation (no
+//      picker, no index, no placeholder) but DOES get the clickable chip for
+//      reports transferred to them — a chip that never renders is a chip
+//      nobody can click, and that was the store-chat bug.
 //
 // Run: npm test
 const fs = require('fs');
@@ -85,15 +91,16 @@ function loadHelpers(role) {
         assert(i > -1, 'could not find ' + marker + ' in chat.js');
         return i;
     };
-    // ⚠️ THE ROLE GATE IS PART OF THE FUNCTION UNDER TEST NOW.
-    // linkifyViolationRefs() and isMentionableViolation() both consult
-    // canMentionViolations(), so the sandbox must carry the REAL gate, the REAL
-    // role normaliser and a `currentRole` — otherwise every existing assertion
-    // would throw a ReferenceError instead of testing anything at all.
+    // ⚠️ THE ROLE GATES ARE PART OF THE FUNCTIONS UNDER TEST NOW.
+    // linkifyViolationRefs() consults canOpenViolations() (the VIEW gate) and
+    // isMentionableViolation() consults the role directly, so the sandbox must
+    // carry BOTH role gates, the REAL role normaliser and a `currentRole` —
+    // otherwise every existing assertion would throw a ReferenceError instead
+    // of testing anything at all.
     //
-    // The default is 'hr', a role that CAN mention, so the happy-path
-    // assertions below keep testing the FEATURE rather than the gate. The
-    // denial cases load their own context with 'owner'.
+    // The default is 'hr', a role that can both mention and open, so the
+    // happy-path assertions below keep testing the FEATURE rather than the
+    // gates. The denial cases load their own context with 'owner'.
     const normalize = src.slice(
         grab('function normalizeRole'),
         src.indexOf('*/', grab('function normalizeRole')) + 2
@@ -137,6 +144,7 @@ function loadHelpers(role) {
         globalThis.__x = {
             isViolationRefToken, extractViolationRefs, linkifyViolationRefs,
             isMentionableViolation, canMentionViolations, VIOLATION_MENTION_ROLES,
+            canOpenViolations, VIOLATION_OPEN_ROLES,
             isTicketRefToken, extractTicketRefs, linkifyTicketRefs
         };
     `, ctx);
@@ -654,6 +662,29 @@ assert(
     'the HR opener (js/hr-violations.js) and its #hrViolationModal must be used ' +
     'on ownerdashboard.html'
 );
+assert(
+    /window\.OwnerViolations/.test(openChat) && /ownerViolationModal/.test(openChat),
+    'the Area Manager opener (js/owner-violations.js) and its #ownerViolationModal ' +
+    'must be used on ownerdashboard.html'
+);
+assert(
+    openChat.indexOf('window.OwnerViolations.openModal') > -1 &&
+    openChat.indexOf('window.OwnerViolations.openModal') <
+        openChat.indexOf('window.HrViolations.openModal'),
+    'the Area Manager branch must come FIRST — ownerdashboard.html loads BOTH ' +
+    'violation modules, and the HR one holds nothing for role "owner" (its listener ' +
+    'never starts there), so availability alone would route every manager chip to an ' +
+    'empty list and a permanent "not finished loading"'
+);
+// ⚠️ THE AREA MANAGER'S MISS TOAST must name the real reason. The unfiltered
+// probe that powers "not transferred to HR yet" is DENIED for role 'owner',
+// so a bare "not found" would send them hunting a typo when the answer is
+// "not handed to you yet".
+assert(
+    /is not on your violations list yet/.test(src),
+    "the Area Manager's failed click must say the report is not on THEIR list — " +
+    'not that it does not exist'
+);
 // The chat must be suspended, not closed, and restored on modal close — the
 // same machinery tickets use, so the draft and room survive.
 assert(
@@ -852,22 +883,32 @@ assert(
 );
 
 // =====================================================================
-//  THE ROLE GATE — an AREA MANAGER may not mention a violation
+//  THE ROLE GATE — CREATE ≠ CLICK
 // =====================================================================
 //
-//  ⚠️ THIS IS THE PATH THE RULES COULD NOT CLOSE.
+//  ⚠️ TWO QUESTIONS, TWO ALLOWLISTS, AND CONFLATING THEM IS HOW THIS
+//  FEATURE BROKE — first one way, then the other.
 //
-//  firestore.rules denies an Area Manager the `violations` read, and
-//  js/hr-violations.js hides the whole tab. But linkifyViolationRefs() is a
-//  PURE REGEX over the sender's own text: it needs no read and no permission,
-//  so it succeeded for a role that had no business mentioning anything. The
-//  Area Manager typed "violation VIO-0007", a real clickable chip was written
-//  into the message, and the recipient clicked straight into "not found".
+//  MAY YOU CREATE A MENTION?  VIOLATION_MENTION_ROLES (hr + superadmin).
+//  The @violation picker, the index read and the composer placeholder are
+//  all gated on canMentionViolations(), and an Area Manager has no
+//  unfiltered `violations` read to back a picker anyway.
 //
-//  These assertions run the REAL linkifier and the REAL predicate, in a sandbox
-//  whose only difference is `currentRole`.
+//  MAY YOU CLICK A CHIP YOU SEE? VIOLATION_OPEN_ROLES (hr + superadmin +
+//  owner). linkifyViolationRefs() is a PURE REGEX over the message text:
+//  it needs no read, so its gate is the ONLY thing standing between a
+//  reader and the chip. Gating it on canMentionViolations() hid the chip
+//  from the AREA MANAGER specifically: when HR said "violation VIO-0007"
+//  in the store chat, the manager saw plain text — nothing to click,
+//  while everyone else got a working chip. What they may then OPEN is
+//  enforced downstream (firestore.rules' managerStatus branch,
+//  isMentionableViolation(), OwnerViolations.openModal), not by hiding
+//  the link from them.
+//
+//  These assertions run the REAL linkifier and the REAL predicate, in a
+//  sandbox whose only difference is `currentRole`.
 // =====================================================================
-console.log('\n=== Only HR and superadmin may mention a violation ===');
+console.log('\n=== CREATE: only HR + superadmin. CLICK: the Area Manager too ===');
 
 const AM = loadHelpers('owner');
 
@@ -902,16 +943,41 @@ assert.strictEqual(AM.canMentionViolations(), false, 'an Area Manager must be re
     );
 });
 
-// 3. ⚠️ THE ONE THAT MATTERS: no chip is produced for an Area Manager. Every
-//    casing and separator real people type, because the bug was that ALL of
-//    them produced a chip.
+// 3. ⚠️ THE ONE THAT MATTERS: the Area Manager MUST get the chip — that is
+//    the bug being fixed. Every casing and separator real people type,
+//    because they all have to be clickable in the store chat.
 const AM_TEXT = 'please action violation VIO-0007';
-assert(
-    AM.linkifyViolationRefs(AM_TEXT) === AM_TEXT,
-    'an Area Manager typing "violation VIO-0007" must get PLAIN TEXT BACK — not a ' +
-    'chip. This linkifier needs no permission, so it is the one path the Firestore ' +
-    'rules could never have closed.'
+assert.strictEqual(
+    AM.canOpenViolations(), true,
+    'an Area Manager must be able to CLICK a violation chip: without a chip there ' +
+    'is nothing to click, and a violation mentioned in the store chat is invisible ' +
+    'to the one person it concerns'
 );
+assert.deepStrictEqual(
+    Array.from(AM.VIOLATION_OPEN_ROLES).sort(),
+    ['hr', 'owner', 'rmsm', 'superadmin'],
+    'VIOLATION_OPEN_ROLES must be HR + superadmin + Area Manager + RM/SM — RM/SM ' +
+    'opens a violation MENTIONED in the store chat (no tab of its own)'
+);
+// RM/SM MUST get the chip: it has no violations tab, so a mentioned report is
+// the ONLY way it ever reaches one. 'operator'/''/'nonsense' still must not —
+// they can never open one, and the list is an allowlist.
+{
+    const RMSM = loadHelpers('rmsm');
+    assert.strictEqual(RMSM.canOpenViolations(), true,
+        "RM/SM ('rmsm') must be able to CLICK a violation chip — it has no tab, so a " +
+        'chip is the only route to a report transferred to its store');
+    assert.strictEqual(RMSM.canMentionViolations(), false,
+        "RM/SM must still NOT be able to CREATE a mention — CREATE and CLICK differ");
+}
+['operator', '', 'nonsense'].forEach((role) => {
+    const ctx = loadHelpers(role);
+    assert.strictEqual(
+        ctx.canOpenViolations(), false,
+        "role '" + role + "' must NOT see a violation chip — they can never open one, " +
+        'and the list is an allowlist so an unknown role cannot inherit it'
+    );
+});
 [
     'please action violation VIO-0007',
     'VIOLATION vio-0007 please',
@@ -920,22 +986,98 @@ assert(
     '@violation VIO-0007',
     '@violation VIO-0007 please action'
 ].forEach((text) => {
-    assert.strictEqual(
-        AM.linkifyViolationRefs(text), text,
-        'an Area Manager must never get a violation chip. Input: ' + text
+    assert(
+        /chat-violation-chip/.test(AM.linkifyViolationRefs(text)),
+        'an Area Manager must get a CLICKABLE chip. Input: ' + text
     );
     assert(
-        !/chat-violation-chip/.test(AM.linkifyViolationRefs(text)),
-        'no violation chip markup may reach an Area Manager. Input: ' + text
+        /data-violation-ref=/.test(AM.linkifyViolationRefs(text)),
+        'the chip must carry data-violation-ref so the delegated click handler fires. ' +
+        'Input: ' + text
     );
 });
+// Proof by SOURCE that the gate consulted is the VIEW gate: a runtime pass
+// cannot tell WHICH allowlist produced the chip.
+const linkFlat = stripComments(src.slice(
+    src.indexOf('function linkifyViolationRefs'),
+    src.indexOf('//  PICKER TRIGGERS')
+));
+assert(
+    /canOpenViolations\(\)/.test(linkFlat),
+    'linkifyViolationRefs() must gate on canOpenViolations() — the VIEW allowlist'
+);
+assert(
+    !/canMentionViolations\(\)/.test(linkFlat),
+    'linkifyViolationRefs() must NOT gate on canMentionViolations() — that is the ' +
+    'exact conflation that hid the chip from the Area Manager'
+);
 
-// 4. The predicate refuses too, so the picker and the resolver agree.
+// 4. The predicate is ROLE-AWARE, mirroring the two INDEPENDENT handoffs in
+//    firestore.rules: hrStatus gates HR/superadmin, managerStatus gates the
+//    Area Manager. A report transferred to the wrong side must still refuse,
+//    or the picker and resolver would offer a chip the rules then deny.
 assert.strictEqual(
     AM.isMentionableViolation({ hrStatus: 'transferred', violationNumber: 'VIO-0007' }),
     false,
-    "a TRANSFERRED report must still be unmentionable to an Area Manager — the role " +
-    'check is what denies it, not the absence of a transfer'
+    "a report transferred to HR must stay unopenable for an Area Manager — the role's " +
+    'OWN flag is what gates them, not the presence of any transfer'
+);
+assert.strictEqual(
+    AM.isMentionableViolation({ managerStatus: 'transferred', violationNumber: 'VIO-0007' }),
+    true,
+    'a report transferred TO THE AREA MANAGER must resolve when they click it — ' +
+    'this is the store-chat handoff the whole fix exists for'
+);
+assert.strictEqual(
+    AM.isMentionableViolation({ managerStatus: 'pending', violationNumber: 'VIO-0007' }),
+    false,
+    'a report not yet transferred to the Area Manager must not resolve either'
+);
+const HR_CTX = loadHelpers('hr');
+assert.strictEqual(
+    HR_CTX.isMentionableViolation({ managerStatus: 'transferred', violationNumber: 'VIO-0007' }),
+    false,
+    'an HR viewer must NOT open a manager-only report — the two handoffs are ' +
+    'independent, and isTransferredToHr() is what their read rule keys on'
+);
+// RM/SM keys on managerStatus, IDENTICAL to the Area Manager — it reads the same
+// transferred-to-the-store set, and firestore.rules admits it via isRmsm().
+const RMSM_CTX = loadHelpers('rmsm');
+assert.strictEqual(
+    RMSM_CTX.isMentionableViolation({ managerStatus: 'transferred', violationNumber: 'VIO-0007' }),
+    true,
+    'a report transferred to the store (managerStatus) must resolve for RM/SM — ' +
+    'a chip is the only way it ever reaches a report'
+);
+assert.strictEqual(
+    RMSM_CTX.isMentionableViolation({ hrStatus: 'transferred', violationNumber: 'VIO-0007' }),
+    false,
+    "an HR-only transfer (hrStatus) must stay unopenable for RM/SM — its read rule " +
+    'keys on managerStatus via isRmsm(), not hrStatus'
+);
+assert.strictEqual(
+    RMSM_CTX.isMentionableViolation({ managerStatus: 'pending', violationNumber: 'VIO-0007' }),
+    false,
+    'a report not yet transferred to the store must not resolve for RM/SM either'
+);
+
+// 4b. The RESOLVER must query the field the CLICKING role's rules admit.
+//     Firestore refuses a query it cannot prove BEFORE it runs, so the wrong
+//     shape is indistinguishable from "report missing" — which is exactly how
+//     the Area Manager's chip used to die on click.
+assert(
+    /where\('managerStatus', '==', 'transferred'\)/.test(resolveFn),
+    'the resolver must query managerStatus for the Area Manager — an owner running ' +
+    'the hrStatus shape is DENIED by firestore.rules before it executes'
+);
+assert(
+    /where\('hrStatus', '==', 'transferred'\)/.test(resolveFn),
+    'the HR/superadmin query shape must be unchanged'
+);
+assert(
+    /isMentionableViolation\(cached\)/.test(resolveFn),
+    "the resolver's fast path must RE-CHECK the cached hit — the role can change " +
+    'without a reload, and an index filled under one role must not answer another'
 );
 
 // 5. ⚠️ TICKETS ARE NOT AFFECTED. This is a violation-only change; an Area
@@ -996,14 +1138,19 @@ assert.deepStrictEqual(
     'role can see the tab but not mention, or the reverse'
 );
 
-console.log('  PASS  an Area Manager cannot mention a violation: no chip, no picker, no read');
-console.log('  PASS  HR and superadmin still can; the ticket linkifier is untouched');
+console.log('  PASS  CREATE gate: only HR + superadmin mention; no picker/index/placeholder for the Area Manager');
+console.log('  PASS  CLICK gate: the Area Manager gets a real chip, resolving managerStatus reports only');
+console.log('  PASS  the resolver queries the field the role\u2019s rules admit; the opener routes to OwnerViolations FIRST');
+console.log('  PASS  HR and superadmin still work; the ticket linkifier is untouched');
 console.log('  PASS  the chat list stays in lockstep with hr-violations.js applyRole()');
 
 console.log('\nOK: chat violation mention tests passed');
 console.log('(an "@violation VIO-0007" reference renders as a chip that swallows the ' +
     '"@" and opens that report; "@violation" is the ONLY picker trigger, because ' +
     'the bare word fired on ordinary prose; only TRANSFERRED reports are ' +
-    'mentionable and every read is filtered, because an unfiltered violations ' +
-    'query is denied for HR by design. The bare form still linkifies, so older ' +
-    'messages keep their chip.');
+    'openable — hrStatus for HR/superadmin, managerStatus for the Area Manager — ' +
+    'and every read is filtered, because an unfiltered violations query is ' +
+    'denied for HR by design. The bare form still linkifies, so older messages ' +
+    'keep their chip. CREATE ≠ CLICK: the Area Manager may not mention, but sees ' +
+    'a clickable chip for reports transferred to them, opened through ' +
+    'OwnerViolations.openModal — the chip that used to render as plain text.');

@@ -1592,6 +1592,65 @@ assert(
     );
 }
 
+// ---- FUNCTIONAL + GUARD: the send path must NEVER write everyoneKnownForGroup
+//      into a `branch-` room (the polluted-members / cross-branch-leak fix) ----
+//  `members` is BOTH the @mention roster AND the authority the room READ rule
+//  checks (`selfEmail() in resource.data.members`). An older client wrote
+//  everyoneKnownForGroup() — EVERY account this device knows — into group rooms,
+//  and isGroupRoom() is true for branch rooms too, so a store chat's `members`
+//  got polluted with every user: the picker offered everyone AND the thread
+//  leaked to other branches. The fix is that EVERY room-summary write in
+//  sendMessage() is guarded with `!isGroupRoom()`. This proves both halves:
+//  (a) isGroupRoom() really does treat a branch room as a group room, and
+//  (b) each room-summary write site carries the guard, so the polluted array
+//  can never reach a branch room's document.
+{
+    function extractFnSrc(name) {
+        const m = clientSrc.match(new RegExp('function\\s+' + name + '\\([^)]*\\)\\s*\\{[\\s\\S]*?\\n\\s{4}\\}'));
+        assert(m, 'could not extract function ' + name + ' from js/chat.js');
+        return m[0];
+    }
+    // (a) FUNCTIONAL: isGroupRoom() must treat a `branch-` room as a group room.
+    const isGroupRoomFn = new Function(
+        'var LEGACY_ROOM_ID = "owner-superadmin";\n'
+        + extractFnSrc('isGroupRoom') + '\n'
+        + 'return isGroupRoom;'
+    )();
+    assert.strictEqual(
+        isGroupRoomFn('branch-sm-fairview'), true,
+        'isGroupRoom() must treat a branch room as a group room — that is what keeps ' +
+        'everyoneKnownForGroup() out of its `members` (the polluted-array / cross-branch-leak bug)'
+    );
+    assert.strictEqual(
+        isGroupRoomFn('dm_abc__def'), false,
+        'isGroupRoom() must NOT treat a 1:1 room as a group room, or a DM could never record its ' +
+        'two participants'
+    );
+    assert.strictEqual(
+        isGroupRoomFn('owner-superadmin'), true,
+        'the legacy All-HR room is still a group room'
+    );
+
+    // (b) GUARD: the room payload carries everyoneKnownForGroup() ONLY under
+    //     isGroupRoom(), and EVERY write of that payload is gated on
+    //     !isGroupRoom()/!groupRoom — so a branch room can never be handed the
+    //     array. (The individual write-site guards are also asserted above; this
+    //     is the single statement naming what they collectively prevent.)
+    assert(
+        /members:\s*isGroupRoom\(\)\s*\?\s*everyoneKnownForGroup\(\)\s*:\s*\[me,\s*them\],/.test(clientSrc),
+        'the room payload must build `members` from everyoneKnownForGroup() only when isGroupRoom()'
+    );
+    assert(
+        /if\s*\(!roomIsStarted\s*&&\s*!isGroupRoom\(\)\)\s*\{[\s\S]{0,240}?await roomRef\(\)\.set\(roomSummary/.test(clientSrc)
+        && /roomPreviewInBatch\s*&&\s*!isGroupRoom\(\)/.test(clientSrc)
+        && /if\s*\(!roomPreviewInBatch\s*&&\s*!isGroupRoom\(\)\)\s*writeRoomPreviewQuietly\(roomSummary\);/.test(clientSrc)
+        && /preview:\s*!groupRoom\s*&&\s*roomPreviewInBatch,/.test(clientSrc),
+        'every room-summary write in sendMessage (standalone create, both batch preview sites, the ' +
+        'best-effort preview, and the retry ladder) must be gated on !isGroupRoom()/!groupRoom, so the ' +
+        'everyoneKnownForGroup() array can never be written into a branch room'
+    );
+}
+
 console.log('  \u2713 Branch group chat tests passed (approval hook, seeded membership, rules).');
 
 // ---------------------------------------------------------------

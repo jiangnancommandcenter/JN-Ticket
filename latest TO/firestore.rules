@@ -136,15 +136,28 @@ service cloud.firestore {
         get(/databases/$(database)/documents/users/$(selfEmail())).data.role in ['owner', 'rmsm'];
     }
 
-    // Area Manager ONLY (stored role 'owner') — for the violations read below.
-    // ⚠️ NOT isAreaManager(): that helper also admits RM/SM ('rmsm') because
-    // RM/SM shares the Area Manager's chat roster and dashboard — but RM/SM
-    // must NEVER read CCTV violation data (their sidebar is Overview +
-    // Tickets only). Keeping the violations branch on this narrower helper
-    // is what makes that a data-level denial, not just a hidden tab.
+    // Area Manager (stored role 'owner') — for the violations read below.
+    // Deliberately owner-only: RM/SM has its OWN clause via isRmsm() below, so
+    // the two store-side reads are stated explicitly rather than folded into
+    // isAreaManager() (which also admits RM/SM for the chat roster). Keeping
+    // them separate means widening one never silently widens the other.
     function isOwner() {
       return isSignedIn() &&
         get(/databases/$(database)/documents/users/$(selfEmail())).data.role == 'owner';
+    }
+
+    // RM/SM (stored role 'rmsm'). Shares the Area Manager's dashboard, branch
+    // scope and ticket access, and may OPEN a violation report that was
+    // MENTIONED in the store chat — but has NO violations tab of its own. This
+    // helper is what makes that a data-level grant scoped to transferred
+    // reports: 'rmsm' reads a report ONLY when `managerStatus == 'transferred'`
+    // (the same store-side handoff the Area Manager reads), and the client has
+    // no list/tab from which to browse the rest. Kept separate from isOwner()
+    // so the two store-side reads are each stated explicitly, and widening one
+    // never silently widens the other.
+    function isRmsm() {
+      return isSignedIn() &&
+        get(/databases/$(database)/documents/users/$(selfEmail())).data.role == 'rmsm';
     }
 
     // HR alone (NOT superadmin — that case is already covered by
@@ -364,6 +377,13 @@ service cloud.firestore {
     // untouched, so an Area Manager can read a transferred report and can do
     // nothing at all to it.
     //
+    // RM/SM ('rmsm') READS THE SAME TRANSFERRED SET, via isRmsm() &&
+    // isTransferredToAreaManager() — but ONLY to OPEN a report that was
+    // MENTIONED in the store chat. RM/SM has NO violations tab (js/owner-violations.js
+    // keeps its nav item hidden for 'rmsm'), so there is no list to browse from;
+    // the read exists so a chat chip resolves and opens on click. Same flag, same
+    // store-side handoff, same branch scope enforced in the UI — no write.
+    //
     // ⚠️⚠️ KNOWN GAP — BRANCH SCOPING IS NOT ENFORCED HERE, ONLY IN THE UI.
     // `js/owner-violations.js` filters the list down to `users/<email>.branches`
     // (compared against the report's `store`, normalised via ownerBranchKey),
@@ -393,7 +413,8 @@ service cloud.firestore {
 
       allow read: if isOperatorOrSuperAdmin()
         || (isHr() && isTransferredToHr())
-        || (isOwner() && isTransferredToAreaManager());
+        || (isOwner() && isTransferredToAreaManager())
+        || (isRmsm() && isTransferredToAreaManager());
       allow create: if isOperatorOrSuperAdmin();
       // Display rename only (REPORTS DATABASE): any signed-in operator or
       // superadmin may rename a file (attachments[].name) or the report folder

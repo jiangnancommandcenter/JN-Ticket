@@ -58,7 +58,8 @@
     let page = 1;
     let currentId = null;
     let listenerStarted = false;
-    let allowed = false;
+    let allowed = false;        // arm the managerStatus listener + openModal (owner OR rmsm)
+    let tabVisible = false;     // show the violations TAB (owner ONLY)
 
     // ===== Helpers =====
 
@@ -424,37 +425,51 @@
 
     // ===== Role gate =====
     /**
-     * Show the tab ONLY to an Area Manager (stored role 'owner').
+     * TWO decisions, deliberately split, because CREATE/OPEN ≠ SEE-THE-TAB:
      *
-     * ⚠️ RM/SM ('rmsm') IS DELIBERATELY EXCLUDED. It shares this dashboard,
-     * the branches and the ticket access, but must never see CCTV violation
-     * data — its sidebar is Overview + Tickets only. readRole() still
-     * RESOLVES 'rmsm' (see isRealRole) so this gate receives the real role
-     * and hides deterministically, rather than the boot poll spinning on a
-     * value it can never match.
+     *   tabVisible — show the violations TAB. Area Manager ('owner') ONLY.
+     *   allowed    — arm the managerStatus listener AND let openModal() work.
+     *                'owner' AND 'rmsm'.
      *
-     * ⚠️ HR IS DELIBERATELY NOT INCLUDED, and superadmin is not either. Superadmin
-     * works the command center's own Violations tab and HR has its own — giving
-     * either of them a second copy here would show two lists of the same data
-     * that can drift apart. `hr-violations.js` gates on exactly the inverse set
-     * ('hr' | 'superadmin'), so the two modules can never both reveal a tab.
+     * ⚠️ WHY RM/SM NEEDS `allowed` BUT NOT `tabVisible`. RM/SM has no violations
+     * tab (Overview + Tickets only), so tabVisible stays false and the nav item
+     * is hidden. BUT a violation MENTIONED in the store chat must still OPEN for
+     * them — and openModal(id) resolves against `allViolations`, which is
+     * populated ONLY by the listener started here. Without `allowed`, an RM/SM
+     * clicking a chip would get "That report has not finished loading yet"
+     * forever, exactly the dead-end the Area Manager branch in chat.js avoids.
+     * firestore.rules admits 'rmsm' for `managerStatus == 'transferred'` (via
+     * isRmsm()), and openModal() re-checks branch scope, so this grants nothing
+     * beyond a transferred, in-branch report — and there is no list to browse.
+     *
+     * ⚠️ HR IS DELIBERATELY NOT `allowed`, and superadmin is not either.
+     * Superadmin works the command center's own Violations tab and HR has its
+     * own — giving either a second copy here would show two lists of the same
+     * data that can drift apart. `hr-violations.js` gates on exactly the inverse
+     * set ('hr' | 'superadmin'), so the two modules can never both reveal a tab.
      *
      * The real authorisation is firestore.rules: the violations read clause
-     * checks `isOwner()` (owner only, NOT isAreaManager() — that helper also
-     * admits RM/SM for the chat roster) AND `managerStatus == 'transferred'`,
-     * so even a forced-visible tab could not return anything else.
+     * checks the role AND `managerStatus == 'transferred'`, so even a
+     * forced-visible tab could not return anything else.
      */
     function applyRole(role) {
-        allowed = String(role || '').toLowerCase() === 'owner';
+        var r = String(role || '').toLowerCase();
+        tabVisible = r === 'owner';               // the TAB is owner-only
+        allowed = r === 'owner' || r === 'rmsm';  // listener + openModal: both store-side roles
         if (navItem) {
-            navItem.style.display = allowed ? 'flex' : 'none';
-            navItem.classList.toggle('u-hidden', !allowed);
+            navItem.style.display = tabVisible ? 'flex' : 'none';
+            navItem.classList.toggle('u-hidden', !tabVisible);
         }
-        if (!allowed) {
-            // A manager-turned-someone-else, or HR, must not reach the section by
-            // any route.
+        if (!tabVisible) {
+            // Owner-only section: RM/SM (and any non-owner) must not reach the
+            // SECTION by any route, even though RM/SM may still OPEN a report
+            // the chat mentioned (the listener below is what makes that work).
             const section = $ov('tabOwnerViolations');
             if (section) section.classList.remove('active');
+        }
+        if (!allowed) {
+            // A role with no store-side violation access at all (HR, superadmin,
+            // operator, unknown) — nothing to show and nothing to open.
             closeModal();
         }
         if (allowed) startListener();

@@ -32,17 +32,24 @@ console.log('Testing the violation → Area Manager handoff...');
         + 'isTransferredToHr(), so an untransferred report matches nothing');
 
     const readAt = rules.indexOf('allow read: if isOperatorOrSuperAdmin()');
-    const readClause = rules.slice(readAt, readAt + 220);
+    const readClause = rules.slice(readAt, readAt + 260);
     assert(/function isOwner\(\)/.test(rules),
-        'firestore.rules needs an isOwner() helper — the violations read must be '
-        + "owner-only, never isAreaManager() (which also admits RM/SM, and RM/SM "
-        + 'must never read CCTV violation data)');
+        'firestore.rules needs an isOwner() helper for the Area Manager read');
     assert(/isOwner\(\)\s*&&\s*isTransferredToAreaManager\(\)/.test(readClause),
         'the violations read rule must admit (isOwner() && '
         + 'isTransferredToAreaManager())');
+    // RM/SM reads the SAME transferred set, but ONLY to open a report MENTIONED
+    // in the store chat (it has no violations tab). A DELIBERATE, scoped grant
+    // via its own isRmsm() helper (never the broad isAreaManager(), which also
+    // sweeps in the chat-roster reach), keyed on the same managerStatus flag so
+    // it can never exceed what the Area Manager sees.
+    assert(/function isRmsm\(\)/.test(rules),
+        'firestore.rules needs an isRmsm() helper for the RM/SM chat-mention read');
+    assert(/isRmsm\(\)\s*&&\s*isTransferredToAreaManager\(\)/.test(readClause),
+        'the violations read rule must admit (isRmsm() && '
+        + 'isTransferredToAreaManager()) so an RM/SM can open a mentioned report');
     assert(!/isAreaManager\(\)/.test(readClause),
-        'the violations read rule must NOT use isAreaManager() — that helper also '
-        + "admits RM/SM ('rmsm'), whose dashboard is Overview + Tickets only");
+        'the violations read rule must NOT use isAreaManager() in the read clause');
 
     // INDEPENDENCE: a single shared flag would make the two transfers revoke
     // each other, and that failure is invisible until someone needs both.
@@ -310,10 +317,18 @@ console.log('Testing the violation → Area Manager handoff...');
     const gate2 = s.slice(s.indexOf('function applyRole'), s.indexOf('function refresh'));
     assert(/===\s*'owner'/.test(gate2),
         'applyRole() must still gate on the stored role so the badge label maps through');
-    assert(!/===\s*'rmsm'/.test(gate2),
-        'applyRole() must NOT admit rmsm — RM/SM must never see violations; their ' +
-        "dashboard is Overview + Tickets only (readRole still resolves 'rmsm' so " +
-        'this gate can hide it deterministically)');
+    // POLICY REVERSAL, DELIBERATE: RM/SM may now OPEN a violation MENTIONED in the
+    // store chat, so applyRole() arms the listener + openModal for 'rmsm' too.
+    // What must NOT change is the TAB: it stays owner-only (tabVisible).
+    assert(/===\s*'rmsm'/.test(gate2),
+        'applyRole() must now admit rmsm to the listener/openModal path so a ' +
+        'mentioned violation can be opened; RM/SM reaches a report ONLY via chat');
+    assert(/tabVisible\s*=/.test(gate2),
+        'applyRole() must split the tab (tabVisible, owner-only) from the ' +
+        'listener/openModal path (allowed) so RM/SM opens a chip but sees no tab');
+    assert(/navItem\.style\.display\s*=\s*tabVisible/.test(gate2),
+        'the nav item must show only when tabVisible (owner), never when merely ' +
+        'allowed (rmsm) — RM/SM must not gain a violations tab');
 }
 
 console.log('  ✓ violation → Area Manager handoff');
