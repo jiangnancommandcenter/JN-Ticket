@@ -29,9 +29,13 @@ const sandbox = { console, window: {} };
 vm.createContext(sandbox);
 vm.runInContext(blockSrc, sandbox);
 
-const { ASSIGNABLE_ROLES, currentUserRoleLabel, roleHintHtml, clampRoleSelection } =
+const { ASSIGNABLE_ROLES, currentUserRoleLabel, storedRole, roleDisplayName, roleBadgeClass,
+    roleIsAssignable, isApprovalQueueRole, roleHintHtml, clampRoleSelection } =
     sandbox.window.__setRoleInternals;
 assert(ASSIGNABLE_ROLES, 'the role helpers were not exposed on window.__setRoleInternals');
+assert(storedRole && roleDisplayName && roleBadgeClass && roleIsAssignable,
+    'storedRole/roleDisplayName/roleBadgeClass/roleIsAssignable must be exposed on window.__setRoleInternals');
+assert(isApprovalQueueRole, 'isApprovalQueueRole must be exposed on window.__setRoleInternals');
 
 /** Strip comments so prose that NAMES an identifier is not mistaken for code. */
 const stripComments = (s) => s
@@ -64,6 +68,53 @@ assert.strictEqual(currentUserRoleLabel({ role: '  Owner ' }), 'owner', 'padded 
     });
 assert.strictEqual(currentUserRoleLabel({}), 'owner', 'a user doc with no role must default to owner');
 assert.strictEqual(currentUserRoleLabel(null), 'owner', 'a null user must default to owner');
+
+// 3b. ⚠️ DISPLAY vs ASSIGNABLE — the bug this whole section now guards.
+//     A real superadmin stored in `users` is NOT in ASSIGNABLE_ROLES, so
+//     currentUserRoleLabel() clamps it to 'owner'. That is correct for the
+//     WRITE path (a dropdown must never hand out 'superadmin') but WRONG for
+//     DISPLAY: it made the User Approvals row show a superadmin as "Area
+//     Manager". storedRole()/roleDisplayName()/roleBadgeClass() read the TRUE
+//     stored role, so the row shows "Superadmin" — while currentUserRoleLabel()
+//     keeps clamping for writes. The two must stay deliberately different.
+assert.strictEqual(storedRole({ role: 'superadmin' }), 'superadmin',
+    'storedRole() must return the TRUE role, unclamped — a superadmin is a superadmin');
+assert.strictEqual(storedRole({ role: 'HR' }), 'hr', 'storedRole() still normalises case');
+assert.strictEqual(storedRole({ role: '  Owner ' }), 'owner', 'storedRole() still trims');
+assert.strictEqual(storedRole({}), 'owner', 'a missing role still reads as the owner default');
+assert.strictEqual(storedRole(null), 'owner', 'a null user still reads as the owner default');
+
+// The DISPLAY label must name the true role.
+assert.strictEqual(roleDisplayName({ role: 'superadmin' }), 'Superadmin',
+    'a superadmin must DISPLAY as "Superadmin", not "Area Manager" — the reported bug');
+assert.strictEqual(roleDisplayName({ role: 'operator' }), 'Operator',
+    'an operator must display as "Operator", not silently "Area Manager"');
+assert.strictEqual(roleDisplayName({ role: 'hr' }), 'HR', 'hr still displays as HR');
+assert.strictEqual(roleDisplayName({ role: 'rmsm' }), 'RM/SM', 'rmsm still displays as RM/SM');
+assert.strictEqual(roleDisplayName({ role: 'owner' }), 'Area Manager', 'owner still displays as Area Manager');
+assert.strictEqual(roleDisplayName({ role: 'nonsense' }), 'Area Manager',
+    'an unknown role still falls back to the safe "Area Manager" display');
+
+// The BADGE CLASS must match the true role so the colour is right too.
+// `.role-badge.superadmin` (amber) and `.role-badge.owner` (violet) already
+// exist in style.css/theme.css; rmsm intentionally shares the owner violet.
+assert.strictEqual(roleBadgeClass({ role: 'superadmin' }), 'superadmin',
+    'a superadmin badge must use the amber .role-badge.superadmin class, not the violet owner one');
+assert.strictEqual(roleBadgeClass({ role: 'hr' }), 'hr', 'an HR badge keeps the teal hr class');
+assert.strictEqual(roleBadgeClass({ role: 'owner' }), 'owner', 'an owner badge keeps the violet owner class');
+assert.strictEqual(roleBadgeClass({ role: 'rmsm' }), 'owner', 'RM/SM shares the owner violet badge class');
+assert.strictEqual(roleBadgeClass({ role: 'nonsense' }), 'owner', 'an unknown badge keeps the owner class');
+
+// Only an assignable role may be changed from the dropdown. A superadmin /
+// operator is LOCKED (read-only badge), which is what protects them from being
+// demoted by an Approve/Save on this screen.
+assert.strictEqual(roleIsAssignable({ role: 'owner' }), true, 'owner is assignable');
+assert.strictEqual(roleIsAssignable({ role: 'hr' }), true, 'hr is assignable');
+assert.strictEqual(roleIsAssignable({ role: 'rmsm' }), true, 'rmsm is assignable');
+assert.strictEqual(roleIsAssignable({ role: 'superadmin' }), false,
+    'a superadmin must be LOCKED — the dropdown must not offer to re-role them');
+assert.strictEqual(roleIsAssignable({ role: 'operator' }), false,
+    'an operator must be LOCKED for the same reason');
 
 // 4. The hint text must describe the REAL consequence of each role, so the
 //    superadmin is not surprised by chat appearing/disappearing.
@@ -285,3 +336,102 @@ assert(roleSelectMatch, 'the role <select> could not be found in script.js');
 
 console.log('✅ Set Role tests passed (owner + hr + rmsm; unknown/privileged roles clamped; ' +
     'Area Manager is a label-only rename; +Ticket is gated, ship-hidden and really hides).');
+
+// ---------------------------------------------------------------------------
+// 4b. ⚠️ THE WRITE PATH MUST NEVER DEMOTE A LOCKED ROLE.
+//
+//     The reported bug had a silent, worse half: because a superadmin clamped
+//     to 'owner' for display, the role dropdown pre-selected "Area Manager",
+//     and approveUser()/updateUserPermissions() wrote `role: detail.role`
+//     unconditionally. Approving (or saving) a still-pending superadmin would
+//     therefore OVERWRITE role:'superadmin' with 'owner' — a real privilege
+//     loss, not just a label. These assertions pin all three guards that make
+//     that impossible. They read `script.js` as text because the write
+//     functions live outside the sandbox block above (they touch the DOM +
+//     Firestore).
+// ---------------------------------------------------------------------------
+
+// (a) A locked role renders NO <select>, and getUserDetailData() must read that
+//     as "leave the role alone" (null) — NOT the clamped 'owner'.
+assert(
+    /const roleEl = document\.getElementById\('roleSelect-' \+ safeEmail\);\s*\n\s*const role = roleEl \? window\.__setRoleInternals\.clampRoleSelection\(roleEl\.value\) : null;/.test(src),
+    'getUserDetailData() must return role:null when the locked role renders no <select>, so a superadmin ' +
+    'is never read back as the clamped "owner"'
+);
+
+// (b) A locked role must render a read-only badge, NOT a dropdown that could be
+//     changed and saved.
+assert(
+    /roleIsAssignable\(user\) \? `[\s\S]*?<select id="roleSelect-[\s\S]*?` : `[\s\S]*?role-locked/.test(src),
+    'a non-assignable role (superadmin/operator) must render the read-only role-locked badge, not the ' +
+    'editable <select> — otherwise the superadmin could re-role (and demote) themselves from this screen'
+);
+
+// (c) Both write sites must ADD `role` only when it is present (an assignable
+//     account), so a locked role is preserved verbatim. The old unconditional
+//     `role: detail.role,` must be gone from both.
+assert(
+    /if \(detail\.role\) update\.role = detail\.role;/.test(src),
+    'the approve/save write must add `role` ONLY for an assignable account (if (detail.role) update.role ' +
+    '= detail.role), so a locked superadmin/operator role is never overwritten'
+);
+assert(
+    (src.match(/if \(detail\.role\) update\.role = detail\.role;/g) || []).length === 2,
+    'BOTH approveUser() and updateUserPermissions() must guard the role write — one missing guard still ' +
+    'demotes a superadmin on that path'
+);
+assert(
+    !/role: detail\.role,/.test(src),
+    'the old unconditional `role: detail.role,` must be gone — that literal is what demoted a superadmin to ' +
+    'Area Manager the moment they were approved or saved'
+);
+
+console.log('✅ Locked-role write-guard tests passed (superadmin displays as Superadmin and can never be ' +
+    'demoted by an Approve/Save on this screen).');
+
+// ---------------------------------------------------------------------------
+// 5. THE APPROVAL QUEUE MUST EXCLUDE OUT-OF-BAND ROLES.
+//
+//     The reported bug, at its root: a self-registered account is created
+//     role:'owner' + status:'pending'; the superadmin then re-roled it to
+//     'superadmin' directly in Firestore. loadSuperadminUsers() filtered ONLY
+//     on status, so the still-pending superadmin kept showing up in the User
+//     Approvals list. The rule is now explicit: a superadmin (the approver) and
+//     an operator (made directly in Firestore, per docs/reset.html) are NEVER
+//     approval candidates. isApprovalQueueRole() is the single source of that.
+// ---------------------------------------------------------------------------
+
+// (a) The predicate itself: out-of-band roles are excluded, everything else stays.
+assert.strictEqual(isApprovalQueueRole({ role: 'superadmin' }), false,
+    'a superadmin must NOT be an approval-queue candidate — they are the approver, not an approver\'s subject');
+assert.strictEqual(isApprovalQueueRole({ role: 'operator' }), false,
+    'an operator must NOT be an approval-queue candidate — created directly in Firestore');
+assert.strictEqual(isApprovalQueueRole({ role: 'SUPERADMIN' }), false,
+    'the exclusion is case-insensitive, like every other role check in the app');
+['owner', 'hr', 'rmsm'].forEach((role) => {
+    assert.strictEqual(isApprovalQueueRole({ role: role }), true,
+        `${role} IS an approval-queue candidate — it is one of the three assignable roles`);
+});
+assert.strictEqual(isApprovalQueueRole({}), true,
+    'a role-less account still defaults to owner and stays an approval candidate');
+assert.strictEqual(isApprovalQueueRole({ role: 'viewer' }), true,
+    'only superadmin/operator are out-of-band; an unknown role is not silently hidden from the queue');
+
+// (b) loadSuperadminUsers() MUST actually apply the filter — and it must apply
+//     it AFTER the status if/else, so the "empty → show all" fallback (which
+//     re-derives from snapshot.docs) cannot smuggle a superadmin back in.
+assert(
+    /users = users\.filter\(isApprovalQueueRole\);/.test(src),
+    'loadSuperadminUsers() must filter the queue through isApprovalQueueRole(), or a re-roled superadmin ' +
+    'lingers in the list'
+);
+const queueFilterAt = src.indexOf('users = users.filter(isApprovalQueueRole);');
+const fallbackAt = src.indexOf("users = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })).filter(user => {");
+assert(
+    queueFilterAt > fallbackAt && fallbackAt > -1,
+    'the isApprovalQueueRole() filter must run AFTER the "empty → show all" fallback re-derives from ' +
+    'snapshot.docs, otherwise a superadmin is pulled straight back into the list through the fallback'
+);
+
+console.log('✅ Approval-queue role filter tests passed (superadmin + operator are excluded from the queue; ' +
+    'owner/hr/rmsm remain; the filter runs after the fallback).');

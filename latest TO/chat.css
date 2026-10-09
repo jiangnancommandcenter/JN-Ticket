@@ -454,9 +454,8 @@ body.chat-ticket-open .modal-overlay {
 
 /* ---- Thread header: colour-coded ROLE pill (superadmin glance cue) ----
    Same hues as the avatar fills so one colour = one role everywhere:
-   violet = Area Manager (owner) AND RM/SM (rmsm, which mirrors the
-   manager), green = HR, blue = superadmin. Kept small/subtle — it is a
-   cue, not a banner. */
+   violet = Area Manager (owner), amber = RM/SM (rmsm), green = HR,
+   blue = superadmin. Kept small/subtle — it is a cue, not a banner. */
 .chat-role-pill {
     display: inline-flex;
     align-items: center;
@@ -475,11 +474,12 @@ body.chat-ticket-open .modal-overlay {
     background: rgba(124, 58, 237, 0.10);
     border-color: rgba(124, 58, 237, 0.32);
 }
-/* RM/SM mirrors the Area Manager — same violet, so one colour = one role. */
+/* RM/SM has its OWN colour (amber) so it reads differently from the Area
+   Manager's violet — one colour = one role, and the two are now distinct. */
 .chat-role-pill--rmsm {
-    color: #7c3aed;
-    background: rgba(124, 58, 237, 0.10);
-    border-color: rgba(124, 58, 237, 0.32);
+    color: #b45309;
+    background: rgba(245, 158, 11, 0.12);
+    border-color: rgba(245, 158, 11, 0.35);
 }
 .chat-role-pill--hr {
     color: #15803d;
@@ -620,11 +620,11 @@ body.chat-ticket-open .modal-overlay {
     align-items: center;
     justify-content: center;
     flex: 0 0 auto;
-    width: 22px;
-    height: 22px;
-    min-width: 22px;
+    width: 28px;
+    height: 28px;
+    min-width: 28px;
     border-radius: 50%;
-    font-size: 0.62rem;
+    font-size: 0.72rem;
     font-weight: 700;
     line-height: 1;
     letter-spacing: 0;
@@ -644,23 +644,9 @@ body.chat-ticket-open .modal-overlay {
    like an unrecognised one — so it gets the same violet the .role-badge.owner
    uses elsewhere in the app, keeping one colour for one role. */
 .chat-avatar--owner      { background: var(--chat-role-area-manager, #8B5CF6); }
-/* RM/SM (stored role 'rmsm') mirrors the Area Manager — same violet. */
-.chat-avatar--rmsm       { background: var(--chat-role-area-manager, #8B5CF6); }
-
-/* Per-message role chip: reuses the .chat-role-pill palette from the thread
-   header (same hues, one colour = one role everywhere), sized down for the
-   compact sender line so it reads at a glance without competing with the
-   name. Rendered by renderSenderIdentity(); blank when the role is unknown
-   (pre-feature history), never guessed.
-   NOTE: the old "no visible badge" decision (avatar colour only) was
-   reversed at the owner's request — test/chat-access.test.js pins the chip
-   so it cannot silently vanish again. */
-.chat-msg-meta .chat-role-pill {
-    font-size: 0.6rem;
-    padding: 0 6px;
-    line-height: 1.6;
-    align-self: center;
-}
+/* RM/SM (stored role 'rmsm') has its OWN colour (amber) so it is told apart
+   from the Area Manager's violet at a glance. */
+.chat-avatar--rmsm       { background: var(--chat-role-rmsm, #F59E0B); }
 
 /* Optional job title, muted so it never competes with the name. */
 .chat-msg-title {
@@ -1401,8 +1387,8 @@ body.chat-ticket-open .modal-overlay {
 }
 
 .chat-msg-bubble {
-    padding: 10px 14px;
-    border-radius: 14px;
+    padding: 10px 15px;
+    border-radius: 18px;
     font-size: 0.92rem;
     line-height: 1.45;
     /* Long unbroken words/URLs wrap instead of stretching the card. */
@@ -1432,10 +1418,24 @@ body.chat-ticket-open .modal-overlay {
 .chat-msg-mine .chat-msg-content { align-items: flex-end; }
 
 .chat-msg-mine .chat-msg-bubble {
-    background: var(--color-primary);
-    border-color: var(--color-primary);
-    color: #1E3A1B;
+    /* Messenger look: outgoing bubbles are BLUE with white text. The colour is
+       a dedicated theme-stable variable (--chat-bubble-out, declared in BOTH
+       style.css and theme.css), NOT --chat-accent-blue — that one lightens to
+       #7CB8FF in dark mode, which white text could not sit on. White on the
+       #1A6FD4 bubble is 4.6:1 in both themes. */
+    background: var(--chat-bubble-out, #1A6FD4);
+    border-color: var(--chat-bubble-out, #1A6FD4);
+    color: #fff;
     border-bottom-right-radius: 4px;
+}
+
+/* On my own BLUE bubble a blue @mention would vanish (blue-on-blue). Flip just
+   the outgoing mention to white + underline so a call-out still reads. The base
+   .chat-mention stays blue and themed — this only overrides the blue side, at
+   higher specificity, so the pinned mention-colour test is untouched. */
+.chat-msg-mine .chat-mention {
+    color: #fff;
+    text-decoration: underline;
 }
 
 /* Other people's messages: neutral card, pushed to the left */
@@ -1609,12 +1609,13 @@ body.chat-ticket-open .modal-overlay {
     flex: 1 1 auto;
     min-height: 44px;
     max-height: 140px;
-    padding: 11px 14px;
+    padding: 11px 18px;
 
     background: var(--bg-input);
     color: var(--text-primary);
     border: 1px solid var(--border-color);
-    border-radius: var(--radius-md);
+    /* Pill, Messenger-style */
+    border-radius: 22px;
 
     font-family: inherit;
     font-size: 0.92rem;
@@ -1630,7 +1631,25 @@ body.chat-ticket-open .modal-overlay {
 
 .chat-input::placeholder { color: var(--text-muted); }
 
-.chat-composer .btn { flex: 0 0 auto; }
+/* Round, icon-only send button (Messenger style). Tied to the outgoing-bubble
+   blue so the composer reads as one system; the white icon on #1A6FD4 is AA in
+   both themes. */
+.chat-composer .btn {
+    flex: 0 0 auto;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.chat-composer .btn.btn-primary {
+    background: var(--chat-bubble-out, #1A6FD4);
+    border-color: var(--chat-bubble-out, #1A6FD4);
+    color: #fff;
+}
 
 .chat-composer .btn:disabled {
     opacity: 0.6;

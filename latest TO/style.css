@@ -27,12 +27,19 @@
     --chat-accent-blue: #1A6FD4;      /* 4.6:1 on white — AA for text */
     --chat-accent-blue-soft: rgba(74, 158, 255, 0.16);
 
+    /* Outgoing chat bubble (Messenger look): a theme-STABLE blue with white
+       text. Deliberately NOT --chat-accent-blue, which lightens to #7CB8FF in
+       dark mode — white text on that would fail contrast. White on #1A6FD4 is
+       4.6:1 in both themes, so the bubble reads the same everywhere. */
+    --chat-bubble-out: #1A6FD4;
+
     /* Chat role identity. Deliberately fixed per role (NOT --color-primary)
        so HR, superadmin and the Area Manager can never look alike in the
        thread. */
     --chat-role-superadmin: #4A9EFF;
     --chat-role-hr: #16A34A;
     --chat-role-area-manager: #8B5CF6;
+    --chat-role-rmsm: #F59E0B;
     --chat-avatar-unknown: #64748B;
 
     /* Sidebar: plain white */
@@ -4868,6 +4875,16 @@ branch name, let alone pick one. */
 }
 
 .role-select-hint i { margin-right: 4px; color: var(--color-primary); }
+
+/* A non-assignable role (superadmin/operator) shows a read-only badge instead
+   of the dropdown. Line it up with the <select> it stands in for so the detail
+   panel does not jump when a locked row is expanded. */
+.role-locked {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+}
 
 /* The owner's inline <style> declares "#ownerMainContent { no custom
    background }" but ships the rule EMPTY, so it never overrode this one —

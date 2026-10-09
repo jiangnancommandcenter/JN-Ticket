@@ -841,8 +841,8 @@
                     '<textarea id="chatInput" class="chat-input" rows="1" maxlength="' + MAX_MESSAGE_LENGTH +
                         '" placeholder="Type a message&hellip; @ to mention someone, @ticket or @violation to link one" aria-label="Message" ' +
                         'aria-autocomplete="list" aria-controls="chatMentionMenu"></textarea>' +
-                    '<button type="button" class="btn btn-primary" id="chatSendBtn">' +
-                        '<i class="fas fa-paper-plane" aria-hidden="true"></i> Send' +
+                    '<button type="button" class="btn btn-primary" id="chatSendBtn" aria-label="Send message">' +
+                        '<i class="fas fa-paper-plane" aria-hidden="true"></i>' +
                     '</button>' +
                 '</div>' +
                 '</div>' +   // .chat-thread
@@ -3359,6 +3359,22 @@
     }
 
     /**
+     * Short initials for a role, shown INSIDE the message avatar so the role is
+     * readable at a glance without a word chip crowding the name line:
+     *   superadmin -> SA, hr -> HR, owner (Area Manager) -> AM, rmsm (RM/SM) -> RM
+     * An unknown/legacy role returns '' so the caller can fall back to the
+     * person's name initials (never a blank circle).
+     */
+    function roleInitials(role) {
+        var r = normalizeRole(role);
+        if (r === 'superadmin') return 'SA';
+        if (r === 'hr') return 'HR';
+        if (r === 'owner') return 'AM';
+        if (r === 'rmsm') return 'RM';
+        return '';
+    }
+
+    /**
      * The published profile for a person, merged over what the message
      * itself says. A message is authoritative for the ROLE (it was the
      * role at send time); the profile only supplies a nicer name/title.
@@ -3381,38 +3397,36 @@
         };
     }
 
-    /** The avatar only — rendered in its own column beside the message. */
+    /**
+     * The message avatar, in its own column beside the bubble. The circle shows
+     * the sender's ROLE initials (SA / HR / AM / RM) in the role colour, so the
+     * role reads at a glance without a word chip next to the name. A role-less
+     * (legacy) message falls back to the person's name initials so the circle is
+     * never blank. The full role label stays in the hover `title`.
+     */
     function renderSenderAvatar(msg) {
         var p = profileFor(msg);
         var label = roleLabel(p.role);
         var titleAttr = p.title
             ? escapeHTML(p.title + (label ? ' · ' + label : ''))
             : escapeHTML(label || p.name);
+        var glyph = roleInitials(p.role) || initialsFor(p.name);
         return '<span class="chat-avatar chat-avatar--' +
             escapeHTML(normalizeRole(p.role) || 'unknown') +
             '" aria-hidden="true" title="' + titleAttr + '">' +
-            escapeHTML(initialsFor(p.name)) + '</span>';
+            escapeHTML(glyph) + '</span>';
     }
 
     /**
-     * The role chip + name (+ optional job title) shown in the compact header
-     * above the bubble. Order is chip FIRST, then the name: `[HR] Maria` —
-     * the eye lands on the role before reading who said it. The AVATAR is
-     * deliberately not here — it lives in its own column beside the message,
-     * so the header collapses to one short line.
-     *
-     * The role chip reads from the SAME profileFor() source as the avatar
-     * (message's senderRole first, published profile as fallback), so a
-     * pre-feature message with no senderRole renders no chip rather than a
-     * wrong one — and everything works on existing history with no backfill.
+     * The name (+ optional job title) shown in the compact header above the
+     * bubble. The ROLE is not here — it is carried by the avatar's initials in
+     * renderSenderAvatar(). The AVATAR is deliberately not here either: it lives
+     * in its own column beside the message, so the header collapses to one
+     * short line.
      */
     function renderSenderIdentity(msg) {
         var p = profileFor(msg);
-        var role = normalizeRole(p.role);
-        var label = roleLabel(p.role);
-        return (label ? '<span class="chat-role-pill chat-role-pill--' + escapeHTML(role) +
-                '" title="' + escapeHTML(label) + '">' + escapeHTML(label) + '</span>' : '') +
-            '<span class="chat-msg-name">' + escapeHTML(p.name) + '</span>' +
+        return '<span class="chat-msg-name">' + escapeHTML(p.name) + '</span>' +
             (p.title ? '<span class="chat-msg-title">' + escapeHTML(p.title) + '</span>' : '');
     }
 

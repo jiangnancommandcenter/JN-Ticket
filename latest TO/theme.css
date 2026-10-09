@@ -32,11 +32,17 @@ html[data-theme="dark"] {
     --chat-accent-blue: #7CB8FF;
     --chat-accent-blue-soft: rgba(74, 158, 255, 0.20);
 
+    /* Outgoing chat bubble stays a saturated blue in dark mode too (white text
+       on it is 4.6:1); it must NOT follow --chat-accent-blue's lighter #7CB8FF,
+       which white text could not sit on. */
+    --chat-bubble-out: #1A6FD4;
+
     /* Role identity in dark mode: the avatar fills stay saturated (white
        initials must stay legible); only the badge text/soft tints step up. */
     --chat-role-superadmin: #7CB8FF;
     --chat-role-hr: #4ADE80;
     --chat-role-area-manager: #A78BFA;
+    --chat-role-rmsm: #FBBF24;
     --chat-avatar-unknown: #7C8DA5;
 
     --sidebar-bg: #0D1626;
@@ -223,7 +229,7 @@ html[data-theme="dark"] .chat-role-pill--owner {
     color: #a78bfa; background: rgba(124, 58, 237, 0.22); border-color: rgba(167, 139, 250, 0.45);
 }
 html[data-theme="dark"] .chat-role-pill--rmsm {
-    color: #a78bfa; background: rgba(124, 58, 237, 0.22); border-color: rgba(167, 139, 250, 0.45);
+    color: #fbbf24; background: rgba(245, 158, 11, 0.22); border-color: rgba(251, 191, 36, 0.45);
 }
 html[data-theme="dark"] .chat-role-pill--hr {
     color: #4ade80; background: rgba(22, 163, 74, 0.20); border-color: rgba(74, 222, 128, 0.45);

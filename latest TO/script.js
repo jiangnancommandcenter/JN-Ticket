@@ -1420,6 +1420,16 @@ async function loadSuperadminUsers() {
             }
         }
 
+        // ⚠️ A superadmin (the approver) and an operator (created directly in
+        // Firestore) are NEVER approval candidates, so they must not appear in
+        // this queue at any status or under any filter. This runs AFTER every
+        // branch above — including the "empty → show all" fallback, which
+        // re-derives from snapshot.docs — so a self-registered account that was
+        // later re-roled to superadmin in Firestore drops out of the list the
+        // moment its role says so, instead of lingering as a phantom "Area
+        // Manager" approval. See isApprovalQueueRole().
+        users = users.filter(isApprovalQueueRole);
+
         users.sort((a, b) => {
             const aKey = String((a.email || a.id || '')).toLowerCase();
             const bKey = String((b.email || b.id || '')).toLowerCase();
@@ -1444,7 +1454,7 @@ async function loadSuperadminUsers() {
                 <tr class="user-row" data-email="${escapeHTML(user.email || '')}" style="cursor:pointer;">
                     <td>${escapeHTML(user.email || user.id)}</td>
                     <td>${escapeHTML(user.name || '—')}</td>
-                    <td><span class="role-badge ${currentUserRoleLabel(user) === 'hr' ? 'hr' : 'owner'}">${roleDisplayName(user)}</span></td>
+                    <td><span class="role-badge ${roleBadgeClass(user)}">${roleDisplayName(user)}</span></td>
                     <td>${escapeHTML(branchText)}</td>
                     <td><span class="status-badge ${statusClass}">${escapeHTML(status[0].toUpperCase() + status.slice(1))}</span></td>
                     <td>
@@ -1489,12 +1499,19 @@ async function loadSuperadminUsers() {
                             <div class="form-group full-width">
                                 <label>Role</label>
                                 <div class="role-select-wrap">
+                                    ${roleIsAssignable(user) ? `
                                     <select id="roleSelect-${safeEmail}" class="role-select" data-role-select="${escapeHTML(user.email || '')}">
-                                        <option value="owner" ${currentUserRoleLabel(user) === 'owner' ? 'selected' : ''}>Area Manager</option>
-                                        <option value="hr" ${currentUserRoleLabel(user) === 'hr' ? 'selected' : ''}>HR</option>
-                                        <option value="rmsm" ${currentUserRoleLabel(user) === 'rmsm' ? 'selected' : ''}>RM/SM</option>
+                                        <option value="owner" ${storedRole(user) === 'owner' ? 'selected' : ''}>Area Manager</option>
+                                        <option value="hr" ${storedRole(user) === 'hr' ? 'selected' : ''}>HR</option>
+                                        <option value="rmsm" ${storedRole(user) === 'rmsm' ? 'selected' : ''}>RM/SM</option>
                                     </select>
                                     <p class="role-select-hint" id="roleHint-${safeEmail}">${roleHintHtml(user)}</p>
+                                    ` : `
+                                    <div class="role-locked" id="roleLocked-${safeEmail}">
+                                        <span class="role-badge ${roleBadgeClass(user)}">${roleDisplayName(user)}</span>
+                                        <p class="role-select-hint">This role is managed outside this screen and cannot be changed here.</p>
+                                    </div>
+                                    `}
                                 </div>
                             </div>
                             <div class="form-group full-width">
@@ -1594,13 +1611,71 @@ function currentUserRoleLabel(user) {
     return ASSIGNABLE_ROLES.indexOf(role) > -1 ? role : 'owner';
 }
 
-/** Human-readable label for a role, used in the UI (badge, dropdown, hints). */
+/**
+ * The account's role EXACTLY as stored — normalised (trim + lowercase) but NOT
+ * clamped to ASSIGNABLE_ROLES.
+ *
+ * ⚠️ WHY THIS IS SEPARATE FROM currentUserRoleLabel(). That one CLAMPS, and it
+ * is what the WRITE path must use so a hand-edited dropdown can never write a
+ * privileged role. But it is the wrong thing to DISPLAY: a real 'superadmin' is
+ * not assignable, so it clamps to 'owner' and the User Approvals row showed a
+ * superadmin as "Area Manager". This reads the truth — for the badge, the card,
+ * and the "can this role be edited here?" check — so a superadmin shows as a
+ * superadmin and is never silently demoted by an Approve/Save.
+ */
+function storedRole(user) {
+    return String((user && user.role) || 'owner').trim().toLowerCase();
+}
+
+/**
+ * Human-readable label for a role, used in the UI (badge, card, hints).
+ *
+ * ⚠️ Built on storedRole(), NOT currentUserRoleLabel(): the clamp would render a
+ * real 'superadmin' as "Area Manager". Reading the stored role means the row
+ * shows what the account actually is. Unknown/legacy values still fall back to
+ * the safe "Area Manager" default.
+ */
 function roleDisplayName(user) {
-    const role = currentUserRoleLabel(user);
+    const role = storedRole(user);
     if (role === 'hr') return 'HR';
     if (role === 'rmsm') return 'RM/SM';
+    if (role === 'superadmin') return 'Superadmin';
+    if (role === 'operator') return 'Operator';
     // 'owner' (Area Manager) and any unknown fallback are all shown as Area Manager.
     return 'Area Manager';
+}
+
+/**
+ * CSS class for the role badge, so the colour matches roleDisplayName():
+ * superadmin (amber) and HR (teal) get their own class; RM/SM and unknown roles
+ * keep the Area Manager violet. `.role-badge.superadmin` and its dark-mode
+ * override already exist (style.css / theme.css).
+ */
+function roleBadgeClass(user) {
+    const role = storedRole(user);
+    if (role === 'hr' || role === 'superadmin') return role;
+    return 'owner';
+}
+
+/** True when the account's stored role is one the dropdown may change here. */
+function roleIsAssignable(user) {
+    return ASSIGNABLE_ROLES.indexOf(storedRole(user)) > -1;
+}
+
+/**
+ * True when the account belongs in the User Approvals QUEUE at all.
+ *
+ * ⚠️ A superadmin is the APPROVER, and an operator is created directly in
+ * Firestore (see docs/reset.html) — neither is ever approved through this
+ * screen, so neither should ever be listed here. This is what stops a
+ * self-registered account (created role:'owner' + status:'pending') that was
+ * later re-roled to superadmin from lingering in the queue as a phantom
+ * "Area Manager" approval. Everything else (owner/hr/rmsm, and a role-less
+ * account that still defaults to owner) remains an approval candidate.
+ */
+function isApprovalQueueRole(user) {
+    const role = storedRole(user);
+    return role !== 'superadmin' && role !== 'operator';
 }
 
 /** One-line explanation of what the currently selected role means. */
@@ -1620,6 +1695,11 @@ function roleHintHtml(user) {
 window.__setRoleInternals = {
     ASSIGNABLE_ROLES: ASSIGNABLE_ROLES,
     currentUserRoleLabel: currentUserRoleLabel,
+    storedRole: storedRole,
+    roleDisplayName: roleDisplayName,
+    roleBadgeClass: roleBadgeClass,
+    roleIsAssignable: roleIsAssignable,
+    isApprovalQueueRole: isApprovalQueueRole,
     roleHintHtml: roleHintHtml,
     clampRoleSelection: function (value) {
         const selected = String(value || 'owner').trim().toLowerCase();
@@ -1664,8 +1744,14 @@ function getUserDetailData(email) {
     // Read the selected role from the dropdown and clamp it through the
     // same allowlist, so a tampered DOM value can never write an arbitrary
     // role (e.g. 'superadmin') into a user document.
+    //
+    // ⚠️ A LOCKED role (superadmin/operator) renders NO <select> — only a
+    // read-only badge — so a missing element means "leave the role alone", NOT
+    // "owner". Returning null here is what stops approveUser()/
+    // updateUserPermissions() from silently DEMOTING a superadmin to Area
+    // Manager by writing role:'owner' over it.
     const roleEl = document.getElementById('roleSelect-' + safeEmail);
-    const role = window.__setRoleInternals.clampRoleSelection(roleEl && roleEl.value);
+    const role = roleEl ? window.__setRoleInternals.clampRoleSelection(roleEl.value) : null;
 
     return {
         role: role,
@@ -1727,17 +1813,21 @@ async function approveUser(email) {
     }
 
     try {
-        await db.collection('users').doc(lower).update({
-            // The role comes from the "Set Role" dropdown (Owner / HR).
-            // HR members join the chat; owners do not.
-            role: detail.role,
+        // ⚠️ A locked role (superadmin/operator) must NOT be overwritten.
+        // getUserDetailData() returns role:null for those, so the `role` key is
+        // omitted entirely and the stored role is preserved. Writing the clamped
+        // 'owner' here is exactly what used to silently demote a superadmin to
+        // Area Manager the moment anyone approved them.
+        const update = {
             branches: detail.branches,
             permissions: detail.permissions,
             status: 'approved',
             approvedAt: firebase.firestore.FieldValue.serverTimestamp(),
             updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-        });
-        showToast('User approved as ' + (detail.role === 'hr' ? 'HR' : 'Owner') + '.', 'success');
+        };
+        if (detail.role) update.role = detail.role;
+        await db.collection('users').doc(lower).update(update);
+        showToast('User approved as ' + (detail.role === 'hr' ? 'HR' : (detail.role === 'rmsm' ? 'RM/SM' : 'Owner')) + '.', 'success');
         refreshChatDirectory();
         await loadSuperadminUsers();
     } catch (error) {
@@ -1961,15 +2051,17 @@ async function updateUserPermissions(email) {
     }
 
     try {
-        await db.collection('users').doc(lower).update({
-            // Saving an existing user can also CHANGE their role, so this
-            // writes the dropdown value rather than forcing 'owner'.
-            role: detail.role,
+        // ⚠️ Same locked-role protection as approveUser(): omit `role` for a
+        // superadmin/operator so saving their branches/permissions never demotes
+        // them. An assignable account writes the dropdown value as before.
+        const update = {
             branches: detail.branches,
             permissions: detail.permissions,
             updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-        });
-        showToast('Saved as ' + (detail.role === 'hr' ? 'HR' : 'Owner') + '.', 'success');
+        };
+        if (detail.role) update.role = detail.role;
+        await db.collection('users').doc(lower).update(update);
+        showToast('Saved as ' + (detail.role === 'hr' ? 'HR' : (detail.role === 'rmsm' ? 'RM/SM' : 'Owner')) + '.', 'success');
         refreshChatDirectory();
         await loadSuperadminUsers();
     } catch (error) {

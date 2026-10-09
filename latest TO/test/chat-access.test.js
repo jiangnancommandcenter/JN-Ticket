@@ -2068,10 +2068,11 @@ assert(directoryCallback, 'the people directory listener should be started on mo
 seedExistingConversation(Live.dmRoomIdFor('hr@test.com', 'super@test.com'));
 Live.selectConversation(Live.dmRoomIdFor('hr@test.com', 'super@test.com'));
 
-// 43. The role IS spelled out on every message: a small role chip BEFORE
-//     the name (`[HR] Maria`), reusing the .chat-role-pill palette (one
-//     colour = one role). The avatar colour stays as the second cue; the
-//     chip is the readable one.
+// 43. The role is shown as INITIALS inside the message avatar (SA / HR / AM /
+//     RM), colour-coded — there is NO word chip next to the name any more. The
+//     avatar reads the same profileFor() source (senderRole first, profile as
+//     fallback), so pre-feature history with no senderRole falls back to name
+//     initials rather than a wrong role.
 pushMessages([
     { id: 'p1', text: 'from hr', senderEmail: 'someone@else.com', senderName: 'someone',
       senderRole: 'hr', sentAt: T.now },
@@ -2082,13 +2083,24 @@ assert(
     /chat-avatar--hr/.test(receiptLog.innerHTML) && /chat-avatar--superadmin/.test(receiptLog.innerHTML),
     'each sender must get a role-tinted avatar so HR and superadmin are still distinguishable'
 );
+// p2 (older) renders before p1, so slicing from a message's own id scopes it.
+const hrMsg = receiptLog.innerHTML.slice(receiptLog.innerHTML.indexOf('data-msg-id="p1"'));
+const superMsg = receiptLog.innerHTML.slice(receiptLog.innerHTML.indexOf('data-msg-id="p2"'));
 assert(
-    />HR<\/span><span class="chat-msg-name">/.test(receiptLog.innerHTML),
-    'the HR chip must come BEFORE the name ([HR] Maria), not after it'
+    /chat-avatar--hr"[^>]*>HR</.test(hrMsg),
+    'the HR avatar must show the role initials "HR" inside the circle'
 );
 assert(
-    />Superadmin<\/span><span class="chat-msg-name">/.test(receiptLog.innerHTML),
-    'the Superadmin chip must come BEFORE the name, not after it'
+    /chat-avatar--superadmin"[^>]*>SA</.test(superMsg),
+    'the Superadmin avatar must show the role initials "SA" inside the circle'
+);
+assert(
+    !/chat-role-pill/.test(receiptLog.innerHTML),
+    'the message must NOT carry a role word chip — the role lives in the avatar initials now'
+);
+assert(
+    /<span class="chat-msg-name">someone<\/span>/.test(hrMsg),
+    'the sender name must still render in the meta line'
 );
 
 // 44. An old message with NO senderRole must not crash and must fall back
