@@ -594,8 +594,73 @@ async function initDesktopNotifications() {
     }
 }
 
+// ===== PERMISSION REQUEST (from a user gesture only) =====
+//
+// Desktop notifications on the dashboards never fired: every `show...` call
+// is wrapped in `Notification.permission === 'granted'`, but the permission
+// was only ever requested on the public track page (submit-ticket.html),
+// where operators and superadmins do not go. The bell button wired below is
+// how staff finally opt in — requestPermission() runs INSIDE the click, so it
+// has the user activation browsers demand. Calling it on page load would be
+// auto-denied and PERMANENTLY lock the site.
+//
+// Returns the resulting permission ('granted' / 'denied' / 'default' /
+// 'unsupported'). Calling again after a decision is a cheap no-op.
+async function requestNotificationPermissionFromGesture() {
+    if (!('Notification' in window)) return 'unsupported';
+    if (Notification.permission !== 'default') return Notification.permission;
+    try {
+        return await Notification.requestPermission();
+    } catch (e) {
+        return Notification.permission;
+    }
+}
+
+function notificationPermissionState() {
+    if (!('Notification' in window)) return 'unsupported';
+    return Notification.permission;
+}
+
+/**
+ * Wire a bell button (`<button class="icon-btn">` with an <i> inside) to the
+ * permission request and keep its look in sync with the permission state.
+ * Null-guarded: calling it for a button the page does not have is safe.
+ */
+function bindNotificationBell(btn) {
+    if (!btn) return;
+    const paint = () => {
+        const perm = notificationPermissionState();
+        const granted = perm === 'granted';
+        const icon = btn.querySelector('i');
+        if (icon) icon.className = granted ? 'fas fa-bell' : 'fas fa-bell-slash';
+        if (granted) btn.classList.add('notif-on'); else btn.classList.remove('notif-on');
+        const label = perm === 'granted' ? 'Desktop notifications: ON'
+            : perm === 'denied' ? 'Desktop notifications blocked - allow them in your browser settings'
+            : 'Enable desktop notifications';
+        btn.title = label;
+        btn.setAttribute('aria-label', label);
+    };
+    btn.addEventListener('click', async () => {
+        const result = await requestNotificationPermissionFromGesture();
+        paint();
+        try {
+            if (result === 'granted') {
+                playNotificationSound();
+                showToast('Desktop notifications are on', 'success');
+            } else if (result === 'denied') {
+                showToast('Notifications are blocked - allow them in your browser settings.', 'error');
+            } else if (result === 'unsupported') {
+                showToast('This browser does not support desktop notifications.', 'error');
+            }
+        } catch (e) { /* bell feedback is best-effort */ }
+    });
+    paint();
+}
+
 // ===== EXPOSE GLOBALLY =====
 window.initDesktopNotifications = initDesktopNotifications;
+window.bindNotificationBell = bindNotificationBell;
+window.requestNotificationPermissionFromGesture = requestNotificationPermissionFromGesture;
 window.notifyNewTicket = notifyNewTicket;
 window.notifyTicketStatusChange = notifyTicketStatusChange;
 // ⚠️ EXPORTED FOR THE CHAT, AND THE EXPORT IS LOAD-BEARING.

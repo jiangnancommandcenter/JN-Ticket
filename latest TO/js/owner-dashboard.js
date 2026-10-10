@@ -30,6 +30,12 @@ const kpiMonthlyReports = $owner('totalMonthlyReports');
 const kpiAssignedReports = $owner('totalAssignedReports');
 const kpiActiveBranches = $owner('totalActiveBranches');
 const kpiAccessLevel = $owner('accessLevelValue');
+// New in the KPI overhaul: "Expiring Soon" (a live window closing within 24h)
+// and "Access Expired" (lapsed windows). Both are viewer-aware, so HR and a
+// superadmin correctly see 0 there - the same way their rows never show an
+// expiry badge.
+const kpiExpiringSoon = $owner('totalExpiringSoon');
+const kpiExpiredAccess = $owner('totalExpiredAccess');
 
 // Owner Tickets tab elements
 const ownerTicketSearch = $owner('ownerTicketSearch');
@@ -70,6 +76,17 @@ let ownerReopenTicketId = '';
 // when it has not), so a shared id would be correct today and silently start
 // writing to the wrong flow the first time both could render.
 let ownerFootageTicketId = '';
+// ⚠️ CLOSE MUST BE ABLE TO OUTRUN AN OPEN STILL IN FLIGHT.
+//
+// openOwnerReport() adds the `active` class only AFTER its Firestore read
+// resolves, so a click on × can land while that read is still travelling. The
+// close removes `active`, then the read resolves and puts it straight back —
+// the modal visibly survives the first click and only the SECOND × sticks
+// ("close twice to close").
+//
+// Every open captures the generation at CALL time; close (and any newer open)
+// bumps it. When the read finally resolves, a stale generation paints nothing.
+let ownerModalGen = 0;
 
 // One-shot flag: owner refresh state (saved tab/modal) is restored exactly once
 // per page load so a later auth callback (e.g. ID-token refresh) can never yank
@@ -473,14 +490,157 @@ function renderPermissionSummary() {
   ownerPermSummary.innerHTML = chips.length ? chips.join('') : '<span class="perm-chip">No extra permissions</span>';
 }
 
+/**
+ * Date accessor for a ticket's filing time. `submittedAt` is what the table
+ * rows sort on; `createdAt` is the fallback written by older documents.
+ * Returns null (never an Invalid Date) when nothing usable is stored.
+ */
+function ownerTicketDate(t) {
+  const raw = (t && t.submittedAt) || (t && t.createdAt) || null;
+  const d = raw && raw.toDate ? raw.toDate() : (raw ? new Date(raw) : null);
+  return d && !isNaN(d.getTime()) ? d : null;
+}
+
+/**
+ * The tickets this dashboard actually SHOWS - the approval gate and the
+ * branch scope from renderOwnerTickets() extracted into ONE helper, so the
+ * KPI tiles, the overview charts and the table can never disagree about what
+ * is in scope. `allTickets` may be the raw cache; normalisation happens here.
+ */
+function ownerScopedTickets(allTickets) {
+  const raw = Array.isArray(allTickets) ? allTickets : [];
+  const ownerResolvedOnly = activeUserRole === 'owner' || activeUserRole === 'hr' || activeUserRole === 'rmsm' || activeUserIsSuperAdmin;
+  const allowedBranches = activeUserIsSuperAdmin ? ownerAllBranches : ownerAssignedBranches;
+  return raw
+    .map((doc) => normalizeTicketReport(doc))
+    .filter((t) => (ownerResolvedOnly ? isApprovedTicket(t) : true))
+    .filter((t) => allowedBranches.includes(String(t.branch || t.branchName || '').trim()));
+}
+
 function renderKpiCards() {
   // Same helper the header badge uses, so the two can never disagree.
   const accessLabel = accessLevelLabel();
 
-  if (kpiMonthlyReports) kpiMonthlyReports.textContent = '0';
-  if (kpiAssignedReports) kpiAssignedReports.textContent = String(ownerAssignedBranches.length);
+  // REAL COUNTS. This tile row used to hardcode `textContent = '0'` for
+  // "Total Monthly Reports" and show the BRANCH count twice for "Total
+  // Assigned Reports" - two of the four numbers on the card were decorative.
+  // Everything now derives from the same scoped list the table renders, via
+  // the viewer-aware expiry helpers so the tiles and the badges agree.
+  const scoped = ownerScopedTickets(ownerAllTicketsCache);
+  const now = new Date();
+
+  const monthly = scoped.filter((t) => {
+    const d = ownerTicketDate(t);
+    return !!d && d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+  }).length;
+
+  const expiredCount = scoped.filter((t) => isOwnerTicketExpiredForViewer(t)).length;
+
+  // "Expiring Soon": a LIVE viewer window closing within the next 24 hours.
+  // ownerTicketExpiry() returns the deadline for an approved ticket with a
+  // stored window (null otherwise), and HR/superadmin get 0 here because the
+  // window is a requester condition that never applies to them.
+  const expiringSoon = scoped.filter((t) => {
+    if (isOwnerTicketExpiredForViewer(t)) return false;
+    const at = ownerTicketExpiry(t);
+    if (!at) return false;
+    const ms = at.getTime() - Date.now();
+    return ms > 0 && ms <= 24 * 60 * 60 * 1000;
+  }).length;
+
+  if (kpiMonthlyReports) kpiMonthlyReports.textContent = String(monthly);
+  if (kpiAssignedReports) kpiAssignedReports.textContent = String(scoped.length);
+  if (kpiExpiringSoon) kpiExpiringSoon.textContent = String(expiringSoon);
+  if (kpiExpiredAccess) kpiExpiredAccess.textContent = String(expiredCount);
   if (kpiActiveBranches) kpiActiveBranches.textContent = String(ownerAssignedBranches.length);
   if (kpiAccessLevel) kpiAccessLevel.textContent = accessLabel;
+
+  try { renderOwnerOverviewCharts(); } catch (e) { /* charts must never break the KPIs */ }
+}
+
+// ==============================================================
+//  OVERVIEW CHARTS (tickets-filed trend + status breakdown)
+//
+//  Same scoped list the table renders, same theme tokens as main.html.
+// ==============================================================
+let ownerChartInstances = [];
+function ownerChartToken(name, fallback) {
+  try {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name);
+    return (v && v.trim()) || fallback;
+  } catch (e) { return fallback; }
+}
+
+function ownerTicketMonthKey(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+}
+
+function renderOwnerOverviewCharts() {
+  const trendEl = document.getElementById('ownerTrendChart');
+  const statusEl = document.getElementById('ownerStatusChart');
+  if (!trendEl || !statusEl) return;
+  if (typeof window.Chart !== 'function') return;
+
+  const scoped = ownerScopedTickets(ownerAllTicketsCache);
+
+  const now = new Date();
+  const months = [];
+  for (let i = 11; i >= 0; i--) months.push(new Date(now.getFullYear(), now.getMonth() - i, 1));
+  const trendCounts = months.map((m) => {
+    const key = ownerTicketMonthKey(m);
+    return scoped.filter((t) => {
+      const d = ownerTicketDate(t);
+      return !!d && ownerTicketMonthKey(d) === key;
+    }).length;
+  });
+  const monthLabels = months.map((m) => m.toLocaleString('en-US', { month: 'short' }));
+  const trendPill = document.getElementById('ownerTrendPill');
+  if (trendPill) {
+    const total = trendCounts.reduce((x, y) => x + y, 0);
+    trendPill.textContent = total + (total === 1 ? ' ticket' : ' tickets');
+  }
+
+  const statusBuckets = { Resolved: 0, 'In Progress': 0, Pending: 0, 'For Revision': 0, Other: 0 };
+  scoped.forEach((t) => {
+    const s = String(t.status || 'Pending').trim();
+    if (Object.prototype.hasOwnProperty.call(statusBuckets, s)) statusBuckets[s] += 1;
+    else statusBuckets.Other += 1;
+  });
+  const statusLabels = Object.keys(statusBuckets);
+  const statusCounts = statusLabels.map((k) => statusBuckets[k]);
+  const statusPill = document.getElementById('ownerStatusPill');
+  if (statusPill) {
+    statusPill.textContent = scoped.length + (scoped.length === 1 ? ' ticket' : ' tickets');
+  }
+  ownerChartInstances.forEach((c) => { try { c.destroy(); } catch (e) { /* ignore */ } });
+  ownerChartInstances = [];
+
+  const reduceMotion = (typeof window.matchMedia === 'function')
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  const brand = ownerChartToken('--color-primary', '#72bf6a');
+  const brandBg = ownerChartToken('--color-primary-bg', 'rgba(114,191,106,0.15)');
+  const tick = ownerChartToken('--text-secondary', '#94A3B8');
+  const grid = ownerChartToken('--border-color', '#24334D');
+  const card = ownerChartToken('--bg-card', '#FFFFFF');
+
+  ownerChartInstances.push(new window.Chart(trendEl.getContext('2d'), {
+    type: 'line',
+    data: { labels: monthLabels, datasets: [{ label: 'Tickets filed', data: trendCounts, borderColor: brand, backgroundColor: brandBg, fill: true, tension: 0.3, pointRadius: 3, borderWidth: 2 }] },
+    options: { responsive: true, maintainAspectRatio: false, animation: reduceMotion ? false : undefined,
+      plugins: { legend: { display: false } },
+      scales: { x: { ticks: { color: tick }, grid: { display: false } },
+        y: { beginAtZero: true, ticks: { precision: 0, color: tick }, grid: { color: grid } } } }
+  }));
+
+  ownerChartInstances.push(new window.Chart(statusEl.getContext('2d'), {
+    type: 'doughnut',
+    data: { labels: statusLabels, datasets: [{ data: statusCounts,
+      backgroundColor: [ownerChartToken('--color-resolved', '#22c55e'), ownerChartToken('--color-progress', '#3b82f6'), ownerChartToken('--color-pending', '#f59e0b'), ownerChartToken('--color-danger', '#ef4444'), ownerChartToken('--text-muted', '#94a3b8')],
+      borderColor: card, borderWidth: 3, hoverOffset: 8 }] },
+    options: { responsive: true, maintainAspectRatio: false, animation: reduceMotion ? false : undefined, cutout: '62%',
+      plugins: { legend: { position: 'bottom', labels: { color: tick, boxWidth: 10, padding: 12 } } } }
+  }));
 }
 
 /**
@@ -776,6 +936,18 @@ function tickOwnerCountdowns() {
             lapsed = true;
             el.textContent = 'expired';
             el.classList.add('urgent');
+            // ⚠️ MARK THE LAPSED NODE AS HANDLED. The rebuild below ends in
+            // startOwnerCountdownTicker(), which runs its FIRST tick
+            // synchronously — and the modal's countdown node is still in the
+            // DOM with a past deadline (the list rebuild does not touch the
+            // modal, and openOwnerReport() re-derives it asynchronously). That
+            // nested tick would find this same node, rebuild again, and loop
+            // render → tick → render until the stack overflows — which is the
+            // "Maximum call stack size exceeded" renderOwnerTickets' own catch
+            // reports at its console.error line. Dropping the hook here makes a
+            // lapsed countdown a one-shot: the text still reads "expired", but
+            // the ticker can never trip on this node twice.
+            el.removeAttribute('data-owner-countdown');
             continue;
         }
         el.textContent = formatAccessCountdown(left);
@@ -789,13 +961,26 @@ function tickOwnerCountdowns() {
     // drains, and the evidence is taken away the moment it hits zero.
     if (!lapsed) return;
 
-    if (ownerCountdownTicker) { clearInterval(ownerCountdownTicker); ownerCountdownTicker = null; }
-    try { renderOwnerTickets(ownerAllTicketsCache); } catch (e) { /* the tab still works */ }
-    // Re-open the report in place so it re-reads and re-renders the expired
-    // notice. markTrackingAccessOpened() is a no-op now the stamp exists, so
-    // this cannot restart the clock it just ended.
-    if (ownerReopenTicketId) {
-        try { window.openOwnerReport(ownerReopenTicketId); } catch (e) { /* ignore */ }
+    // ⚠️ RE-ENTRANCY GUARD. The rebuild calls renderOwnerTickets(), whose tail
+    // calls startOwnerCountdownTicker() — and the starter deliberately runs one
+    // tick immediately. If that nested tick still sees anything lapsed it would
+    // rebuild again from inside its own rebuild: unbounded synchronous
+    // recursion that blows the stack (surfacing only as the RangeError caught
+    // by renderOwnerTickets' own try/catch). With the flag set, the nested tick
+    // returns here; the interval tick once a second is unaffected.
+    if (window.__ownerRebuildInFlight) return;
+    window.__ownerRebuildInFlight = true;
+    try {
+        if (ownerCountdownTicker) { clearInterval(ownerCountdownTicker); ownerCountdownTicker = null; }
+        try { renderOwnerTickets(ownerAllTicketsCache); } catch (e) { /* the tab still works */ }
+        // Re-open the report in place so it re-reads and re-renders the expired
+        // notice. markTrackingAccessOpened() is a no-op now the stamp exists, so
+        // this cannot restart the clock it just ended.
+        if (ownerReopenTicketId) {
+            try { window.openOwnerReport(ownerReopenTicketId); } catch (e) { /* ignore */ }
+        }
+    } finally {
+        window.__ownerRebuildInFlight = false;
     }
 }
 
@@ -1177,6 +1362,10 @@ function splitOwnerAttachments(rawData) {
 
 window.openOwnerReport = function(reportId) {
   if (!reportId || !db) return;
+  // Claim the render BEFORE the async read: if the manager hits × (or a newer
+  // ticket is opened) while this read is in flight, the check before the paint
+  // discards this render instead of resurrecting a closed modal.
+  const gen = ++ownerModalGen;
   // Remembered for the delegated submit handler, which has no access to the
   // rendered form's markup. Cleared when the modal closes so a stale id can
   // never be written to after a different ticket is opened.
@@ -1541,20 +1730,42 @@ window.openOwnerReport = function(reportId) {
     // looking at the table would be useless. When it reaches zero the ticker
     // re-opens this same modal, which swaps in the expired notice and withholds
     // the payload.
-    const modalBanner = (expired || !expiresAt)
+    // ⚠️ THE VIEWER, NOT JUST THE TICKET. `expiresAt` above is the FACT — this
+    // approved ticket carries a deadline (stamped on first open, or derived from
+    // approval). Whether that deadline means anything to the person looking is
+    // the POLICY in expiryAppliesToViewer(): HR and superadmins have no window.
+    // Without this gate the banner renders for HR anyway — expired is false and
+    // expiresAt is a real Date — and lands reading "expired" (the stamp is in
+    // the past) on a report they can read in full, which looks like access was
+    // refused. Mirrors the Access column's windowAccessExpiry in
+    // renderOwnerTickets(), which is gated the same way.
+    const bannerExpiry = expiryAppliesToViewer() ? expiresAt : null;
+    const modalBanner = (expired || !bannerExpiry)
       ? ''
       : '<div class="owner-access-live">'
         + '<i class="fas fa-hourglass-half"></i> Viewing access closes in '
-        + accessCountdownHtml(expiresAt.getTime(),
-            'Viewing access closes ' + formatDate(expiresAt))
+        + accessCountdownHtml(bannerExpiry.getTime(),
+            'Viewing access closes ' + formatDate(bannerExpiry))
         + '</div>';
+
+    // ⚠️ PAINT ONLY IF THIS RENDER IS STILL THE LATEST INTENT. The read above is
+    // async: a × click (closeOwnerReportModalFn bumps the generation) or a newer
+    // open can land first, and painting here would re-show a modal the manager
+    // just dismissed — the "close it twice" bug. The data stamps above still ran
+    // because they describe the READ, not the display.
+    if (gen !== ownerModalGen) return;
 
     if (ownerReportModalBody) ownerReportModalBody.innerHTML = modalBanner + html;
     if (ownerReportModal) ownerReportModal.classList.add('active');
+
     // ⚠️ START ONLY FOR A VIEWER WITH A REAL, RUNNING WINDOW. HR and superadmins
     // get no countdown (nothing expires for them), so spinning an interval that
-    // would find zero nodes every second would be pure waste.
-    if (!expired && expiresAt) startOwnerCountdownTicker();
+    // would find zero nodes every second would be pure waste. `bannerExpiry` is
+    // the gate, NOT `expiresAt`: the fact exists for every viewer, the window
+    // does not — and with a past stamp the ticker would otherwise "expire" a
+    // banner HR should never have been shown, rebuilding the list and re-opening
+    // the modal under them for no reason.
+    if (!expired && bannerExpiry) startOwnerCountdownTicker();
   }).catch((error) => {
     console.error('Failed to open report:', error);
   });
@@ -1650,7 +1861,13 @@ function handleOwnerFootageSubmit(event) {
 }
 
 function closeOwnerReportModalFn() {
+  // The X only HIDES the modal — "close" here means dismiss the dialog, never
+  // resolve the ticket. Ownership of a close/write belongs to the operator +
+  // superadmin approval flow, not the manager's read-only viewer.
   if (ownerReportModal) ownerReportModal.classList.remove('active');
+  // Invalidate any open still waiting on its Firestore read: without this its
+  // resolve re-adds `active` and the modal needs a SECOND × click to stay shut.
+  ownerModalGen++;
   // The re-access form's ticket id is only valid while the modal is open.
   ownerReopenTicketId = '';
   // Same for the footage form — a stale id must never outlive the modal.
@@ -1664,6 +1881,7 @@ function closeOwnerReportModalFn() {
     clearInterval(ownerCountdownTicker);
     ownerCountdownTicker = null;
   }
+
   try { if (window.RefreshState) window.RefreshState.clearModal('owner'); } catch (e) { /* ignore */ }
 }
 
@@ -1992,6 +2210,7 @@ async function loadOwnerTickets() {
     const allTickets = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
     ownerAllTicketsCache = allTickets;
     renderOwnerTickets(allTickets);
+    renderKpiCards();
     // Same deep link as the listener path: this is the fallback when
     // firestoreService.listenTickets is unavailable, and a manager who arrived
     // from the approval email must not be silently ignored just because the
@@ -2023,6 +2242,7 @@ function setupOwnerTicketListener() {
     (allTickets) => {
       ownerAllTicketsCache = allTickets;
       renderOwnerTickets(allTickets);
+      renderKpiCards();
       // The approval-email deep link can only be resolved once the real ticket
       // list has arrived - the branch allowlist AND the approved-only filter
       // both live off this data, so there is nothing to check before this.

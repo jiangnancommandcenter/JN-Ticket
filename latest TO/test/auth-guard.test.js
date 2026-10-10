@@ -235,3 +235,150 @@ assert(/id="tabApprovals"/.test(mainHtml2),
 assert(!/id="tabApprovals"/.test(ownerHtml),
     'the Owner Dashboard must not have gained an approvals tab as a side effect of this fix');
 console.log('  PASS  a superadmin is returned to main.html, carrying ?ticket=, and main.html opens it');
+
+// ============================================================================
+// 11. A REJECTED ACCOUNT MUST NEVER REACH A DASHBOARD
+// ============================================================================
+// THE BUG THIS LOCKS DOWN: both approval checks in js/auth.js tested only
+// `status === 'pending'`. Rejecting a user writes `status: 'rejected'`
+// (script.js), so the login handler fell through to the ROLE routing and a
+// rejected Area Manager was handed ownerdashboard.html — and the auth
+// observer, the safety net for someone already signed in typing the URL
+// directly, never moved them off it. pending-approval.html already knew the
+// "This account request was not approved" message; the router simply never
+// sent them there.
+//
+// The helper lives inside the PAGE GATING block the sandbox above already
+// executed, so it is exercised as real code, not re-implemented here.
+const gatedAccountPage = sandbox.window.__authGuardInternals.gatedAccountPage;
+const GATED_ACCOUNT_STATUSES = sandbox.window.__authGuardInternals.GATED_ACCOUNT_STATUSES;
+assert.strictEqual(typeof gatedAccountPage, 'function',
+    'gatedAccountPage must be exposed on window.__authGuardInternals so it can be tested directly');
+
+// The blocked statuses — 'rejected' is the whole point of this section.
+assert.ok(GATED_ACCOUNT_STATUSES.indexOf('pending') > -1, 'pending must stay gated');
+assert.ok(GATED_ACCOUNT_STATUSES.indexOf('rejected') > -1,
+    "'rejected' must be gated, or a rejected account walks straight into ownerdashboard.html");
+assert.ok(GATED_ACCOUNT_STATUSES.indexOf('denied') > -1, "'denied' must be gated too");
+
+// What the rejection path actually writes, plus sloppy variants: the value is
+// compared, so a stray space or capital must not open the door.
+assert.strictEqual(gatedAccountPage('pending'), 'pending-approval.html');
+assert.strictEqual(gatedAccountPage('rejected'), 'pending-approval.html',
+    'a rejected user must be sent to pending-approval.html, not routed by role');
+assert.strictEqual(gatedAccountPage('denied'), 'pending-approval.html');
+assert.strictEqual(gatedAccountPage(' REJECTED '), 'pending-approval.html',
+    'status must be trimmed and lower-cased before comparing');
+assert.strictEqual(gatedAccountPage('Rejected'), 'pending-approval.html',
+    'status must be case-insensitive');
+
+// And the accounts that MUST still get in. Failing closed on these would lock
+// out real users whose only crime is a doc written before status existed.
+assert.strictEqual(gatedAccountPage('approved'), '', 'an approved user must pass');
+assert.strictEqual(gatedAccountPage('active'), '', 'the "active" alias must pass');
+assert.strictEqual(gatedAccountPage(null), '', 'a missing status must pass, not lock the account out');
+assert.strictEqual(gatedAccountPage(undefined), '', 'a missing status must pass');
+assert.strictEqual(gatedAccountPage(''), '', 'an empty status must pass');
+
+// Both call sites must route through the helper. Fixing one and not the other
+// is exactly how this bug survived: the login handler alone never runs for
+// someone who is already signed in and types the dashboard URL.
+assert(
+    /gatedAccountPage\(data && data\.status\)/.test(authSrc),
+    'resolveLoginDestination must gate on status, or a rejected account is routed by role into ownerdashboard.html'
+);
+assert(
+    /gatedAccountPage\(snap\.data\(\)\.status\)/.test(authSrc),
+    'the auth observer must gate on status, or an already-signed-in rejected user stays on the dashboard'
+);
+// The old narrow checks must not linger anywhere.
+assert(
+    !/\(data\.status \|\| ''\)\.toLowerCase\(\) === 'pending'/.test(authSrc),
+    "the resolveLoginDestination check must no longer test === 'pending' only"
+);
+assert(
+    !/\(snap\.data\(\)\.status \|\| ''\)\.toLowerCase\(\) === 'pending'/.test(authSrc),
+    "the observer check must no longer test === 'pending' only"
+);
+// The destination has to be the page that can EXPLAIN the rejection, not a
+// dashboard or a bare login loop.
+assert(
+    gatedAccountPage('rejected') === 'pending-approval.html',
+    'rejected users belong on pending-approval.html'
+);
+const pendingHtml = fs.readFileSync(path.join(ROOT, 'pending-approval.html'), 'utf8');
+assert(
+    /status === 'rejected' \|\| status === 'denied'/.test(pendingHtml),
+    'pending-approval.html must still know how to explain a rejection, or the redirect just says "pending"'
+);
+
+console.log('  PASS  a rejected/denied account is gated to pending-approval.html, approved and missing-status accounts still get in');
+console.log('✅ Account status gate tests passed (a rejected user can no longer log in to ownerdashboard.html).');
+
+// ============================================================================
+// 12. APPROVAL AUTO-FORWARDS — NO "CHECK STATUS" CLICK REQUIRED
+// ============================================================================
+// THE BUG THIS LOCKS DOWN: sitting on pending-approval.html after a superadmin
+// approved the account did NOTHING until the person pressed Check Status (or
+// refreshed). The page had no live view of the user doc at all — the only
+// status read was inside the button's click handler.
+//
+// The fix lives in js/auth.js (an onSnapshot watch installed by the auth
+// observer while the pending page is up), so pending-approval.html must LOAD
+// that file — and it must load it AFTER firebase.js, or `auth`/`db` do not
+// exist yet when the observer registers.
+const pendingAuthIdx = pendingHtml.indexOf('src="js/auth.js"');
+assert(pendingAuthIdx > -1,
+    'pending-approval.html must load js/auth.js, or the auto-forward watch never attaches');
+assert(pendingHtml.indexOf('src="firebase.js"') < pendingAuthIdx,
+    'js/auth.js must load AFTER firebase.js on the pending page — the observer registers auth.onAuthStateChanged at load time');
+
+// The watch itself: LIVE (onSnapshot, not a one-shot get), gated-aware, and
+// routed through the SAME resolveLoginDestination the login form uses so the
+// account lands on ITS designated dashboard (owner → ownerdashboard.html,
+// operator → main.html), not a hardcoded page.
+// Anchor on the banner itself — a bare 'AUTOMATIC ADVANCE' also matches the
+// prose in the pendingStatusUnsub declaration further up the file.
+const advanceStart = authSrc.indexOf('AUTOMATIC ADVANCE FROM');
+assert(advanceStart > -1, 'the AUTOMATIC ADVANCE branch is missing from js/auth.js');
+const advanceBlock = authSrc.slice(advanceStart, advanceStart + 3000);
+assert(
+    /isPendingPage && user && db && !pendingStatusUnsub/.test(advanceBlock),
+    'the auto-forward must be scoped to pending-approval.html and attach only once'
+);
+assert(
+    /\.doc\(pendingKey\)\.onSnapshot\(/.test(advanceBlock),
+    'the watch must be a LIVE onSnapshot — a one-shot get() only sees the status at load time'
+);
+assert(
+    /gatedAccountPage\(snap\.data\(\)\.status\)/.test(advanceBlock),
+    'the watch must respect the status gate: a rejected account parked here must NOT be auto-advanced'
+);
+assert(
+    /!snap \|\| !snap\.exists/.test(advanceBlock),
+    'a MISSING user doc must never auto-advance — absence of data is not approval'
+);
+assert(
+    /resolveLoginDestination\(user\)/.test(advanceBlock),
+    'the auto-forward must route through resolveLoginDestination so each role gets ITS dashboard'
+);
+assert(
+    /window\.location\.replace\(dest\)/.test(advanceBlock),
+    'use location.replace so BACK cannot return to the pending page'
+);
+assert(
+    /unwatchPendingStatus\(\)/.test(advanceBlock),
+    'the watch must detach before navigating, or it re-fires on the next page'
+);
+
+// The button stays as the fallback, and the auto-forward must NOT live inside
+// its click handler — that is the whole point of this section.
+assert(/id="checkStatusBtn"/.test(pendingHtml),
+    'Check Status must remain as the fallback for a failed listener');
+assert(
+    !/checkStatusBtn[\s\S]{0,400}onSnapshot/.test(pendingHtml),
+    'the live watch must live in js/auth.js, not inside the Check Status click handler'
+);
+
+console.log('  PASS  an approved account auto-forwards to its designated dashboard via a live watch — no Check Status click needed');
+console.log('✅ Pending-page auto-forward tests passed (approval redirects automatically; rejected/missing status stays put).');

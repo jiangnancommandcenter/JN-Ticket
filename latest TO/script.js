@@ -77,6 +77,14 @@ async function syncCurrentUserRole() {
     try {
         const profile = await window.getUserProfile(auth.currentUser.email);
         currentUserRole = (profile && profile.role) ? String(profile.role).toLowerCase() : 'operator';
+        // Phone header avatar initial: the pasted mobile block shipped a
+        // hardcoded "N" for every user. First letter of the profile name,
+        // falling back to the login email.
+        const avatarEl = document.getElementById('jn2AvatarInitial');
+        if (avatarEl) {
+            const who = ((profile && profile.name) || auth.currentUser.email || '').trim();
+            avatarEl.textContent = (who[0] || '?').toUpperCase();
+        }
     } catch (error) {
         console.warn('Failed to sync current user role from Firebase:', error && error.message ? error.message : error);
         currentUserRole = 'operator';
@@ -606,6 +614,8 @@ const approvalUploadStatus = $('#approvalUploadStatus');
 const usersNavItem = $('#usersNavItem');
 const usersListBody = $('#usersListBody');
 const userStatusFilter = $('#userStatusFilter');
+let usersBadgeUnsub = null;
+const usersBadge = $('#usersBadge');
 
 // Edit Approval Information Modal (Superadmin)
 const editApprovalModal = $('#editApprovalModal');
@@ -1291,6 +1301,7 @@ async function initApp() {
         
         // ===== Keep the sidebar Approvals badge in sync on initial load =====
         updateApprovalsBadge();
+        startUsersBadgeListener();
     } catch (e) {
         console.error('initApp error:', e);
     }
@@ -1581,6 +1592,40 @@ async function loadSuperadminUsers() {
 }
 
 // Build a safe DOM id/container key from an email.
+// ==== USERS BADGE
+//  USERS BADGE
+function countPendingApprovals(users) {
+    return (users || []).filter(function (u) {
+        return u && u.status === 'pending' && isApprovalQueueRole(u);
+    }).length;
+}
+
+function setUsersBadge(count) {
+    if (!usersBadge) return;
+    const n = Number(count) || 0;
+    usersBadge.textContent = n > 99 ? '99+' : String(n);
+    usersBadge.style.display = n > 0 ? 'inline' : 'none';
+}
+
+function startUsersBadgeListener() {
+    if (usersBadgeUnsub) return;
+    if (!currentUserIsSuperAdmin()) return;
+    try {
+        usersBadgeUnsub = db.collection('users')
+            .where('status', '==', 'pending')
+            .onSnapshot(function (snap) {
+                const pending = [];
+                snap.forEach(function (doc) {
+                    pending.push(Object.assign({ id: doc.id }, doc.data()));
+                });
+                setUsersBadge(countPendingApprovals(pending));
+            }, function (err) {
+                console.warn('[Users] pending-count listener error:', err);
+            });
+    } catch (e) {
+        console.warn('[Users] could not start pending-count listener:', e);
+    }
+}
 function sanitizeUserId(email) {
     return String(email || 'u').toLowerCase().replace(/[^a-z0-9]/g, '_');
 }
@@ -2465,6 +2510,15 @@ function renderDashHero() {
     if (!total) sub.textContent = 'Connect your branches to start live monitoring.';
     else if (off > 0) sub.textContent = off + ' of ' + total + ' branches offline · ' + action + ' tickets need action.';
     else sub.textContent = 'All ' + total + ' branches online · ' + action + ' tickets need action.';
+    // The pasted phone-only banner carries hardcoded mockup text ("7:49 AM",
+    // "TUESDAY, OCT 6", "3 of 9 branches offline..."). Reflect the SAME live
+    // data the desktop hero shows, so phones never see the stale values.
+    const jn2Time = document.getElementById('jn2BannerTime');
+    if (jn2Time) jn2Time.textContent = now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+    const jn2Date = document.getElementById('jn2BannerDate');
+    if (jn2Date) jn2Date.textContent = now.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+    const jn2Sub = document.getElementById('jn2BannerSub');
+    if (jn2Sub) jn2Sub.textContent = sub.textContent;
 }
 
 /** Elapsed minutes for a ticket's createdAt; -1 when unknown. */

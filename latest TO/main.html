@@ -200,9 +200,10 @@
             </button>
 
             <div class="nav-section-label u-hidden" id="adminNavLabel">Administration</div>
-            <button class="nav-item u-hidden" data-tab="users" id="usersNavItem">
-                <i class="fas fa-users-cog"></i>
+            <button class="nav-item" data-tab="users" id="usersNavItem">
+                <i class="fas fa-user-plus"></i>
                 <span>User Approvals</span>
+                <span class="badge u-hidden" id="usersBadge">0</span>
             </button>
             <button class="nav-item u-hidden" data-tab="approvals" id="approvalsNavItem">
                 <i class="fas fa-clipboard-check"></i>
@@ -281,9 +282,7 @@
 
             <!-- User Profile Avatar Badge Trigger -->
             <button id="openProfile" aria-label="User Profile" class="relative ml-1 active:scale-95 transition-transform">
-              <div class="w-8 h-8 rounded-full bg-emerald-700 text-white font-bold text-xs flex items-center justify-center ring-2 ring-emerald-500/30 shadow-inner">
-                N
-              </div>
+              <div class="w-8 h-8 rounded-full bg-emerald-700 text-white font-bold text-xs flex items-center justify-center ring-2 ring-emerald-500/30 shadow-inner" id="jn2AvatarInitial">N</div>
               <span class="absolute bottom-0 right-0 w-2.5 h-2.5 bg-emerald-500 border-2 border-white dark:border-jn-darkCard rounded-full"></span>
             </button>
           </div>
@@ -334,18 +333,16 @@
                 <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold tracking-wider uppercase bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
                   <i class="fa-solid fa-shield-halved text-[9px]"></i> Command Center • Live
                 </span>
-                <span class="text-xs font-semibold text-slate-300 bg-slate-800/80 px-2.5 py-1 rounded-md border border-slate-700/80 shadow-inner">
-                  7:49 AM
-                </span>
+                <span class="text-xs font-semibold text-slate-300 bg-slate-800/80 px-2.5 py-1 rounded-md border border-slate-700/80 shadow-inner" id="jn2BannerTime">--:--</span>
               </div>
 
               <!-- Overview Header Text -->
               <h2 class="text-xl font-extrabold tracking-tight mb-1 text-white">Network Operations Overview</h2>
-              <p class="text-xs text-slate-300 mb-5 leading-relaxed">3 of 9 branches offline · 1 tickets need action.</p>
+              <p class="text-xs text-slate-300 mb-5 leading-relaxed" id="jn2BannerSub">Real-time health across all branches.</p>
 
               <!-- Contextually Docked Action Buttons Footer (NO Floating Buttons) -->
               <div class="flex items-center justify-between pt-3 border-t border-slate-700/60 gap-2">
-                <div class="text-[11px] text-slate-400 font-bold tracking-wider uppercase">TUESDAY, OCT 6</div>
+                <div class="text-[11px] text-slate-400 font-bold tracking-wider uppercase" id="jn2BannerDate">—</div>
 
                 <div class="flex items-center gap-2">
                   <!-- Secondary Action: Branch Monitor -->

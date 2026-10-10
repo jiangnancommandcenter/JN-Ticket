@@ -81,6 +81,8 @@ All logo `<img>` tags use `class="brand-logo"` (app pages) or `class="login-logo
 * `Ticket Approvals` → **Ticket Reviews** (superadmin ticket approval workflow)
 
 Tab keys (`data-tab`), IDs (`usersNavItem`, `approvalsNavItem`), badges, and refresh-state persistence are unchanged.
+* usersBadge on #usersNavItem - a live red number badge (99+ cap) for pending approval-queue accounts (status pending and role other than superadmin or operator), synced instantly by a single-field where-status equality listener guarded by currentUserIsSuperAdmin(), hidden at 0.
+
 
 ## 2-Day Tracking Access (approved tickets)
 

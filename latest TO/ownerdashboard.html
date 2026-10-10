@@ -13,6 +13,8 @@
     <meta name="theme-color" id="themeColorMeta" content="#72bf6a">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- Chart.js (same version as main.html) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <link rel="stylesheet" href="style.css">
     <!-- Theme System: dark mode + shared header components (loaded AFTER style.css) -->
     <link rel="stylesheet" href="theme.css">
@@ -1356,6 +1358,32 @@
                     <div class="card-info">
                         <div class="card-value" id="accessLevelValue">—</div>
                         <div class="card-label">My Access Level</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ============================================================ -->
+            <!-- OVERVIEW CHARTS: tickets-filed trend + status breakdown      -->
+            <!-- Same chart-container / dash-chart-head / chart-wrapper idiom -->
+            <!-- as main.html, so the shared style.css rules apply unchanged. -->
+            <!-- ============================================================ -->
+            <div class="charts-row" id="ownerChartsRow">
+                <div class="chart-container">
+                    <div class="dash-chart-head">
+                        <h3 class="chart-title">Tickets Filed</h3>
+                        <span class="dash-chart-pill" id="ownerTrendPill">—</span>
+                    </div>
+                    <div class="chart-wrapper">
+                        <canvas id="ownerTrendChart" role="img" aria-label="Tickets filed per month, assigned branches"></canvas>
+                    </div>
+                </div>
+                <div class="chart-container">
+                    <div class="dash-chart-head">
+                        <h3 class="chart-title">Status Breakdown</h3>
+                        <span class="dash-chart-pill" id="ownerStatusPill">—</span>
+                    </div>
+                    <div class="chart-wrapper">
+                        <canvas id="ownerStatusChart" role="img" aria-label="Ticket status breakdown, assigned branches"></canvas>
                     </div>
                 </div>
             </div>

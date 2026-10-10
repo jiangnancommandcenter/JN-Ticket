@@ -83,9 +83,10 @@
         <div class="pending-email" id="pendingEmail">Checking sign-in…</div>
 
         <div class="pending-note">
-            Once an administrator approves your account, you will be able to sign in
-            and access the dashboard. We'll notify you by email — you can also click
-            <strong>Check Status</strong> below after your approval goes through.
+            Once an administrator approves your account, this page will
+            <strong>automatically take you to your dashboard</strong> — no need to
+            refresh or click anything. You can also press
+            <strong>Check Status</strong> below if nothing happens.
         </div>
 
         <div class="pending-actions">
@@ -94,14 +95,17 @@
         </div>
 
         <div id="pendingStatus"></div>
-
-        <a href="submit-ticket.html" class="back-link">Submit a public ticket instead</a>
     </div>
 
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
     <script src="firebase.js"></script>
+    <!-- Loads the auth observer, which includes the AUTOMATIC ADVANCE watch:
+         the moment this account is approved it is routed straight to its
+         designated dashboard — no Check Status click needed. The button below
+         stays as the fallback if this listener could not attach. -->
+    <script src="js/auth.js"></script>
     <script>
         (function () {
             'use strict';

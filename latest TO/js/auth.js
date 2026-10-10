@@ -42,6 +42,42 @@ function isProtectedPage(pathname) {
     return PROTECTED_PAGES.indexOf(currentPageName(pathname)) > -1;
 }
 
+// ==============================================================
+// ACCOUNT STATUS GATE
+//
+// Signing in and being ALLOWED INTO a dashboard are two different
+// things. Firebase Auth will happily keep a session alive for an
+// account a superadmin has already rejected, and BOTH checks below
+// used to test only `status === 'pending'` — so a rejected account
+// (`status: 'rejected'`, written by script.js on Reject) fell
+// through to the role routing and landed on ownerdashboard.html as
+// if nothing had happened.
+//
+// These are the statuses that must never reach a dashboard. The
+// list mirrors pending-approval.html exactly, which already knows
+// how to explain each one ("Still pending…" / "This account
+// request was not approved…").
+//
+// ⚠️ DELIBERATELY NOT "anything that isn't approved": a user doc
+// written before the status field existed (or an unrecognised
+// value) still gets in, exactly as before. Failing closed here
+// could lock out real accounts whose only crime is a missing
+// field — a worse bug than the one this fixes.
+// ==============================================================
+const GATED_ACCOUNT_STATUSES = ['pending', 'rejected', 'denied'];
+
+/**
+ * 'pending-approval.html' when this account status must be kept out of
+ * every dashboard, '' when the account may proceed.
+ *
+ * Normalised (trim + lowercase) because the value is compared, not
+ * displayed, and a stray 'REJECTED ' would otherwise slip through.
+ */
+function gatedAccountPage(status) {
+    const s = String(status == null ? '' : status).trim().toLowerCase();
+    return GATED_ACCOUNT_STATUSES.indexOf(s) > -1 ? 'pending-approval.html' : '';
+}
+
 /**
  * A ticket number is `[A-Z]{3}-TIX\d+` in practice (BNW-TIX007), but this gate
  * is deliberately looser than that pattern on purpose: it exists to stop a
@@ -97,7 +133,9 @@ window.__authGuardInternals = {
     PROTECTED_PAGES: PROTECTED_PAGES,
     currentPageName: currentPageName,
     isProtectedPage: isProtectedPage,
-    readSafeTicketParam: readSafeTicketParam
+    readSafeTicketParam: readSafeTicketParam,
+    GATED_ACCOUNT_STATUSES: GATED_ACCOUNT_STATUSES,
+    gatedAccountPage: gatedAccountPage
 };
 
 // ==============================================================
@@ -143,7 +181,11 @@ async function resolveLoginDestination(user) {
         const profile = await window.getUserProfile(email);
         const data = profile || null;
 
-        if (data && (data.status || '').toLowerCase() === 'pending') return 'pending-approval.html';
+        // NOT just `=== 'pending'`: a rejected account must be stopped here too,
+        // or the role routing below happily hands a rejected Area Manager the
+        // ownerdashboard.html it was rejecting them from.
+        const gated = gatedAccountPage(data && data.status);
+        if (gated) return gated;
 
         const role = (data && data.role) || 'operator';
         if (role === 'superadmin') return withTicketParam(next || 'main.html');
@@ -191,6 +233,19 @@ if (loginForm) {
 // AUTH STATE OBSERVER
 // ==============================================================
 
+// Set while someone is parked on pending-approval.html with a LIVE watch on
+// their user doc (see the AUTOMATIC ADVANCE branch below). Kept out of the
+// PAGE GATING block on purpose — that block is sliced out and run standalone
+// by test/auth-guard.test.js, which has no Firestore to subscribe with.
+let pendingStatusUnsub = null;
+
+/** Detach the pending-page watcher. Safe to call when nothing is attached. */
+function unwatchPendingStatus() {
+    if (!pendingStatusUnsub) return;
+    try { pendingStatusUnsub(); } catch (err) { /* already detached */ }
+    pendingStatusUnsub = null;
+}
+
 auth.onAuthStateChanged(async (user) => {
     // On pages that require auth, redirect to login.
     // NOTE: this is a UX gate, not a security boundary. The authoritative
@@ -215,16 +270,54 @@ auth.onAuthStateChanged(async (user) => {
         return;
     }
 
-    // Route PENDING (not-yet-approved) users away from the dashboard.
+    // Route NOT-APPROVED users (pending AND rejected/denied) away from the
+    // dashboard. This is the safety net for someone who is already signed in
+    // and types the dashboard URL directly — the login handler alone never
+    // runs for them. Checking only 'pending' here is how a rejected account
+    // ended up using ownerdashboard.html.
     if (onProtectedPage && user && !isLoginPage && !isPendingPage && db) {
         const email = user && user.email ? user.email : '';
         db.collection('users').doc(window.normalizeUserEmail(email)).get()
             .then(snap => {
-                if (snap.exists && (snap.data().status || '').toLowerCase() === 'pending') {
-                    window.location.replace('pending-approval.html');
+                const gated = snap.exists ? gatedAccountPage(snap.data().status) : '';
+                if (gated) {
+                    window.location.replace(gated);
                 }
             })
             .catch(err => console.warn('Approval status check skipped:', err && err.message ? err.message : err));
+    }
+
+    // ===== AUTOMATIC ADVANCE FROM pending-approval.html =====
+    // Waiting for the person to press "Check Status" felt broken: the
+    // superadmin approves the account and the page just sits there. This
+    // watches the user doc LIVE, and the instant the status leaves the gated
+    // set (i.e. approved) it sends the account to ITS designated dashboard
+    // through the SAME resolveLoginDestination() the login form uses — an
+    // owner/HR/RM-SM to ownerdashboard.html, everyone else to main.html — with
+    // no login detour and no click needed.
+    //
+    // Still-gated snapshots (pending/rejected/denied) are ignored, so a
+    // rejected account parked here stays parked; and a MISSING doc never
+    // advances — absence of data is not approval. The Check Status button
+    // stays as the fallback for when this listener could not attach.
+    if (isPendingPage && user && db && !pendingStatusUnsub) {
+        const pendingEmail = user.email ? user.email : '';
+        const pendingKey = window.normalizeUserEmail ? window.normalizeUserEmail(pendingEmail) : pendingEmail;
+        if (pendingKey) {
+            try {
+                pendingStatusUnsub = db.collection('users').doc(pendingKey).onSnapshot(snap => {
+                    if (!snap || !snap.exists) return;              // no data yet — stay put
+                    if (gatedAccountPage(snap.data().status)) return; // still gated — stay put
+                    unwatchPendingStatus();
+                    resolveLoginDestination(user)
+                        .then(dest => window.location.replace(dest))
+                        .catch(err => console.warn('Auto-advance routing failed:', err && err.message ? err.message : err));
+                }, err => console.warn('Approval watch failed (use Check Status):', err && err.message ? err.message : err));
+            } catch (err) {
+                console.warn('Approval watch could not start (use Check Status):', err && err.message ? err.message : err);
+                pendingStatusUnsub = null;
+            }
+        }
     }
 });
 
