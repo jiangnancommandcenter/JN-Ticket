@@ -3522,15 +3522,37 @@ function openAddModal() {
     statusSelect.value = '';
     remarksInput.value = '';
     validationWarning.style.display = 'none';
-    newBranchGroup.style.display = 'none';
-    newBranchInput.value = '';
+    resetBranchField();
     // Reset segmented buttons
     const segBtns = statusSegmentedGroup.querySelectorAll('.segmented-btn');
     segBtns.forEach(btn => btn.classList.remove('active'));
     addModal.classList.add('active');
 }
 
-function closeAddModalFn() { addModal.classList.remove('active'); }
+/**
+ * Restore the Branch field (label + select + New button) to its default state.
+ *
+ * Defensive reset for the Add Status modal. An earlier version of the "New"
+ * toggle hid this row and stripped the select's 'required' flag, and nothing
+ * ever undid it: closing and re-opening the modal left the Branch row
+ * display:none FOREVER until a full page refresh. The toggle no longer hides
+ * anything (it only shows #newBranchGroup), but the display restores stay
+ * here so ANY future hide path is undone on both open and close - X, Cancel,
+ * backdrop click or successful save.
+ */
+function resetBranchField() {
+    const branchGroup = branchSelect.closest('.form-group');
+    if (branchGroup) branchGroup.style.display = '';
+    const branchLabel = branchGroup ? branchGroup.querySelector('label[for="branchSelect"]') : null;
+    if (branchLabel) branchLabel.style.display = '';
+    branchSelect.style.display = '';
+    branchSelect.setAttribute('required', '');
+    newBranchInput.removeAttribute('required');
+    newBranchGroup.style.display = 'none';
+    newBranchInput.value = '';
+}
+
+function closeAddModalFn() { resetBranchField(); addModal.classList.remove('active'); }
 
 btnAddStatus.addEventListener('click', openAddModal);
 closeAddModal.addEventListener('click', closeAddModalFn);
@@ -3556,15 +3578,21 @@ if (statusSegmentedGroup) {
 btnAddBranch.addEventListener('click', () => {
     const isNowVisible = newBranchGroup.style.display === 'none';
     newBranchGroup.style.display = isNowVisible ? 'block' : 'none';
+    // The Branch row (label + select + this button) NEVER moves or hides.
+    // Hiding the label/select shifted the whole form upward on every click
+    // (the reported "pumupunta sa taas" jump). New mode only swaps which
+    // field owns the 'required' flag - so native validation still blocks
+    // an empty submit either way - and preventScroll keeps the modal
+    // exactly where the user had it.
     if (isNowVisible) {
-        branchSelect.closest('.form-group').style.display = 'none';
-        branchSelect.removeAttribute('required');
-        newBranchInput.focus();
         branchSelect.value = '';
+        branchSelect.removeAttribute('required');
+        newBranchInput.setAttribute('required', '');
+        newBranchInput.focus({ preventScroll: true });
     } else {
-        branchSelect.closest('.form-group').style.display = '';
-        branchSelect.setAttribute('required', '');
+        newBranchInput.removeAttribute('required');
         newBranchInput.value = '';
+        branchSelect.setAttribute('required', '');
     }
 });
 
