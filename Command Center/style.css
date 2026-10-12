@@ -6063,11 +6063,13 @@ body.mobile-nav-open .mobile-nav-backdrop {
     }
     .approval-card-expiry { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
     .approval-card-actions { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; margin-left: auto; }
-    /* Card buttons: 32px rounded squares in message-blue / edit-amber /
-       view-green, exactly like the mockup's three actions. */
+    /* Card buttons: 32px rounded squares showing the SAME action set as the
+       desktop row (Approve/Reject/Edit/View + conditional Resend/Delete).
+       The old card-only envelope "Open chat" button is removed; its .msg
+       rule went with it. Colors for approve/reject/resend/delete come from
+       the global .action-btn.* rules — only edit/view are restated here. */
     .approval-card-actions .action-btn { width: 32px; height: 32px; border-radius: 8px; font-size: 13px; }
     .approval-card-actions .action-btn::after { display: none; }
-    .approval-card-actions .action-btn.msg { background: var(--color-progress-bg); color: var(--color-progress); }
     .approval-card-actions .action-btn.edit { background: var(--color-pending-bg); color: var(--color-pending); }
     .approval-card-actions .action-btn.view { background: var(--color-resolved-bg); color: var(--color-resolved); }
 

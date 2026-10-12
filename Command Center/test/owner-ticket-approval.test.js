@@ -1049,8 +1049,20 @@ console.log('\n=== Ticket Reviews phone card ===');
         'the approved pill must use the resolved token');
     assert(listFn.indexOf('approval-card-cell') > -1,
         'renderApprovalList() must emit the card cell mirroring the desktop cells');
-    assert(listFn.indexOf('window.ChatService && window.ChatService.open') > -1,
-        'the card message button must open the existing chat modal');
+    // THE OLD CARD-ONLY ENVELOPE "OPEN CHAT" BUTTON IS GONE. It duplicated the
+    // header chat entry, existed only on the card (so the desktop row never had
+    // it), and was the one action on the card that did NOT match the desktop
+    // row. The card now interpolates the very same ${actionBtns} the desktop
+    // Actions cell wraps in .action-group — one source of truth, two surfaces.
+    assert(listFn.indexOf('action-btn msg') === -1 && listFn.indexOf('msgBtn') === -1,
+        'the card must no longer render the outdated envelope "Open chat" button');
+    assert(listFn.indexOf('window.ChatService && window.ChatService.open') === -1,
+        'the card must not open the chat modal — chat stays in the header launcher');
+    assert(/approval-card-actions">\s*\$\{actionBtns\}/.test(listFn),
+        'the card footer must interpolate the SAME ${actionBtns} set the desktop Actions cell uses');
+    assert(/action-group">\s*\$\{actionBtns\}/.test(listFn),
+        'the desktop Actions cell must wrap the shared ${actionBtns} in .action-group — parity ' +
+        'means one button set, not two hand-maintained copies');
     assert(!/sendMessageToReporter|messageReporter|openChatWith/.test(listFn),
         'the card must NOT call a per-reporter chat API — none exists');
     // THE ACTIONS FOOTER STAYS: approve/reject have no other surface on a
@@ -1060,8 +1072,11 @@ console.log('\n=== Ticket Reviews phone card ===');
         'the approvals Actions footer must NOT be hidden on a phone');
     assert(/\.approval-card-actions \.action-btn\s*\{[^}]*width:\s*32px[^}]*height:\s*32px/.test(css),
         'the card buttons must be 32px rounded squares like the mockup');
-    assert(/\.approval-card-actions \.action-btn\.msg\s*\{[^}]*var\(--color-progress-bg\)/.test(css),
-        'the message button must be blue like the mockup');
+    // The old message-blue .msg rule must be GONE with the button — a rule
+    // for a button that no longer renders is dead CSS that re-advertises
+    // the removed chat shortcut to whoever reads the stylesheet next.
+    assert(!/\.approval-card-actions \.action-btn\.msg\s*\{/.test(css),
+        'the removed message button must have no leftover .msg styling rule');
     assert(/\.approval-card-actions \.action-btn::after\s*\{\s*display:\s*none/.test(css),
         'hover tooltips must be suppressed on touch — they stick open and cover the card');
     // ⚠️ THE TOOLTIP IS RIGHT-ANCHORED — the fix for the phantom horizontal

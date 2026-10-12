@@ -5415,24 +5415,25 @@ function renderApprovalList() {
                 : '';
 
 
-            let actions = '';
+            // One shared button set feeds BOTH interfaces: the desktop Actions
+            // cell wraps it in .action-group, the phone card footer drops the
+            // same buttons straight into .approval-card-actions. The old
+            // card-only envelope "Open chat" button is gone — chat lives in the
+            // header's #openChatModal, and every action a phone needs is now
+            // exactly the desktop row's action (Approve/Reject included).
+            let actionBtns = '';
             if (isPendingApproval(ticket)) {
-                actions = `<div class="action-group">
-                    ${resendBtn}${emailBtn}<button class="action-btn approve" data-tooltip="Approve" onclick="event.stopPropagation(); window.approveResolution('${ticket.id}')"><i class="fas fa-check"></i></button>
+                actionBtns = `${resendBtn}${emailBtn}<button class="action-btn approve" data-tooltip="Approve" onclick="event.stopPropagation(); window.approveResolution('${ticket.id}')"><i class="fas fa-check"></i></button>
                     <button class="action-btn reject" data-tooltip="Reject" onclick="event.stopPropagation(); window.rejectTicket('${ticket.id}')"><i class="fas fa-times"></i></button>
                     <button class="action-btn edit" data-tooltip="Edit Approval Info" onclick="event.stopPropagation(); window.openEditApprovalModal('${ticket.id}')"><i class="fas fa-edit"></i></button>
-                    <button class="action-btn view" data-tooltip="Details" onclick="event.stopPropagation(); window.openApprovalDetails('${ticket.id}')"><i class="fas fa-eye"></i></button>
-                </div>`;
+                    <button class="action-btn view" data-tooltip="Details" onclick="event.stopPropagation(); window.openApprovalDetails('${ticket.id}')"><i class="fas fa-eye"></i></button>`;
             } else {
-                actions = `<div class="action-group">
-                    ${resendBtn}${emailBtn}<button class="action-btn edit" data-tooltip="Edit Approval Info" onclick="event.stopPropagation(); window.openEditApprovalModal('${ticket.id}')"><i class="fas fa-edit"></i></button>
-                    <button class="action-btn view" data-tooltip="Details" onclick="event.stopPropagation(); window.openApprovalDetails('${ticket.id}')"><i class="fas fa-eye"></i></button>
-                </div>`;
+                actionBtns = `${resendBtn}${emailBtn}<button class="action-btn edit" data-tooltip="Edit Approval Info" onclick="event.stopPropagation(); window.openEditApprovalModal('${ticket.id}')"><i class="fas fa-edit"></i></button>
+                    <button class="action-btn view" data-tooltip="Details" onclick="event.stopPropagation(); window.openApprovalDetails('${ticket.id}')"><i class="fas fa-eye"></i></button>`;
             }
-            // Phone card bits (mirrors the desktop cells above — same values,
-            // no new data path). The message button OPENS the existing chat
-            // modal only; there is no per-reporter conversation API to call.
-            const msgBtn = `<button class="action-btn msg" data-tooltip="Open chat" onclick="event.stopPropagation(); window.ChatService && window.ChatService.open && window.ChatService.open()"><i class="fas fa-envelope"></i></button>`;
+            const actions = `<div class="action-group">
+                    ${actionBtns}
+                </div>`;
             const cardStatusDot = statusClass === 'approved'
                 ? '<i class="fas fa-circle approval-card-dot approval-card-dot--ok"></i>'
                 : '<i class="fas fa-circle approval-card-dot"></i>';
@@ -5466,9 +5467,7 @@ function renderApprovalList() {
                         <div class="approval-card-foot">
                             <div class="approval-card-expiry"><span class="approval-card-label">Access Expires</span>${cardExpiry}</div>
                             <div class="approval-card-actions">
-                                ${msgBtn}
-                                <button class="action-btn edit" title="Edit Approval Info" onclick="event.stopPropagation(); window.openEditApprovalModal('${ticket.id}')"><i class="fas fa-pen-to-square"></i></button>
-                                <button class="action-btn view" title="Details" onclick="event.stopPropagation(); window.openApprovalDetails('${ticket.id}')"><i class="fas fa-eye"></i></button>
+                                ${actionBtns}
                             </div>
                         </div>
                     </div>
