@@ -4344,8 +4344,21 @@
         // so this listener is dormant on desktop. It is an explicit affordance on
         // top of the generic document-click dismissal below, so a tap on empty
         // space around the message always tears the focus overlay back down.
+        //
+        // ⚠️ It MUST honour the flicker guard. On a phone the browser fires a
+        // synthetic `click` the instant the finger lifts after a long-press, and
+        // that click very often lands on the full-screen scrim (the finger is
+        // rarely dead-centre on the bubble). Without this guard that click closes
+        // the menu we just opened — the "nawawala-wala" flicker. Swallow it ONCE,
+        // and stopPropagation so it does not ALSO reach the document dismiss
+        // handler (which would then close it, because the flag is already spent).
         if (els.focusBackdrop) {
-            els.focusBackdrop.addEventListener('click', function () {
+            els.focusBackdrop.addEventListener('click', function (event) {
+                if (suppressDismissClick) {
+                    suppressDismissClick = false;
+                    if (event.stopPropagation) event.stopPropagation();
+                    return;
+                }
                 closeReactionPicker();
             });
         }
@@ -4363,8 +4376,12 @@
         });
 
         // Leaving the message dismisses it — but only once the pointer has
-        // genuinely left both the message and the picker.
+        // genuinely left both the message and the picker. DESKTOP ONLY: on a
+        // phone there is no hover, and the browser still fires synthetic
+        // mouseout/mouseleave after a touch — a stray one (relatedTarget null)
+        // would close the long-press menu ~220ms later. canHover() gates it off.
         els.log.addEventListener('mouseout', function (event) {
+            if (!canHover()) return;
             if (els.reactionPicker.hidden) return;
             const to = event.relatedTarget;
             if (to && to.closest) {
@@ -4374,6 +4391,7 @@
             closeReactionPickerSoon();
         });
         els.log.addEventListener('mouseleave', function () {
+            if (!canHover()) return;
             if (!els.reactionPicker.hidden) closeReactionPickerSoon();
         });
 
@@ -4384,7 +4402,12 @@
                 closeReactionTimer = null;
             }
         });
-        els.reactionPicker.addEventListener('mouseleave', closeReactionPicker);
+        // Leaving the picker closes it — DESKTOP hover only (same reason as the
+        // log's mouseout/mouseleave above: no hover-based dismiss on a phone).
+        els.reactionPicker.addEventListener('mouseleave', function () {
+            if (!canHover()) return;
+            closeReactionPicker();
+        });
 
         // A ticket reference inside a message opens that ticket's modal.
         //

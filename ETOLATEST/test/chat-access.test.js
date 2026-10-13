@@ -3961,8 +3961,18 @@ assert(
             'the held bubble must be lifted above the scrim (is-focused)'
         );
 
-        // Tapping the scrim dismisses the menu AND tears the overlay back down:
-        // scrim hidden again and the bubble lowered.
+        // The synthetic release-click that the browser fires the instant the
+        // finger lifts can land on the scrim — it MUST be swallowed, or the
+        // menu flickers shut (the "nawawala-wala" bug). First scrim click is
+        // that synthetic one: the menu stays open.
+        backdrop.dispatch('click', {});
+        assert.strictEqual(
+            picker.hidden, false,
+            'the synthetic release-click after a long-press must NOT close the menu'
+        );
+
+        // A real, deliberate tap on the scrim then dismisses the menu AND tears
+        // the overlay back down: scrim hidden again and the bubble lowered.
         backdrop.dispatch('click', {});
         assert.strictEqual(picker.hidden, true, 'tapping the scrim must close the menu');
         assert.strictEqual(backdrop.hidden, true, 'tapping the scrim must hide the focus overlay');
