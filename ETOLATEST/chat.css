@@ -860,37 +860,55 @@ body.chat-ticket-open .modal-overlay {
 .chat-reaction-picker {
     position: fixed;
     z-index: 60;
+    /* iMessage layout: a COLUMN — emoji row on top, divider, text action bar
+       below. It now anchors BELOW the held message (see openReactionPicker). */
     display: flex;
-    gap: 2px;
-    padding: 4px;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
     background: var(--bg-card);
     border: 1px solid var(--border-color);
-    border-radius: 10px;
+    border-radius: 14px;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
     /* Pops in from slightly below and small, so it reads as arriving from
        the message it belongs to. Kept short (~140ms): the row is meant to
-       feel instant on hover, not to make the user wait. */
-    transform-origin: bottom left;
+       feel instant, not to make the user wait. */
+    transform-origin: top left;
     animation: chatPickerIn 140ms cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
     will-change: transform, opacity;
 }
 
-/* The unified message context menu: [Reply] | [👍 ❤️ 👀 🎉 ❗]
-   Reply leads because it is the action people reach for most, and the
-   divider keeps it visually distinct from the reaction row so the toolbar
-   does not read as "six emoji". */
+/* The emoji row (top) and the text action bar (bottom) are each their own
+   horizontal flex row, spaced so the buttons read as one grouped control. */
+.chat-picker-reactions,
+.chat-picker-actions {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 2px;
+}
+
+/* The iMessage-style text actions: Copy · Unsend · Reply. Text, not icons, so
+   they grow to fit the label and stay legible — the whole point of the
+   redesign. */
 .chat-picker-action {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 32px;
-    height: 32px;
-    font-size: 0.85rem;
+    min-width: 56px;
+    /* min-height (not a fixed height) keeps a comfortable thumb target without
+       forcing a square icon box the way the old 32×32 did. */
+    min-height: 36px;
+    padding: 0 14px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    line-height: 1;
     border: none;
-    border-radius: 7px;
+    border-radius: 8px;
     background: transparent;
     color: var(--text-secondary);
     cursor: pointer;
+    white-space: nowrap;
     transition: transform 90ms ease, background 90ms ease, color 90ms ease;
 }
 
@@ -899,7 +917,7 @@ body.chat-ticket-open .modal-overlay {
     color: var(--color-primary);
 }
 
-.chat-picker-action:active { transform: scale(0.86); }
+.chat-picker-action:active { transform: scale(0.92); }
 
 /* ⚠️ .chat-picker-action sets display:inline-flex — an AUTHOR rule, which
    beats the user-agent `[hidden] { display:none }` cascade. So the Unsend
@@ -909,27 +927,28 @@ body.chat-ticket-open .modal-overlay {
    (style.css `.btn[hidden]`) and `.icon-btn` (theme.css) — same cure. */
 .chat-picker-action[hidden] { display: none; }
 
+/* Horizontal divider between the reaction row and the text action bar. */
 .chat-picker-divider {
-    width: 1px;
-    align-self: stretch;
-    margin: 5px 3px;
+    width: 100%;
+    height: 1px;
+    margin: 2px 0;
     background: var(--border-color);
 }
 
 /* Each emoji cascades in behind the panel. The stagger is tiny (18ms) so the
-   row still feels immediate rather than choreographed. The emoji are now
-   children 3-8 (Reply is 1, the divider is 2), so the delays shift with
-   them. */
+   row still feels immediate rather than choreographed. The emoji are now the
+   only children of .chat-picker-reactions (children 1-6), so the delays
+   shift to match — the first emoji must still animate. */
 .chat-reaction-picker .chat-reaction-option {
     animation: chatPickerEmojiIn 120ms cubic-bezier(0.2, 0.9, 0.3, 1.3) both;
 }
 
-.chat-reaction-picker .chat-reaction-option:nth-child(3) { animation-delay: 10ms; }
-.chat-reaction-picker .chat-reaction-option:nth-child(4) { animation-delay: 28ms; }
-.chat-reaction-picker .chat-reaction-option:nth-child(5) { animation-delay: 46ms; }
-.chat-reaction-picker .chat-reaction-option:nth-child(6) { animation-delay: 64ms; }
-.chat-reaction-picker .chat-reaction-option:nth-child(7) { animation-delay: 82ms; }
-.chat-reaction-picker .chat-reaction-option:nth-child(8) { animation-delay: 100ms; }
+.chat-picker-reactions .chat-reaction-option:nth-child(1) { animation-delay: 10ms; }
+.chat-picker-reactions .chat-reaction-option:nth-child(2) { animation-delay: 28ms; }
+.chat-picker-reactions .chat-reaction-option:nth-child(3) { animation-delay: 46ms; }
+.chat-picker-reactions .chat-reaction-option:nth-child(4) { animation-delay: 64ms; }
+.chat-picker-reactions .chat-reaction-option:nth-child(5) { animation-delay: 82ms; }
+.chat-picker-reactions .chat-reaction-option:nth-child(6) { animation-delay: 100ms; }
 
 /* The Unsend action reads as the destructive one, so it takes the danger
    tint on hover — distinct from Reply's neutral and the emoji row. */
@@ -1889,12 +1908,12 @@ body.chat-ticket-open .modal-overlay {
     .chat-log { padding: 14px; }
     .chat-composer { padding: 12px 14px; }
 
-    /* Phone tap targets. The action buttons (Reply + Unsend) and the emoji
-       row are 32px on desktop — fine for a mouse, too small for a thumb.
-       Apple/Google want ≥44px, so bump them here. */
+    /* Phone tap targets. The text action buttons (Copy · Unsend · Reply) get a
+       comfortable 44px min-height for a thumb; they stay text pills (no fixed
+       square box) so the labels never clip. The emoji row is bumped to 40px. */
     .chat-picker-action {
-        width: 44px;
-        height: 44px;
+        min-height: 44px;
+        padding: 0 18px;
         font-size: 1rem;
     }
     .chat-reaction-picker .chat-reaction-option {

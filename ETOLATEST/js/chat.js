@@ -840,22 +840,14 @@
                             'title="Cancel reply" aria-label="Cancel reply">&times;</button>' +
                     '</div>' +
                     '<label class="chat-sr-only" for="chatInput">Message</label>' +
-            // The ONE message context menu. It is not just a reaction picker
-            // any more: reply lives here too, so a message's actions are all
-            // in a single place instead of scattered across the header.
+            // The ONE message context menu. iMessage-style: the emoji reaction
+            // row sits on top, and a TEXT action bar (Copy · Unsend · Reply)
+            // sits below it, separated by a divider. Actions used to live in
+            // the header; now they are all in one popover anchored to the held
+            // message. Reply and Unsend are now TEXT, not icons.
             '<div class="chat-reaction-picker" id="chatReactionPicker" role="menu" aria-label="Message actions" hidden>' +
-                '<button type="button" class="chat-picker-action" role="menuitem" data-picker-reply' +
-                    ' title="Reply to this message" aria-label="Reply to this message">' +
-                    '<i class="fas fa-reply" aria-hidden="true"></i></button>' +
-                // UNSEND — retires YOUR OWN message into an "Unsent message"
-                // tombstone. Shipped hidden and revealed only when the open
-                // message is mine (see openReactionPicker -> syncUnsendButton),
-                // so it never appears on somebody else's message. tombstones
-                // via firestore.rules (author-only, text->'', one-way).
-                '<button type="button" class="chat-picker-action chat-picker-unsend" role="menuitem" data-picker-unsend' +
-                    ' title="Unsend this message" aria-label="Unsend this message" hidden>' +
-                    '<i class="fas fa-trash-alt" aria-hidden="true"></i></button>' +
-                '<span class="chat-picker-divider" role="separator" aria-hidden="true"></span>' +
+                // ---- Emoji reaction row (top) ----
+                '<div class="chat-picker-reactions">' +
                 REACTION_EMOJI.map(function (e) {
                     return '<button type="button" class="chat-reaction-option" role="menuitem"' +
                         ' data-picker-key="' + e.key + '"' +
@@ -864,6 +856,24 @@
                         '<span class="chat-reaction-option-glyph">' + reactionGlyph(e.key) + '</span>' +
                         '</button>';
                 }).join('') +
+                '</div>' +
+                '<span class="chat-picker-divider" role="separator" aria-hidden="true"></span>' +
+                // ---- Text action bar (bottom): Reply · Copy · Unsend ----
+                '<div class="chat-picker-actions">' +
+                // REPLY — quote this message into the composer.
+                '<button type="button" class="chat-picker-action" role="menuitem" data-picker-reply' +
+                    ' title="Reply to this message" aria-label="Reply to this message">Reply</button>' +
+                // COPY — copies the message text to the clipboard, then closes.
+                '<button type="button" class="chat-picker-action" role="menuitem" data-picker-copy' +
+                    ' title="Copy this message" aria-label="Copy this message">Copy</button>' +
+                // UNSEND — retires YOUR OWN message into an "Unsent message"
+                // tombstone. Shipped hidden and revealed only when the open
+                // message is mine (see openReactionPicker -> syncUnsendButton),
+                // so it never appears on somebody else's message. tombstones
+                // via firestore.rules (author-only, text->'', one-way).
+                '<button type="button" class="chat-picker-action chat-picker-unsend" role="menuitem" data-picker-unsend' +
+                    ' title="Unsend this message" aria-label="Unsend this message" hidden>Unsend</button>' +
+                '</div>' +
             '</div>' +
                     // Profile editor: display name + job title, so the thread
                     // shows "Maria — HR Manager" instead of an email address.
@@ -934,6 +944,7 @@
             mentionMenu: overlay.querySelector('#chatMentionMenu'),
             reactionPicker: overlay.querySelector('#chatReactionPicker'),
             pickerUnsend: overlay.querySelector('[data-picker-unsend]'),
+            pickerCopy: overlay.querySelector('[data-picker-copy]'),
             focusBackdrop: focusBackdrop,
             profileEditor: overlay.querySelector('#chatProfileEditor'),
             profileName: overlay.querySelector('#chatProfileName'),
@@ -4106,6 +4117,13 @@
 
     var reactionTargetId = null;
     var closeReactionTimer = null;
+    // MOBILE flicker guard. When a long-press opens the menu, the browser
+    // fires a synthetic `click` the instant the finger lifts. That click
+    // bubbles to the document dismiss handler and closes the menu it just
+    // opened — a flash-then-shut that reads as "buggy". Set this flag when the
+    // long-press opens the picker; the very next document click is swallowed
+    // (consumed once) so a real tap afterward still dismisses normally.
+    var suppressDismissClick = false;
 
     /** True when the browser really has a hovering pointer. */
     function canHover() {
@@ -4205,6 +4223,52 @@
         }
     }
 
+    /**
+     * Copy a message's plain text to the clipboard (the iMessage "Copy" action).
+     * Reads the RAW text from lastRenderedMessages so mentions/chips are not
+     * dragged along as markup — only the words. Uses the async Clipboard API
+     * when available and falls back to a hidden textarea + execCommand for
+     * older/insecure contexts. Confirms with a toast either way.
+     */
+    function copyMessageText(messageId) {
+        var msg = null;
+        if (lastRenderedMessages) {
+            msg = lastRenderedMessages.find(function (m) { return String(m.id) === String(messageId); });
+        }
+        var text = msg ? String(msg.text || '') : '';
+        // An unsent tombstone has no body worth copying.
+        if (!text || (msg && msg.unsent)) { showToast('Nothing to copy', 'info'); return; }
+
+        var done = function () { showToast('Copied', 'success'); };
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(done, function () { legacyCopy(text, done); });
+                return;
+            }
+        } catch (e) { /* fall through to legacy */ }
+        legacyCopy(text, done);
+    }
+
+    /** Clipboard fallback for browsers without the async Clipboard API. */
+    function legacyCopy(text, done) {
+        try {
+            var ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', '');
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            ta.style.top = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            ta.setSelectionRange(0, ta.value.length);
+            var ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            if (ok) { done(); } else { showToast('Copy failed', 'error'); }
+        } catch (e) {
+            showToast('Copy not supported here', 'error');
+        }
+    }
+
     function openReactionPicker(messageId, anchor) {
         if (!els.reactionPicker || !messageId) return;
         if (closeReactionTimer) {
@@ -4235,15 +4299,21 @@
                     if (pw && left + pw > window.innerWidth - 8) left = Math.max(8, window.innerWidth - pw - 8);
                 } catch (e) { /* offsetWidth unavailable in some test DOMs */ }
                 picker.style.left = left + 'px';
-                // Vertical: normally sit just ABOVE the message. On a phone a
-                // message near the TOP of the thread would push the popup off
-                // the top edge, hiding the actions — so clamp: if it would go
-                // above the viewport, flip it BELOW the message instead.
-                let top = box.top - 46;
-                try {
-                    const ph = picker.offsetHeight || 0;
-                    if (top < 8 && box.bottom + ph + 8 < window.innerHeight) top = box.bottom + 8;
-                } catch (e) { /* keep the computed top */ }
+                // Vertical: iMessage-style — sit BELOW the message by default.
+                // The popover is now taller (emoji row + divider + text bar), so
+                // measure its real height. If it would run off the BOTTOM of the
+                // viewport, flip it ABOVE the message instead (there is no room
+                // below). Either way it is clamped to stay on screen.
+                let ph = 0;
+                try { ph = picker.offsetHeight || 0; } catch (e) { /* test DOMs */ }
+                let below = box.bottom + 8;
+                let above = box.top - ph - 8;
+                let top;
+                if (ph && below + ph > window.innerHeight - 8 && above >= 8) {
+                    top = above;                 // no room below → flip above
+                } else {
+                    top = below;                 // default: below the message
+                }
                 picker.style.top = Math.max(8, top) + 'px';
             }
         } catch (e) { /* keep the CSS default position */ }
@@ -4408,6 +4478,10 @@
                 // this, so a mouse never triggers the scrim.
                 engageMessageFocus(row);
                 openReactionPicker(id, row);
+                // Flicker guard: swallow the synthetic release-click that the
+                // browser fires the instant this finger lifts, so the document
+                // dismiss handler does not close the menu we just opened.
+                suppressDismissClick = true;
             }, 400);
         });
         ['pointermove', 'pointerup', 'pointercancel', 'scroll'].forEach(function (type) {
@@ -4420,12 +4494,21 @@
             const target = reactionTargetId;
             if (!target) return;
 
-            // Reply — the non-reaction half of the context menu.
+            // REPLY — quote this message into the composer.
             if (event.target.closest && event.target.closest('[data-picker-reply]')) {
                 event.preventDefault();
                 closeReactionPicker();
                 startReply(target);
                 if (els.input) els.input.focus();
+                return;
+            }
+
+            // COPY — copy the message text to the clipboard, then close. Works
+            // on any message, mine or not.
+            if (event.target.closest && event.target.closest('[data-picker-copy]')) {
+                event.preventDefault();
+                copyMessageText(target);
+                closeReactionPicker();
                 return;
             }
 
@@ -4452,6 +4535,10 @@
         // Clicking anywhere else dismisses it.
         document.addEventListener('click', function (event) {
             if (els.reactionPicker.hidden) return;
+            // Flicker guard: the first click after a long-press open is the
+            // synthetic release-click — swallow it (once) so the menu we just
+            // opened is not immediately closed. Every later click dismisses.
+            if (suppressDismissClick) { suppressDismissClick = false; return; }
             if (event.target.closest &&
                 (event.target.closest('#chatReactionPicker') ||
                  event.target.closest('[data-reaction-msg]'))) return;

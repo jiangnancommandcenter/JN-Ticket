@@ -3125,21 +3125,32 @@ assert(
 );
 const chatMenuSrc = fs.readFileSync(path.join(__dirname, '..', 'js', 'chat.js'), 'utf8');
 assert(
-    /data-picker-reply/.test(chatMenuSrc) && /fa-reply/.test(chatMenuSrc),
-    'the context menu must offer Reply'
+    /data-picker-reply/.test(chatMenuSrc) && />Reply</.test(chatMenuSrc),
+    'the context menu must offer Reply (as a text action now, not an icon)'
+);
+assert(
+    /data-picker-copy/.test(chatMenuSrc) && />Copy</.test(chatMenuSrc),
+    'the context menu must offer Copy'
 );
 assert(
     /chat-picker-divider/.test(chatMenuSrc),
-    'the context menu must separate Reply from the reaction row with a divider'
+    'the context menu must separate the reaction row from the text action bar with a divider'
 );
-// The menu is a single unified toolbar: reply first, then the emoji.
+// The menu is a single unified popover with an explicit actions label.
 assert(
     /aria-label="Message actions"/.test(chatMenuSrc),
     'the menu is a message context menu, not just a reaction picker'
 );
+// iMessage layout: the emoji reaction row is on TOP, the text actions
+// (Copy/Unsend/Reply) sit BELOW it — so REACTION_EMOJI.map now comes first.
 assert(
-    chatMenuSrc.indexOf('data-picker-reply') < chatMenuSrc.indexOf('REACTION_EMOJI.map'),
-    'Reply must come FIRST in the menu, before the reaction row'
+    chatMenuSrc.indexOf('REACTION_EMOJI.map') < chatMenuSrc.indexOf('data-picker-reply'),
+    'the reaction row must come first; the text actions (Reply) go below it'
+);
+// The text actions live in their own row wrapper, distinct from the reactions.
+assert(
+    /chat-picker-reactions/.test(chatMenuSrc) && /chat-picker-actions/.test(chatMenuSrc),
+    'the picker must wrap the emoji row and the text action bar in their own rows'
 );
 
 // 61. No reactions yet => no chip row at all.
@@ -3292,10 +3303,11 @@ assert(
     'the chatPickerIn keyframes must be defined'
 );
 assert(
-    // The emoji are children 3-7 now: Reply is 1, the divider is 2. The
-    // stagger must follow them, or the first emoji would never animate.
-    /chat-reaction-option:nth-child\(3\)\s*\{\s*animation-delay/.test(css) &&
-        /chat-reaction-option:nth-child\(7\)\s*\{\s*animation-delay/.test(css),
+    // The emoji are now the only children of .chat-picker-reactions (1-6):
+    // the reaction row is on top, the text actions are in their own row below.
+    // The stagger must follow them, or the first emoji would never animate.
+    /chat-reaction-option:nth-child\(1\)\s*\{\s*animation-delay/.test(css) &&
+        /chat-reaction-option:nth-child\(6\)\s*\{\s*animation-delay/.test(css),
     'the emoji must cascade in with a per-item animation-delay stagger'
 );
 assert(
@@ -4031,10 +4043,71 @@ assert(
     );
 }
 
+// 91. LONG-PRESS FLICKER GUARD + iMessage TEXT ACTIONS. (a) When a long-press
+//     opens the menu on a phone, the browser fires a synthetic `click` the
+//     instant the finger lifts; without a guard that click closes the menu it
+//     just opened (flash-then-shut). The first document click after a
+//     long-press open must be swallowed. (b) The action bar is iMessage-style
+//     TEXT (Copy · Unsend · Reply) below the emoji row, and Copy writes the
+//     message text to the clipboard.
+{
+    const realMatchMedia3 = sandbox.window.matchMedia;
+    sandbox.window.matchMedia = (q) => ({ matches: /hover:\s*hover/.test(q) ? false : true });
+    // chatJs is scoped to the #90 block; read it fresh here.
+    const chatJs91 = fs.readFileSync(path.join(__dirname, '..', 'js', 'chat.js'), 'utf8');
+    try {
+        const backdrop3 = findById(body, 'chatFocusBackdrop');
+        if (backdrop3) backdrop3.hidden = true;
+
+        // --- (a) the flicker guard: source contract ---
+        // The document dismiss handler must consult suppressDismissClick and
+        // consume it once, so the release-click does not close the fresh menu.
+        assert(
+            /if \(suppressDismissClick\) \{ suppressDismissClick = false; return; \}/.test(chatJs91),
+            'the document dismiss handler must swallow the one synthetic click that follows a long-press open, ' +
+            'or the menu flickers shut the instant the finger lifts'
+        );
+        // And the long-press timer must set that flag when it opens the menu.
+        assert(
+            /suppressDismissClick = true;/.test(chatJs91),
+            'the long-press open path must arm the dismiss-click guard'
+        );
+
+        // --- (b) Copy action is wired and iMessage text actions exist ---
+        assert(
+            /function copyMessageText\(/.test(chatJs91) && /function legacyCopy\(/.test(chatJs91),
+            'Copy must be implemented (async Clipboard API + a textarea/execCommand fallback)'
+        );
+        // The text action bar must read Reply · Copy · Unsend, in that visual
+        // order. First occurrence of each data-picker-* attribute is in the
+        // picker markup (the dispatcher's closest() calls come later), so this
+        // pins the on-screen button order.
+        const replyPos = chatJs91.indexOf('data-picker-reply');
+        const copyPos = chatJs91.indexOf('data-picker-copy');
+        const unsendPos = chatJs91.indexOf('data-picker-unsend');
+        assert(
+            replyPos > -1 && copyPos > replyPos && unsendPos > copyPos,
+            'the text action buttons must read Reply · Copy · Unsend in that order — found ' +
+            'reply=' + replyPos + ' copy=' + copyPos + ' unsend=' + unsendPos
+        );
+        // Copy uses the raw message text, not the rendered HTML.
+        assert(
+            /copyMessageText\(target\)/.test(chatJs91),
+            'tapping Copy must copy the target message text'
+        );
+    } finally {
+        sandbox.window.matchMedia = realMatchMedia3;
+        picker.hidden = true;
+        const b3 = findById(body, 'chatFocusBackdrop');
+        if (b3) b3.hidden = true;
+    }
+}
+
 console.log('✅ Reply tests passed (quote block, replyTo stored, banner clears, no chaining, graceful fallback, escaped, header carries no action buttons).');
 console.log('✅ Context menu tests passed (reply + reactions in one menu; touch long-press opens it).');
 console.log('✅ Long-press focus overlay tests passed (dim+blur scrim, only the held bubble lifted, scale pop, tap-to-dismiss; desktop hover unaffected).');
 console.log('✅ Native-menu + auto-focus tests passed (user-select/touch-callout suppress the OS callout; contextmenu prevented; composer auto-focus is desktop-only).');
+console.log('✅ Long-press flicker + iMessage text-action tests passed (release-click no longer closes the menu; Copy/Unsend/Reply are text below the emoji row).');
 
 console.log('✅ Read receipt tests passed (single tick on send; blue seen tick; own receipt excluded).');
 }
