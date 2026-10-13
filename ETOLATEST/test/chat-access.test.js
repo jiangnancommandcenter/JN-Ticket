@@ -4082,6 +4082,16 @@ assert(
             /suppressDismissClick = true;/.test(chatJs91),
             'the long-press open path must arm the dismiss-click guard'
         );
+        // The guard must be DISARMED on the next real pointerdown. Without
+        // this, on a device that does NOT fire a synthetic release-click the
+        // flag lingers and swallows the user's first real tap — the "need to
+        // press twice to dismiss" bug. A deliberate tap fires its own
+        // pointerdown (the synthetic release-click does not), so this clears
+        // the guard in time for that tap's click to dismiss.
+        assert(
+            /document\.addEventListener\('pointerdown',[\s\S]{0,160}suppressDismissClick = false/.test(chatJs91),
+            'the flicker guard must be disarmed on the next pointerdown, or a real tap needs two presses to dismiss'
+        );
 
         // --- (b) Copy action is wired and iMessage text actions exist ---
         assert(

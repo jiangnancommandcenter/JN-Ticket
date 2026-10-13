@@ -4555,6 +4555,19 @@
             toggleReaction(target, option.getAttribute('data-picker-key'));
         });
 
+        // Disarm the flicker guard the moment the user starts a NEW touch.
+        // The synthetic release-click that trails a long-press has NO
+        // pointerdown of its own (the finger was already down when the menu
+        // opened), so it stays guarded and is swallowed — no flicker. A real,
+        // deliberate tap DOES fire its own pointerdown first, which clears the
+        // guard here, so that tap's click is free to dismiss — ONE tap, not
+        // two. This is correct whether or not the device fires the synthetic
+        // click: if it does, it is swallowed before this ever runs; if it does
+        // not, the guard simply expires here on the next real touch.
+        document.addEventListener('pointerdown', function () {
+            suppressDismissClick = false;
+        });
+
         // Clicking anywhere else dismisses it.
         document.addEventListener('click', function (event) {
             if (els.reactionPicker.hidden) return;
