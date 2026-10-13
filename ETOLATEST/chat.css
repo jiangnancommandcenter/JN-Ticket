@@ -552,6 +552,16 @@ body.chat-ticket-open .modal-overlay {
     overflow-y: auto;
     flex: 1 1 auto;
     min-height: 0;
+    /* ⚠️ MOBILE: suppress the NATIVE long-press menu so it does not fight our
+       custom context menu. Without these, a touch-and-hold on a message makes
+       the OS raise its own Copy / Select All / Share callout (and drag the blue
+       selection handles) ON TOP OF our overlay — the "double menu". user-select
+       stops the text from being selected at all; -webkit-touch-callout stops the
+       iOS link/image preview bubble. The message's own text is still readable;
+       it just is not selectable, which is exactly the Messenger/iOS behaviour. */
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
 }
 
 .chat-empty {

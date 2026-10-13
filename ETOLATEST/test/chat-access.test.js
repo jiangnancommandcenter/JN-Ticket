@@ -3992,10 +3992,49 @@ assert(
     }
 }
 
+// 90. NO DOUBLE MENU + NO AUTO-JUMP TO THE TEXTBOX (mobile). Two phone bugs,
+//     one commit. (a) A long-press must NOT also raise the OS Copy/Select All/
+//     Share callout on top of our custom menu. (b) Opening a chat must NOT
+//     focus the composer <textarea>, which on a phone summons the software
+//     keyboard and yanks the view to the input — "every tap jumps to the
+//     textbox". Both are fixed by the CSS user-select/touch-callout rules on
+//     .chat-log, a contextmenu preventDefault, and gating the composer
+//     auto-focus behind canHover().
+{
+    // (a) CSS: the message list must not be selectable and must suppress the
+    //     native callout, or the OS menu fights our overlay.
+    const logRule = (chatCss2.match(/\.chat-log\s*\{[^}]*\}/) || [''])[0];
+    assert(/user-select:\s*none/.test(logRule),
+        '.chat-log must set user-select:none or a long-press still selects text and shows the native menu');
+    assert(/-webkit-touch-callout:\s*none/.test(logRule),
+        '.chat-log must set -webkit-touch-callout:none or iOS still shows its link/preview bubble on long-press');
+
+    // (a) JS: a contextmenu on the log must be swallowed. Android fires
+    //     `contextmenu` on long-press EVEN with user-select:none, so without
+    //     this the OS popup appears beside our overlay.
+    const chatJs = fs.readFileSync(path.join(__dirname, '..', 'js', 'chat.js'), 'utf8');
+    assert(
+        /els\.log\.addEventListener\('contextmenu'[\s\S]{0,80}preventDefault\(\)/.test(chatJs),
+        'the native context menu on the message list must be prevented, or it doubles up with the custom menu'
+    );
+
+    // (b) The three passive composer auto-focus calls (openModal, openRoom,
+    //     restoreChatAfterTicket) must be gated behind canHover(), so a phone
+    //     does not pop the keyboard on open. Every els.input.focus() that is an
+    //     AUTO-focus must carry the guard; the explicit ones (after tapping
+    //     Reply, after sending, after a mention pick) must NOT be neutered.
+    const guardedFocus = (chatJs.match(/if \(typeof canHover !== 'function' \|\| canHover\(\)\) els\.input\.focus\(\);/g) || []).length;
+    assert(
+        guardedFocus >= 3,
+        'the passive composer auto-focus calls (openModal / openRoom / restoreChatAfterTicket) must each be ' +
+        'gated behind canHover() so a phone does not jump to the textbox — found ' + guardedFocus
+    );
+}
+
 console.log('✅ Reply tests passed (quote block, replyTo stored, banner clears, no chaining, graceful fallback, escaped, header carries no action buttons).');
 console.log('✅ Context menu tests passed (reply + reactions in one menu; touch long-press opens it).');
 console.log('✅ Long-press focus overlay tests passed (dim+blur scrim, only the held bubble lifted, scale pop, tap-to-dismiss; desktop hover unaffected).');
-console.log('✅ Avatar layout tests passed (avatar is a column beside the message, not a header above it).');
+console.log('✅ Native-menu + auto-focus tests passed (user-select/touch-callout suppress the OS callout; contextmenu prevented; composer auto-focus is desktop-only).');
 
 console.log('✅ Read receipt tests passed (single tick on send; blue seen tick; own receipt excluded).');
 }

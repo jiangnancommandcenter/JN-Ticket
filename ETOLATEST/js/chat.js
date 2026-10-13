@@ -1453,11 +1453,22 @@
         // The log is only focusable once a conversation is open, and there is
         // nothing to read yet, so focus the search box instead — it is the
         // first thing a user reaching the list actually wants.
+        //
+        // ⚠️ Auto-focus is DESKTOP-ONLY. On a phone, focusing the composer
+        // <textarea> summons the software keyboard, which covers half the
+        // thread and yanks the view down to the input — so every tap that
+        // opens the chat "jumps to the textbox". `canHover()` is the existing
+        // touch test (false on phones): skip the focus there and let the user
+        // tap the composer when THEY want to type. `scrollLogToBottom()` still
+        // runs so the thread lands on the newest message either way. The
+        // `typeof` guard keeps this safe in the isolated unit-test sandboxes
+        // that lift this function out on its own (there canHover is absent, and
+        // the desktop default — focus — is what those tests assert).
         if (els.input && !els.input.disabled) {
-            els.input.focus();
+            if (typeof canHover !== 'function' || canHover()) els.input.focus();
             scrollLogToBottom();
         } else if (els.listSearch) {
-            els.listSearch.focus();
+            if (typeof canHover !== 'function' || canHover()) els.listSearch.focus();
         }
         // Everything currently in the OPEN thread counts as read from now on.
         stampLastSeen();
@@ -3135,8 +3146,13 @@
         stampLastSeen();
         clearUnreadForActiveRoom();
         if (roomExists && isChatActuallyVisible()) markThreadRead(true);
+        // Auto-focus the composer on DESKTOP only — on a phone it raises the
+        // software keyboard and yanks the view to the input (see openModal()).
+        // scrollLogToBottom() runs on both so the thread lands on the newest
+        // message either way. `typeof` guard: safe when this function is lifted
+        // into an isolated test sandbox where canHover is not in scope.
         if (els.input && !els.input.disabled) {
-            els.input.focus();
+            if (typeof canHover !== 'function' || canHover()) els.input.focus();
             scrollLogToBottom();
         }
     }
@@ -4363,6 +4379,16 @@
                 longPressTimer = null;
             }
         }
+        // Kill the NATIVE context menu on the message list. On Android a long
+        // press fires a `contextmenu` event (the OS Copy/Select All/Share popup)
+        // EVEN with user-select:none, so it would appear alongside our custom
+        // overlay. preventDefault() here stops that; our own long-press handler
+        // below is what opens the menu. Desktop right-click is suppressed too,
+        // which is fine — the desktop path opens the menu on hover, never via a
+        // context menu.
+        els.log.addEventListener('contextmenu', function (event) {
+            event.preventDefault();
+        });
         els.log.addEventListener('pointerdown', function (event) {
             // Only where there is NO hover. `canHover()` is true on a desktop
             // that already opens the menu on mouseover, so returning when it
@@ -6452,15 +6478,17 @@
         if (!els.overlay) return;
         els.overlay.classList.remove('chat-suspended');
         els.overlay.classList.add('active');
-        // Focus the composer, matching openModal(). Deliberately NOT a
-        // markThreadRead() call: the user is returning to the thread they were
-        // already in, and re-stamping would swallow a receipt write they did
-        // not just perform.
+        // Focus the composer, matching openModal() — but DESKTOP only, so a
+        // phone does not pop the keyboard and jump to the input on return from
+        // a ticket modal. Deliberately NOT a markThreadRead() call: the user is
+        // returning to the thread they were already in, and re-stamping would
+        // swallow a receipt write they did not just perform. `typeof` guard:
+        // safe in the isolated sandboxes that run this function standalone.
         if (els.input && !els.input.disabled) {
-            els.input.focus();
+            if (typeof canHover !== 'function' || canHover()) els.input.focus();
             scrollLogToBottom();
         } else if (els.listSearch) {
-            els.listSearch.focus();
+            if (typeof canHover !== 'function' || canHover()) els.listSearch.focus();
         }
     }
 
