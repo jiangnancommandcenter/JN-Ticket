@@ -1111,12 +1111,9 @@
         <div class="form-card">
             <div class="ticket-form-logo" style="display:flex;align-items:center;justify-content:space-between;gap:16px;">
                 <div style="display:flex;align-items:center;gap:16px;">
-                    <!-- Brand PNG is black, so it must never sit unfiltered on the dark card.
-                         class="login-logo" opts into the shared white-logo treatment in theme.css
-                         (html[data-theme="dark"] .login-logo -> filter: brightness(0) invert(1)),
-                         the same recipe the main.html sidebar logo uses. In light mode no filter
-                         is applied. header.png is the offline fallback (same as the other pages). -->
-                    <img src="https://jiangnanhotpot.com/cdn/shop/files/jiangnan-logo-transparent_40f90d62-6f5e-4f34-9a1a-cf948a106904.png?v=1721972026" alt="Jiangnan Logo" class="login-logo" onerror="this.onerror=null;this.src='header.png';">
+                    <!-- Brand tile is the opaque full-color logo.png — it reads fine on the
+                         dark card as-is, so no dark-mode invert filter is applied. -->
+                    <img src="logo.png" alt="Jiangnan CCTV Logo" class="login-logo">
                     <div class="form-title">
                         <h2>Track Your Ticket</h2>
                         <p>Check the status of a ticket you have already submitted</p>
@@ -1553,7 +1550,7 @@
                                   '\nBranch: ' + (currentTrackData.branch || 'Unknown') +
                                   '\nRequested by: ' + requestedBy +
                                   '\nReason: ' + reason,
-                            icon: 'https://jiangnanhotpot.com/cdn/shop/files/jiangnan-logo-transparent_40f90d62-6f5e-4f34-9a1a-cf948a106904.png?v=1721972026',
+                            icon: 'icon-192.png',
                             tag: 'reopen-ticket-' + currentReopenTicketId,
                             requireInteraction: true,
                             silent: true
@@ -2323,7 +2320,7 @@ document.getElementById('trackDisplayBranch').textContent = data.branch || '\u20
                                       '\nBranch: ' + (trackTicketSnap.branch || 'Unknown') +
                                       '\nRequested by: ' + (note.requestedBy || 'Unknown') +
                                       (note.text ? '\nDetails: ' + note.text : ''),
-                                icon: 'https://jiangnanhotpot.com/cdn/shop/files/jiangnan-logo-transparent_40f90d62-6f5e-4f34-9a1a-cf948a106904.png?v=1721972026',
+                                icon: 'icon-192.png',
                                 tag: 'footage-ticket-' + currentTrackTicketId,
                                 requireInteraction: true,
                                 silent: true   // sound is handled by the dashboard listener

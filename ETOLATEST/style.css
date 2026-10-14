@@ -2520,13 +2520,20 @@ branch name, let alone pick one. */
 .modal-field label {
     font-size: 0.7rem;
     text-transform: uppercase;
-    color: var(--text-muted);
-    font-weight: 600;
-    margin-bottom: 4px;
-    letter-spacing: 0.3px;
+    color: var(--text-secondary);
+    font-weight: 700;
+    margin-bottom: 5px;
+    letter-spacing: 0.4px;
 }
 
-.modal-field span {
+/* The value box. BOTH <span> (ticket details modal) and <p> (violation
+   report modals) carry it, so every field reads label-over-value-box.
+   Before this the violation modals' <p> values had no treatment at all —
+   plain body text — and the label blended into the content (reported:
+   "Details of Observation" mixed with the paragraph). margin:0 kills the
+   <p> default margin inside this flex column. */
+.modal-field span,
+.modal-field p {
     font-size: 0.88rem;
     color: var(--text-primary);
     background: var(--bg-tertiary);
@@ -2534,6 +2541,7 @@ branch name, let alone pick one. */
     border-radius: 6px;
     border: 1px solid var(--border-color);
     word-break: break-word;
+    margin: 0;
 }
 
 /* Section divider inside the ticket details modal (Requester / Incident / etc.) */
@@ -6034,7 +6042,7 @@ body.mobile-nav-open .mobile-nav-backdrop {
     .modal-fields > .modal-field.full-width,
     .modal-fields > .modal-section-title { grid-column: 1 / -1; }
     .modal-field { min-width: 0; }
-    .modal-field span { overflow-wrap: anywhere; }
+    .modal-field span, .modal-field p { overflow-wrap: anywhere; }
 
     .form-row { grid-template-columns: 1fr; gap: 12px; }
 

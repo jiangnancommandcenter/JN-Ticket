@@ -119,9 +119,14 @@ body, .sidebar, .top-header, .card, .data-table, .table-container,
 }
 
 /* ============================================================== */
-/*  LOGO — black brand PNG rendered WHITE on dark surfaces         */
-/*  (brightness(0) turns any color pure black, invert(1) flips it  */
-/*  to white — works for the transparent Jiangnan logo)            */
+/*  LOGO — two logos, two treatments                               */
+/*  .brand-logo (sidebar): the legacy transparent black Jiangnan  */
+/*  PNG. On dark surfaces it must read WHITE, hence the invert    */
+/*  below (brightness(0) -> black, invert(1) -> white).           */
+/*  .login-logo (login-family pages): the new opaque full-color   */
+/*  brand tile (logo.png) — NO filter, it reads fine on light and */
+/*  dark surfaces as-is, so it is deliberately excluded from the  */
+/*  dark-mode rule.                                               */
 /* ============================================================== */
 .brand-logo {
     height: 40px;
@@ -134,8 +139,7 @@ body, .sidebar, .top-header, .card, .data-table, .table-container,
     transform: none !important;
 }
 
-html[data-theme="dark"] .brand-logo,
-html[data-theme="dark"] .login-logo {
+html[data-theme="dark"] .brand-logo {
     filter: brightness(0) invert(1);
     opacity: 0.92;
 }

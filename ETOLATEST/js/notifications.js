@@ -14,7 +14,7 @@
 // CDN changes nothing the user hears.
 const NOTIFICATION_SOUND_URL = 'sounds/notify.mp3';
 const NOTIFICATION_SOUND_FALLBACK_URL = 'https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3';
-const NOTIFICATION_ICON_URL = 'https://jiangnanhotpot.com/cdn/shop/files/jiangnan-logo-transparent_40f90d62-6f5e-4f34-9a1a-cf948a106904.png?v=1721972026';
+const NOTIFICATION_ICON_URL = 'icon-192.png';
 let notificationAudio = null;
 
 function preloadNotificationSound() {

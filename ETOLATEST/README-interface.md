@@ -67,9 +67,11 @@ Fixed in `theme.css`, where all dark overrides live. Each role keeps its **hue**
 
 The brand green `#72bf6a` stays the primary color in both themes; blue `#2563eb` is reserved for "In Progress / info".
 
-### Logo — black PNG rendered white in dark mode
+### Logo — two logos: new tile (login pages) + legacy sidebar logo
 
-All logo `<img>` tags use `class="brand-logo"` (app pages) or `class="login-logo"` (login-family pages). In dark mode `theme.css` applies `filter: brightness(0) invert(1)` which turns the black Jiangnan PNG pure white — no separate white asset needed. In light mode no filter is applied. A local fallback (`header.png`) loads via `onerror` if the CDN logo is unreachable. If you ever commission a true white logo, drop the filter rule.
+The login-family pages (`login.html` / `pending-approval.html` / `submit-ticket.html`, plus the print header in `main.html`) show the local **`logo.png`** (512×512 render of the curved brand tile — transparent rounded corners, so it sits cleanly on any card background) via `class="login-logo"`. The artwork is opaque and full-color, so **no dark-mode invert filter is applied** to it — it reads correctly on light and dark surfaces as-is.
+
+The sidebar (`main.html` / `ownerdashboard.html`) keeps the legacy transparent black Jiangnan PNG from the CDN via `class="brand-logo"`, with a `header.png` `onerror` fallback. `theme.css` still renders that one white in dark mode (`filter: brightness(0) invert(1)`) — the filter is scoped to `.brand-logo` only so it can never wash out the new tile.
 
 ## Shared header components
 
@@ -939,14 +941,15 @@ And the 200-entry cap could not prevent any of that — it only trimmed *afterwa
 
 > Before this, the app had **no favicon at all** — every browser tab and bookmark showed the default globe. It is also now installable as a standalone app.
 
-* **The brand mark is `nbg.png`** — the square 1254×1254 "JIANGAN / CCTV TICKETING SYSTEM" app tile (red enso ring, CCTV camera, ticket) the user uploaded. It is the single source of truth for every icon below.
-* **PNG icon set, generated from `nbg.png`** (resized with high-quality Lanczos, no new dependencies). A lone SVG cannot produce the tab / home-screen / install / window icon on most platforms, and **iOS ignores SVG for the home-screen icon**, so the set is PNG at concrete sizes:
+* **The brand mark is `change.png`** — the square "JIANGAN / CCTV TICKETING SYSTEM" app tile (red enso ring, CCTV camera, ticket) the user uploaded. The upload arrived on a grey canvas with a soft drop shadow around it; **`scripts/process-logo.py`** trims it to the curved **1106×1106** tile with transparent rounded corners (edges and corner radius fitted from the "white edge meets the shadow's dark core" pixel signature) and saves it back over `change.png`, preserving the original upload once as `change-original.png`. `nbg.png` is kept as an in-repo mirror of the curved master (refreshed by `scripts/generate-icons.py`).
+* **PNG icon set, generated from `change.png` by `scripts/generate-icons.py`** (resized with high-quality Lanczos, no new dependencies). A lone SVG cannot produce the tab / home-screen / install / window icon on most platforms, and **iOS ignores SVG for the home-screen icon**, so the set is PNG at concrete sizes:
   * **`favicon.png`** (48×48) — the browser-tab icon (`<link rel="icon">`).
   * **`icon-192.png`** / **`icon-512.png`** — PWA install + splash (`manifest.json`, `purpose: "any"`).
-  * **`icon-maskable-512.png`** (512×512, mark at ~80% on its dark background) — Android adaptive-icon safe-zone (`purpose: "maskable"`), so the OS can crop to a circle/squircle without clipping the camera.
+  * **`icon-maskable-512.png`** (512×512, mark at ~80% on the tile background) — Android adaptive-icon safe-zone (`purpose: "maskable"`), so the OS can crop to a circle/squircle without clipping the camera.
   * **`apple-touch-icon.png`** (180×180) — iOS "Add to Home Screen" (`<link rel="apple-touch-icon">`). Must be PNG.
+  * **`logo.png`** (512×512) — the login-family (`login.html` / `pending-approval.html` / `submit-ticket.html`) and print-header (`main.html`) logo. The sidebar `brand-logo` deliberately keeps the legacy CDN Jiangnan logo (see the Logo section above).
 * **`manifest.json`** — `display: standalone`, `short_name: "CCTV Center"`, and a PNG `icons` array (192, 512, maskable, apple-touch). Replaces the previous single-`any` SVG.
-* The old **`favicon.svg`** camera glyph is no longer referenced by any page or the manifest. The in-page sidebar/notification logos and the `header.png` fallback are left alone (they are separate brand assets).
+* The old **`favicon.svg`** camera glyph is no longer referenced by any page or the manifest. The login/print logos and the OS notifications now use the local **`logo.png`** / **`icon-192.png`**; the sidebar `brand-logo` keeps the legacy CDN Jiangnan logo and its `header.png` fallback.
 * **⚠️ `theme_color` cannot be a static value here.** A manifest normally uses `prefers-color-scheme` to pick light vs dark chrome, but **this app's dark mode is opt-in** (see the theme system above — the OS preference is deliberately ignored and dark is a toggle stored in `localStorage`). A `prefers-color-scheme`-driven chrome colour would therefore disagree with the page it is framing. Instead `theme.js` keeps `<meta name="theme-color">` in sync with the live theme (`THEME_COLOR = { light: '#72bf6a', dark: '#0B1220' }`), so the mobile address bar always matches what the user actually chose.
 * All **five** pages carry `<link rel="icon">` (now `favicon.png`), `<link rel="apple-touch-icon">` (now `apple-touch-icon.png`), `<link rel="manifest">` and the `theme-color` meta.
 * `js/theme.js` gained `updateThemeColorMeta()`, called from both `applyTheme()` and `init()` so the very first paint is already correct.
