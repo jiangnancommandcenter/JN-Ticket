@@ -71,6 +71,10 @@ let ownerActiveUserName = '';
 // Set by openOwnerReport(), cleared by closeOwnerReportModalFn() — never read
 // from the DOM, so a re-render mid-flight cannot redirect a request.
 let ownerReopenTicketId = '';
+// The same contract for the "Request additional footage" form: the id is only
+// valid while the modal is open, so a footage request can never be written to
+// a ticket the manager is no longer looking at.
+let ownerFootageTicketId = '';
 // ⚠️ CLOSE MUST BE ABLE TO OUTRUN AN OPEN STILL IN FLIGHT.
 //
 // openOwnerReport() adds the `active` class only AFTER its Firestore read
@@ -1146,6 +1150,35 @@ function ownerReopenNotes(ticket) {
   return comments.filter((c) => c && c.type === 'access_reopen_request');
 }
 
+/**
+ * Every footage_request note on a ticket, oldest first.
+ *
+ * The SAME note type the public Track page appends (submitFootageRequest in
+ * submit-ticket.html). js/notifications.js counts and announces exactly this
+ * string, so a request filed here joins the existing operator-notification
+ * pipeline instead of inventing a second one.
+ */
+function ownerFootageNotes(ticket) {
+  const comments = (ticket && Array.isArray(ticket.comments)) ? ticket.comments : [];
+  return comments.filter((c) => c && c.type === 'footage_request');
+}
+
+/**
+ * True while the latest footage request is still in flight.
+ *
+ * A filed request moves the ticket to "Insufficient Footage" and back to
+ * approvalStatus 'pending', so it leaves this dashboard's approved-only list
+ * the moment it is written. It can therefore only be observed as pending when
+ * the modal is re-rendered straight after the submit — which is exactly what
+ * handleOwnerFootageSubmit does. Once the operator re-resolves and a
+ * superadmin re-approves, the ticket returns to the list carrying the note in
+ * its history as fulfilled.
+ */
+function ownerFootagePending(ticket) {
+  if (!ownerFootageNotes(ticket).length) return false;
+  return String(ticket.status || '') === 'Insufficient Footage';
+}
+
 /** The signed-in manager's display name, for `requestedBy`. */
 function activeUserDisplayName() {
   if (ownerActiveUserName) return ownerActiveUserName;
@@ -1228,6 +1261,92 @@ function requestOwnerAccess(ticketId, reason) {
     } else {
       console.error('Re-access request error:', error);
       ownerToast('Failed to send your request. Please try again.', 'error');
+    }
+    return false;
+  });
+}
+
+/**
+ * File an "insufficient footage" request for an approved ticket, sending it
+ * back into the resolution pipeline. RESTORED FEATURE — this is the hand-off
+ * the public Track page (submit-ticket.html submitFootageRequest) performs,
+ * brought back to the Area Manager / RM/SM dashboard for exactly the moment
+ * it was removed for: the manager has watched the APPROVED resolution footage
+ * and judged it insufficient.
+ *
+ * The write matches the Track page field-for-field, because every downstream
+ * consumer is keyed on those fields:
+ *   - `type: 'footage_request'` — js/notifications.js counts and announces
+ *     exactly this string, so the operator gets the desktop notification with
+ *     no new plumbing;
+ *   - `status: 'Insufficient Footage'` — the operator's ticket list surfaces
+ *     it for re-work;
+ *   - `approvalStatus: 'pending'` — the ticket leaves this approved-only list
+ *     and re-enters the pipeline; the operator's next resolve KEEPS the old
+ *     clips and adds the new ones (mergeOperatorFootage), and the superadmin's
+ *     re-approval re-arms the viewing window (approveResolution +
+ *     hasFootageRequestComment). That is the whole documented cycle
+ *     (test/footage-accumulation.test.js).
+ *
+ * Returns the promise so a caller can chain, and never throws: the UI reports
+ * failure through `ownerToast`, not an unhandled rejection.
+ */
+function requestOwnerFootage(ticketId, details) {
+  const clean = String(details || '').trim();
+  if (!ticketId) return Promise.resolve(false);
+  // Same >=5 character rule as both the Track page and requestOwnerAccess(),
+  // so the three forms cannot disagree about what counts as a real request.
+  if (clean.replace(/\s+/g, '').length < 5) {
+    ownerToast('Please describe what footage you need (at least 5 characters).', 'error');
+    return Promise.resolve(false);
+  }
+  if (!db || typeof db.collection !== 'function') {
+    ownerToast('Could not send your request — try again.', 'error');
+    return Promise.resolve(false);
+  }
+
+  const requestedByEmail = (typeof auth !== 'undefined' && auth && auth.currentUser && auth.currentUser.email)
+    ? String(auth.currentUser.email)
+    : '';
+  const requestedBy = activeUserDisplayName();
+  const when = new Date();
+
+  return db.collection('tickets').doc(ticketId).get().then((snap) => {
+    if (!snap || !snap.exists) throw new Error('ticket not found');
+    const data = snap.data() || {};
+    // Re-check the gate on the FRESH document: the button was rendered from a
+    // read that may be a minute old. Only an APPROVED ticket that is not
+    // already in a footage-request cycle may accept a request.
+    if (!isApprovedTicket(data)) {
+      throw new Error('not approved');
+    }
+    if (ownerFootagePending(data)) {
+      throw new Error('already requested');
+    }
+    const note = {
+      type: 'footage_request',
+      text: clean,
+      requestedBy: requestedBy,
+      requestedByEmail: requestedByEmail,
+      requestedAt: when
+    };
+    return db.collection('tickets').doc(ticketId).update({
+      status: 'Insufficient Footage',
+      approvalStatus: 'pending',
+      comments: firebase.firestore.FieldValue.arrayUnion(note),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+  }).then(() => {
+    ownerToast('Footage request sent — the operator has been notified.', 'success');
+    return true;
+  }).catch((error) => {
+    if (error && error.message === 'not approved') {
+      ownerToast('This ticket is no longer approved, so footage cannot be requested.', 'info');
+    } else if (error && error.message === 'already requested') {
+      ownerToast('Additional footage was already requested for this ticket.', 'info');
+    } else {
+      console.error('Footage request error:', error);
+      ownerToast('Failed to send the request. Please try again.', 'error');
     }
     return false;
   });
@@ -1365,6 +1484,9 @@ window.openOwnerReport = function(reportId) {
   // rendered form's markup. Cleared when the modal closes so a stale id can
   // never be written to after a different ticket is opened.
   ownerReopenTicketId = reportId;
+  // Same for the footage-request form, so the delegated submit always knows
+  // which ticket it is filing against.
+  ownerFootageTicketId = reportId;
   try { if (window.RefreshState) window.RefreshState.capture('owner', { tab: 'reports', modal: 'report', id: reportId }); } catch (e) { /* ignore */ }
 
   db.collection('tickets').doc(reportId).get().then(async (snap) => {
@@ -1581,6 +1703,69 @@ window.openOwnerReport = function(reportId) {
          </div>`
       : '';
 
+    // ===== Request additional footage (Area Manager / RM/SM only) =====
+    //
+    // RESTORED FEATURE — the form removed from this dashboard is back, and it
+    // belongs exactly here: the manager has just watched the APPROVED
+    // resolution footage and decided it is not enough. The write is the same
+    // hand-off the public Track page performs (see requestOwnerFootage), so
+    // the ticket re-enters the pipeline with the operator notified and the
+    // existing clips preserved for the next round.
+    //
+    // ROLE-GATED to isAreaManager() ('owner' + 'rmsm'): HR and superadmins
+    // have their own review flow and must not re-open a manager's decision.
+    // Shown only while access is OPEN — asking for more evidence on a ticket
+    // whose footage is already withheld makes no sense; the re-access form
+    // above is the right tool there.
+    const footageNotes = ownerFootageNotes(rawData);
+    const footagePending = ownerFootagePending(rawData);
+    const latestFootageNote = footageNotes.length ? footageNotes[footageNotes.length - 1] : null;
+    const footageFormHtml = footagePending
+      ? `<div class="owner-footage-status pending">
+           <i class="fas fa-hourglass-half"></i>
+           Additional footage requested — the operator has been notified.
+           ${latestFootageNote && latestFootageNote.requestedAt ? `<span class="owner-footage-when">Requested ${escapeHTML(formatDate(latestFootageNote.requestedAt))}</span>` : ''}
+         </div>`
+      : `<form class="owner-footage-form" id="ownerFootageForm">
+           <label for="ownerFootageDetails"><i class="fas fa-video"></i> Request additional footage</label>
+           <textarea id="ownerFootageDetails" rows="3" maxlength="500"
+                     placeholder="What else do you need? e.g. a wider angle covering the exit, a clearer view of the suspect"></textarea>
+           <div class="owner-footage-actions">
+             <span class="owner-footage-hint">The operator is notified and the ticket goes back for re-work. Nothing is approved automatically.</span>
+             <button type="submit" class="btn btn-primary btn-sm" id="ownerFootageSubmit">
+               <i class="fas fa-paper-plane"></i> Request footage
+             </button>
+           </div>
+         </form>`;
+    // The history of previous asks, mirroring the public Track page.
+    const footageHistoryHtml = footageNotes.length
+      ? `<div class="owner-footage-history">
+           <h4>Footage request history</h4>
+           ${footageNotes.map((n, i) => {
+             const isLatest = i === footageNotes.length - 1;
+             const fulfilled = !isLatest || !footagePending;
+             return `<div class="owner-footage-item">
+               <div class="owner-footage-item-text">${escapeHTML(n.text || '—')}</div>
+               <div class="owner-footage-item-meta">
+                 ${escapeHTML(n.requestedBy || 'Area Manager')}${n.requestedAt ? ' · ' + escapeHTML(formatDate(n.requestedAt)) : ''}
+               </div>
+               <div class="owner-footage-status ${fulfilled ? 'fulfilled' : 'pending'}">
+                 ${fulfilled ? 'Fulfilled' : 'Awaiting re-work'}
+               </div>
+             </div>`;
+           }).join('')}
+         </div>`
+      : '';
+    const footageHtml = isAreaManager() && !expired
+      ? `<div class="review-card footage${footageNotes.length && !footagePending ? ' review-fulfilled' : ''}">
+           <div class="review-card-header">
+             <h3><i class="fas fa-video"></i> Additional Footage</h3>
+           </div>
+           ${footageFormHtml}
+           ${footageHistoryHtml}
+         </div>`
+      : '';
+
     const html = expired ? `
       <!-- ===== EXPIRED: metadata only, no payload ===== -->
       <div class="owner-access-expired">
@@ -1659,6 +1844,9 @@ window.openOwnerReport = function(reportId) {
         <div class="review-attachments-label"><i class="fas fa-film"></i> Operator's Resolution Footage <span>(${operatorFiles.length})</span></div>
         <div class="owner-attachment-list">${operatorAttHtml}</div>
       </div>
+
+      <!-- ===== SECTION 3: REQUEST ADDITIONAL FOOTAGE (Area Manager / RM/SM only) ===== -->
+      ${footageHtml}
     `;
 
     // ⚠️ A LIVE CLOCK INSIDE THE MODAL, not just in the list. The manager reads the
@@ -1753,6 +1941,49 @@ function handleOwnerReopenSubmit(event) {
   });
 }
 
+/**
+ * Submit handler for the "Request additional footage" form.
+ *
+ * DELEGATED from the modal body and bound ONCE, for the same reason as the
+ * re-access submit: the body is re-rendered on every open, so a per-render
+ * listener would stack up and fire one request per open.
+ *
+ * Re-reads the ticket and re-renders afterwards so the pending state is real
+ * data from the write that landed, not an optimistic guess.
+ */
+function handleOwnerFootageSubmit(event) {
+  event.preventDefault();
+  const form = event.target;
+  if (!form || form.id !== 'ownerFootageForm') return;
+
+  const detailsEl = $owner('ownerFootageDetails');
+  const details = detailsEl ? detailsEl.value : '';
+  const ticketId = ownerFootageTicketId;
+  if (!ticketId) {
+    ownerToast('Could not tell which ticket this is. Close and reopen it.', 'error');
+    return;
+  }
+
+  const btn = $owner('ownerFootageSubmit');
+  const originalHtml = btn ? btn.innerHTML : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sending...';
+  }
+
+  requestOwnerFootage(ticketId, details).then((ok) => {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = originalHtml;
+    }
+    if (ok) {
+      // Re-render from the fresh document so the pending state reflects the
+      // write that actually landed.
+      window.openOwnerReport(ticketId);
+    }
+  });
+}
+
 
 function closeOwnerReportModalFn() {
   // The X only HIDES the modal — "close" here means dismiss the dialog, never
@@ -1764,6 +1995,8 @@ function closeOwnerReportModalFn() {
   ownerModalGen++;
   // The re-access form's ticket id is only valid while the modal is open.
   ownerReopenTicketId = '';
+  // Same for the footage-request form.
+  ownerFootageTicketId = '';
   // ⚠️ THE CLOCK IS NOT STOPPED BY CLOSING THE MODAL — the expiry keeps running,
   // which is the whole rule. Only the DISPLAY is torn down: the interval would
   // otherwise tick against hidden nodes, costing a document sweep every second
@@ -2220,6 +2453,9 @@ function bindOwnerEvents() {
   // render would attach a second listener each time the modal opened, firing
   // the request N times for N opens.
   ownerReportModalBody?.addEventListener('submit', handleOwnerReopenSubmit);
+  // Same delegation for the footage-request form: both handlers guard on
+  // their own form id, so one body-level listener each cannot cross-fire.
+  ownerReportModalBody?.addEventListener('submit', handleOwnerFootageSubmit);
 
   ownerReportModal?.addEventListener('click', (e) => {
     if (e.target === ownerReportModal) closeOwnerReportModalFn();

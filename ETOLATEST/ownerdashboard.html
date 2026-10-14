@@ -633,6 +633,101 @@
         .owner-reopen-item-text { font-size: 0.8rem; color: var(--text-primary); }
         .owner-reopen-item-meta { font-size: 0.72rem; color: var(--text-muted); }
 
+        /* ---- Request additional footage form (Area Manager / RM/SM) ----
+           Same treatment as the re-access form: amber is the "normal,
+           expected action" colour, not an error. The video glyph takes the
+           brand primary so the two request forms never read as the same
+           action. */
+        .owner-footage-form {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 14px;
+            padding: 14px;
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+            background: var(--bg-tertiary);
+        }
+        .owner-footage-form label {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            font-size: 0.85rem;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+        .owner-footage-form label i { color: var(--color-primary); }
+        .owner-footage-form textarea {
+            width: 100%;
+            min-height: 76px;
+            max-height: 200px;
+            padding: 10px 12px;
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            background: var(--bg-input);
+            color: var(--text-primary);
+            font-family: inherit;
+            font-size: 0.85rem;
+            line-height: 1.5;
+            resize: vertical;
+        }
+        .owner-footage-form textarea:focus {
+            outline: none;
+            border-color: var(--color-primary);
+            /* Bare token, no rgba() fallback — same focus-ring convention as
+               the re-access textarea and what owner-dark-mode.test.js enforces. */
+            box-shadow: 0 0 0 3px var(--color-primary-bg);
+        }
+        .owner-footage-actions {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .owner-footage-hint {
+            flex: 1;
+            min-width: 180px;
+            font-size: 0.75rem;
+            line-height: 1.4;
+            color: var(--text-muted);
+        }
+        /* Pending / fulfilled status line, and the per-request history items. */
+        .owner-footage-status {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            margin-top: 12px;
+            font-size: 0.8rem;
+            font-weight: 700;
+        }
+        .owner-footage-status.pending { color: var(--color-warning); }
+        .owner-footage-status.fulfilled { color: var(--color-resolved); margin-top: 4px; }
+        .owner-footage-when { font-weight: 500; color: var(--text-muted); }
+        .owner-footage-history {
+            margin-top: 14px;
+            padding-top: 12px;
+            border-top: 1px solid var(--border-color);
+        }
+        .owner-footage-history h4 {
+            margin: 0 0 8px;
+            font-size: 0.8rem;
+            font-weight: 700;
+            color: var(--text-secondary);
+        }
+        .owner-footage-item {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            padding: 9px 11px;
+            margin-bottom: 6px;
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            background: var(--bg-tertiary);
+        }
+        .owner-footage-item-text { font-size: 0.8rem; color: var(--text-primary); }
+        .owner-footage-item-meta { font-size: 0.72rem; color: var(--text-muted); }
+
     </style>
     <!-- ============================================================ -->
     <!--  OWNER DASHBOARD PRESENTATION POLISH                         -->

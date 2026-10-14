@@ -734,23 +734,115 @@ assert(/return String\(auth\.currentUser\.email\)/.test(extractFn('activeUserDis
 console.log('  PASS  the submit is delegated once, and the requester is identified');
 
 // ============================================================================
-// 6b. "REQUEST ADDITIONAL FOOTAGE" HAS BEEN REMOVED FROM THIS DASHBOARD
+// 6b. "REQUEST ADDITIONAL FOOTAGE" IS BACK ON THIS DASHBOARD
 // ============================================================================
-// Every ticket the Area Manager / HR dashboard shows is already RESOLVED and
-// approved, so there is nothing left to find insufficient - the form that used
-// to sit here could only ever ask an operator to re-open finished work. It was
-// removed on request. These assertions lock the removal in: the public Track
-// page (submit-ticket.html) keeps its OWN footage flow untouched; only this
-// dashboard's copy is gone.
-assert(!/ownerFootageForm|ownerFootageDetails|ownerFootageSubmit/.test(ownerJs),
-    'the Area Manager dashboard must no longer render a Request-additional-footage form');
-assert(!/function requestOwnerFootage|function handleOwnerFootageSubmit|ownerFootagePending|ownerFootageNotes/.test(ownerJs),
-    'the footage-request helpers/handler must be gone from js/owner-dashboard.js');
-assert(!/ownerFootageTicketId/.test(ownerJs),
-    'the footage submit state variable must be gone');
-assert(!/handleOwnerFootageSubmit\s*\)/.test(ownerJs),
-    'the footage submit listener must be unbound');
-console.log('  PASS  the dashboard Request-additional-footage form is removed (Track page keeps its own)');
+// The form was removed once ("every ticket here is already approved, so there
+// is nothing left to find insufficient") and has now been RESTORED for the
+// Area Manager / RM/SM: watching the APPROVED resolution footage and judging
+// it insufficient is exactly the moment the form exists for. The write is the
+// SAME hand-off the public Track page performs (submit-ticket.html
+// submitFootageRequest), so the ticket re-enters the pipeline with the
+// operator notified (js/notifications.js already counts footage_request
+// notes), the existing clips preserved (mergeOperatorFootage) and the viewing
+// window re-armed on re-approval (approveResolution + hasFootageRequestComment).
+//
+// These assertions lock the restoration in the same way section 6 locks the
+// re-access flow: readers, write contract, UI states, delegation, and the
+// open/close id contract. The Track page keeps its own untouched flow.
+const footageHelpers = ['ownerFootageNotes', 'ownerFootagePending']
+    .map(extractFn).join('\n');
+
+// Load the two pure readers into the same sandbox as the gate helpers.
+vm.runInContext(footageHelpers + '\nglobalThis.__footage = {' +
+    ' ownerFootageNotes: ownerFootageNotes, ownerFootagePending: ownerFootagePending };', sandbox);
+const F = sandbox.__footage;
+assert(F, 'the footage readers were not loaded into the sandbox');
+
+// Only footage_request notes count — an access_reopen_request must never leak
+// into the footage history (the reopen reader filters the same list the other
+// way, and section 6 asserts that from its side).
+const footageNotesOf = (ticket) => F.ownerFootageNotes(ticket).map((c) => c.text).join('|');
+assert.strictEqual(
+    footageNotesOf({ comments: [
+        { type: 'footage_request', text: 'need the exit cam' },
+        { type: 'access_reopen_request', text: 'audit' }
+    ] }),
+    'need the exit cam',
+    'only footage_request notes count — the two note types must never cross lists'
+);
+assert.strictEqual(footageNotesOf({}), '', 'a ticket with no comments has no footage history');
+assert.strictEqual(footageNotesOf({ comments: 'not-an-array' }), '',
+    'a non-array comments field must not throw');
+
+// Pending means the write landed and the operator has not re-worked yet: the
+// status stays "Insufficient Footage" until the next resolve.
+assert.strictEqual(F.ownerFootagePending({ comments: [{ type: 'footage_request' }], status: 'Insufficient Footage' }), true,
+    'a filed request is pending while the status is still Insufficient Footage');
+assert.strictEqual(F.ownerFootagePending({ comments: [{ type: 'footage_request' }], status: 'Resolved' }), false,
+    'once the operator re-resolves the request is no longer pending');
+assert.strictEqual(F.ownerFootagePending({ status: 'Insufficient Footage' }), false,
+    'the status alone is not a request — a footage_request note must exist');
+assert.strictEqual(F.ownerFootagePending({}), false, 'no notes is not pending');
+console.log('  PASS  the footage state readers, including a non-array comments field');
+
+// The WRITE contract — the same fields submitFootageRequest() writes on the
+// Track page, because every downstream consumer is keyed on them.
+const footageSrc = extractFn('requestOwnerFootage');
+[
+    ["type: 'footage_request'", "the note's `type` must be exactly 'footage_request' — " +
+        'countFootageRequests() in js/notifications.js filters on that string, and a typo ' +
+        'means the operator is never notified'],
+    ["status: 'Insufficient Footage'", 'the ticket must go back to Insufficient Footage so the ' +
+        'operator ticket list surfaces it for re-work'],
+    ["approvalStatus: 'pending'", 'the ticket must leave this approved-only list and re-enter the ' +
+        'pipeline — the documented cycle in test/footage-accumulation.test.js'],
+    ['comments: firebase.firestore.FieldValue.arrayUnion(note)',
+        'the request must APPEND a comments note via arrayUnion, so repeat asks accumulate'],
+    ['isApprovedTicket(data)',
+        'the request must RE-CHECK approval on the freshly-read document — a ticket that was ' +
+        'un-approved a second ago must not accept a stale request'],
+    ['length < 5',
+        'the details must be at least 5 characters — same rule as the Track page and the ' +
+        're-access form, so the three forms cannot disagree'],
+].forEach(([token, why]) => {
+    assert(footageSrc.indexOf(token) > -1, `requestOwnerFootage() must include ${token} — ${why}`);
+});
+assert(/ownerFootagePending\(data\)/.test(footageSrc),
+    'a ticket already in a footage-request cycle must be refused, not double-requested');
+console.log('  PASS  the write contract matches the Track page hand-off');
+
+// The UI. The card renders ONLY in the non-expired branch (the re-access form
+// is the right tool for a ticket whose footage is withheld), and only for the
+// Area Manager / RM/SM.
+[
+    ['id="ownerFootageForm"', 'the form must be rendered when nothing is pending'],
+    ['id="ownerFootageDetails"', 'the details textarea must exist'],
+    ['id="ownerFootageSubmit"', 'the submit button must exist'],
+    ['ownerFootageNotes(rawData)', 'the history must be rendered from the notes'],
+].forEach(([token, why]) => {
+    assert(modalSrc.indexOf(token) > -1, `the report modal must include ${token} — ${why}`);
+});
+assert(/const footageHtml = isAreaManager\(\) && !expired/.test(modalSrc),
+    'the footage card must be ROLE-GATED to isAreaManager() (owner + rmsm) and only render ' +
+    'while access is open — HR and superadmins have their own review flow');
+assert(nonExpiredTemplate.indexOf('${footageHtml}') > -1,
+    'the footage card must be injected into the NON-expired template');
+assert(nonExpiredTemplate.indexOf('ownerFootageForm') === -1,
+    'the footage form must never render for a ticket whose access is closed — the ' +
+    're-access form above is the right tool there');
+console.log('  PASS  the footage UI states, role gate and expiry gate');
+
+// The submit must be DELEGATED and bound once, exactly like the re-access one.
+assert(/ownerReportModalBody\?\.addEventListener\('submit', handleOwnerFootageSubmit\)/.test(ownerJs),
+    'the footage submit must be DELEGATED from the modal body and bound once — the body is ' +
+    're-rendered on every open, so binding inside the render fires one request per open');
+assert(/event\.target/.test(extractFn('handleOwnerFootageSubmit')) &&
+    /ownerFootageForm/.test(extractFn('handleOwnerFootageSubmit')),
+    'the delegated handler must ignore submits from anything but #ownerFootageForm');
+assert(/ownerFootageTicketId = reportId/.test(ownerJs) && /ownerFootageTicketId = ''/.test(ownerJs),
+    'the open ticket id must be SET on open and CLEARED on close, so a stale id can never be ' +
+    'written to after a different ticket is opened');
+console.log('  PASS  the submit is delegated once, and the ticket id is set/cleared with the modal');
 
 // ============================================================================
 // 7. THE ?ticket= DEEP LINK FROM THE APPROVAL EMAIL
@@ -1001,7 +1093,8 @@ console.log('\n✅ Area Manager approval + expiry tests passed (approved-only li
     'rejected/legacy hidden; expiry delegated to firebase.js; expired rows stay listed but badged; the ' +
     'modal withholds description, findings and ALL attachments; dead Reports code removed; themed styles; ' +
     'and a re-access request that writes the SAME two fields the existing superadmin workflow reads; ' +
-    'the dashboard Request-additional-footage form is REMOVED, while the public Track page keeps its own).');
+    'the dashboard Request-additional-footage form is RESTORED for the Area Manager / RM/SM ' +
+    '(same footage_request hand-off the public Track page performs).');
 
 // 8. TICKET REVIEWS PHONE CARD (matches the mobile mockup): Branch + status
 //    pill on top, Incident/Reporter and the two dates in a 2-column grid,

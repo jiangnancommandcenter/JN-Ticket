@@ -2590,6 +2590,13 @@ branch name, let alone pick one. */
 .review-card.reopen { border-left: 5px solid var(--color-warning); background: var(--color-warning-bg); }
 .review-card.reopen .review-card-header h3 i { color: var(--color-warning); }
 .review-card.reopen.review-fulfilled { border-left-color: var(--color-resolved); background: var(--color-resolved-bg); }
+/* Request-additional-footage card (Area Manager / RM/SM asks the operator for
+   more evidence — the ticket goes back into the pipeline for re-work). Amber
+   while the ask is open, resolved-green once it has been actioned, mirroring
+   the re-access card so both request cards read identically. */
+.review-card.footage { border-left: 5px solid var(--color-warning); background: var(--color-warning-bg); }
+.review-card.footage .review-card-header h3 i { color: var(--color-warning); }
+.review-card.footage.review-fulfilled { border-left-color: var(--color-resolved); background: var(--color-resolved-bg); }
 
 /* Card header (title + submitted/resolved by chip) */
 .review-card-header {
