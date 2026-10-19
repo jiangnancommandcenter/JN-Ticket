@@ -482,6 +482,13 @@ const firestoreService = {
             // Cleared so a later re-transfer does not show a stale revert time.
             managerRevertedAt: firebase.firestore.FieldValue.delete(),
             managerRevertedBy: firebase.firestore.FieldValue.delete(),
+            // Clear any stale expiry stamps from a previous transfer cycle so the
+            // Area Manager gets a fresh 1-minute timer when they open the report.
+            managerExpiresAt: firebase.firestore.FieldValue.delete(),
+            managerExpiresAtMs: firebase.firestore.FieldValue.delete(),
+            managerOpenedAt: firebase.firestore.FieldValue.delete(),
+            managerOpenedBy: firebase.firestore.FieldValue.delete(),
+            managerOpenedByName: firebase.firestore.FieldValue.delete(),
             updatedAt: firebase.firestore.FieldValue.serverTimestamp()
         });
     },
@@ -500,11 +507,43 @@ const firestoreService = {
             managerTransferredAt: firebase.firestore.FieldValue.delete(),
             managerTransferredBy: firebase.firestore.FieldValue.delete(),
             managerTransferredByName: firebase.firestore.FieldValue.delete(),
+            // Clean up expiry stamps so a re-transfer doesn't immediately
+            // trigger the auto-revert loop from a stale managerExpiresAt.
+            managerExpiresAt: firebase.firestore.FieldValue.delete(),
+            managerExpiresAtMs: firebase.firestore.FieldValue.delete(),
+            managerOpenedAt: firebase.firestore.FieldValue.delete(),
+            managerOpenedBy: firebase.firestore.FieldValue.delete(),
+            managerOpenedByName: firebase.firestore.FieldValue.delete(),
             managerRevertedAt: firebase.firestore.FieldValue.serverTimestamp(),
             managerRevertedBy: byEmail || null,
             managerRevertedByName: byName || null,
             updatedAt: firebase.firestore.FieldValue.serverTimestamp()
         });
+    },
+
+    /**
+     * Stamp when an Area Manager first opens a transferred violation modal.
+     * Starts the 1-minute countdown. After managerExpiresAt the report should
+     * auto-revert (managerStatus deleted) so it returns to the superadmin's
+     * command-center list.
+     *
+     * Only the Area Manager (owner) opens these modals — HR and superadmin
+     * have their own violation lists and never call this.
+     */
+    async markViolationOpenedForAreaManager(violationId, openedByEmail, openedByName) {
+        const now = new Date();
+        const expiresAt = new Date(now.getTime() + 60 * 1000); // +1 minute
+        await db.collection('violations').doc(violationId).update({
+            managerOpenedAt: firebase.firestore.FieldValue.serverTimestamp(),
+            managerExpiresAt: firebase.firestore.FieldValue.serverTimestamp(),
+            // Client-computed expiry so the countdown UI can start without
+            // waiting for the server round-trip.
+            managerExpiresAtMs: expiresAt.getTime(),
+            managerOpenedBy: openedByEmail || null,
+            managerOpenedByName: openedByName || null,
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+        return expiresAt;
     },
 
     /**

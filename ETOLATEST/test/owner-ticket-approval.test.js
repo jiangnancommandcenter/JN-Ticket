@@ -226,6 +226,10 @@ assert(
     /ownerTicketAccessFilter\.style\.display = showsWindow/.test(ownerJs),
     'the Access FILTER must be hidden too — an <option> that can never match is a control that lies'
 );
+assert(
+    /ownerTicketStatusFilter\.style\.display = showsWindow/.test(ownerJs),
+    'the Status FILTER must be hidden too — HR/superadmin rows are always "Resolved", so for them it is dead'
+);
 // And the explanatory sentence must not claim a 2-day window to someone without one.
 assert(
     /if \(!expiryAppliesToViewer\(\)\) \{\s*ownerWindowNote\.textContent = '';/.test(ownerJs),
@@ -309,15 +313,13 @@ assert(
     /status-badge expired/.test(listSrc),
     'an expired approved row must carry the Access-closed badge — the row STAYS (badged), it is not hidden'
 );
-// The visible WORD is "No access" (the bare "Expired" read as the ticket being
-// expired, not the viewing window closing; "Access closed" then described the
-// mechanism rather than the consequence), but the CLASS did not:
-// `.status-badge.expired` is shared with the superadmin Approvals table in
-// script.js, so renaming it here would be a breaking change for a page this
-// file does not own. Word and class are now deliberately different things.
+// The visible WORD is now "Expired" (changed on request), and it matches the
+// CLASS: `.status-badge.expired` is shared with the superadmin Approvals table
+// in script.js, so the class name is pinned and reused here. Word and class now
+// agree — the row STAYS (badged), it is not hidden.
 assert(
-    /No access/.test(listSrc) && /status-badge expired/.test(listSrc),
-    'the expired row must say "No access" while still using the shared .status-badge.expired class'
+    /Expired<\/span>/.test(listSrc) && /status-badge expired/.test(listSrc),
+    'the expired row must say "Expired" while still using the shared .status-badge.expired class'
 );
 
 // ⚠️ THE ROW MUST NOT BE FILTERED AWAY WHEN IT EXPIRES. The requirement is that
@@ -512,18 +514,59 @@ assert(
 );
 
 // --- (b) SEPARATION -------------------------------------------------------------
+// ⚠️ THE ID IS BACK — deliberately. The removed #ownerTicketStatusFilter was a
+// DEAD control (seven statuses, force-locked to "Resolved", disabled for every
+// role). The new one with the same id is a LIVE, MANAGER-ONLY filter over the
+// four badge labels, hidden for HR/superadmin. Reusing the id keeps the
+// codebase's filter naming (`ownerTicket<Thing>Filter`) — and these two
+// assertions pin the difference, so the dead version can never creep back.
 assert(
-    !/id="ownerTicketStatusFilter"/.test(ownerHtml),
-    'the dead, force-locked #ownerTicketStatusFilter must be gone — it offered seven statuses and ' +
-    'accepted none of them'
+    /id="ownerTicketStatusFilter"[^>]*aria-label="Filter by ticket status"/.test(ownerHtml),
+    'the STATUS filter must exist — and it must be the new live one (badge-labelled, aria-labelled), ' +
+    'not the dead force-locked dropdown'
 );
 assert(
-    !/const ownerTicketStatusFilter =/.test(ownerJs) &&
-    !/ownerTicketStatusFilter\?\.addEventListener/.test(ownerJs),
-    'every JS reference to the removed #ownerTicketStatusFilter must go with it'
+    !/ownerTicketStatusFilter[^;]*\.disabled\s*=\s*true/.test(ownerJs.replace(/\/\/.*$/gm, '')),
+    'the new #ownerTicketStatusFilter must never be force-locked/disabled the way the dead one was'
 );
 
 const accessSelect = (ticketsBlock.match(/<select[^>]*id="ownerTicketAccessFilter"[\s\S]*?<\/select>/) || [])[0];
+assert(accessSelect, 'ownerdashboard.html must contain the #ownerTicketAccessFilter select');
+// The status filter's four buckets: the exact badge words, plain labels.
+const statusSelect = (ticketsBlock.match(/<select[^>]*id="ownerTicketStatusFilter"[\s\S]*?<\/select>/) || [])[0];
+assert(statusSelect, 'ownerdashboard.html must contain the #ownerTicketStatusFilter select');
+['all', 'Pending', 'In Progress', 'Pending Approval', 'Resolved'].forEach((value) => {
+    assert(new RegExp('<option value="' + value + '"').test(statusSelect),
+        `the status filter must offer the "${value}" bucket — it matches the row badges 1:1`);
+});
+assert(
+    statusSelect.indexOf('<option value="all"') < statusSelect.indexOf('<option value="Pending"'),
+    '"All Statuses" must be the first option, so the default view hides nothing on load'
+);
+assert(
+    !/\(\d+\)/.test(statusSelect),
+    'the status filter must use PLAIN labels — no counts, like the access filter'
+);
+
+// It must match the BADGE label, not the raw field — via a helper that reuses
+// the row's own label expression (pending ? ticketDisplayStatus : raw).
+assert(
+    /const statusLabelMatches = \(t, status\) => \{/.test(listFn),
+    'renderOwnerTickets() must match the status filter against the badge label via statusLabelMatches()'
+);
+assert(
+    /pendingApproval \? ticketDisplayStatus\(t\) : String\(status \|\| 'Pending'\)\.trim\(\)/.test(listFn),
+    'statusLabelMatches() must reuse the row\'s own label expression, or filter and badge disagree'
+);
+assert(
+    /tickets = tickets\.filter\(\(t\) => statusLabelMatches\(t, t\.status\)\);/.test(listFn),
+    'the status filter must run on the approved list (after the pinned Resolved-only scope, which is untouched)'
+);
+assert(
+    /if \(!statusLabelMatches\(t, t\.status\)\) return false;/.test(listFn),
+    'the status filter must also run inside the pending append, or it would silently ignore pending rows'
+);
+
 assert(accessSelect, 'ownerdashboard.html must contain the #ownerTicketAccessFilter select');
 // Exactly the three buckets that were asked for.
 ['all', 'active', 'expired'].forEach((value) => {
@@ -576,8 +619,16 @@ assert(
     'the access filter element must be resolved once at the top, with the other list controls'
 );
 assert(
+    /const ownerTicketStatusFilter = \$owner\('ownerTicketStatusFilter'\);/.test(ownerJs),
+    'the status filter element must be resolved once at the top, with the other list controls'
+);
+assert(
     /ownerTicketAccessFilter\?\.addEventListener\('change', \(\) => renderOwnerTickets\(ownerAllTicketsCache\)\)/.test(ownerJs),
     'the access filter must re-render the list on change — nothing repaints without this'
+);
+assert(
+    /ownerTicketStatusFilter\?\.addEventListener\('change', \(\) => renderOwnerTickets\(ownerAllTicketsCache\)\)/.test(ownerJs),
+    'the status filter must re-render the list on change — nothing repaints without this'
 );
 console.log('  PASS  stacked header; dead dropdown gone; three plain-label buckets; same expiry predicate as the badges');
 

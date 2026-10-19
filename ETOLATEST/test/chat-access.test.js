@@ -2186,6 +2186,69 @@ assert(
     /chat-avatar--superadmin"[^>]*>SA</.test(superMsg),
     'the Superadmin avatar must show the role initials "SA" inside the circle'
 );
+// RANK MARKER — the superadmin avatar gains a gold RING + a ★ corner star on
+// TOP of the role fill (never instead of it — "one colour = one role" must
+// survive). Both are pure CSS (box-shadow ring + ::after star), so the avatar
+// markup above stays byte-identical and every surface that renders
+// .chat-avatar--superadmin (message rows, thread header, conversation list)
+// picks the marker up at once.
+const superAvatarRule = (chatCss.match(/\.chat-avatar--superadmin \{[^}]*\}/) || [''])[0];
+assert(
+    /box-shadow[^;]*--chat-rank-gold/.test(superAvatarRule),
+    'the superadmin avatar must carry the gold rank RING via --chat-rank-gold (a token, never a '
+    + 'hardcoded hex — the same rule every colour in chat.css follows)'
+);
+assert(
+    /background:[^;]*--chat-role-superadmin/.test(superAvatarRule),
+    'the ring must ACCENT the blue role fill, never replace it — gold is rank, blue is still the role'
+);
+assert(
+    /\.chat-avatar--superadmin::after \{[^}]*content:\s*"\\2605"/.test(chatCss),
+    'the superadmin avatar must carry the ★ corner star (a ::after, so no markup change)'
+);
+assert(
+    !/chat-rank-gold/.test(
+        (chatCss.match(/\.chat-avatar--(hr|owner|rmsm)[^,{]*\{[^}]*\}/g) || []).join('\n')
+    ),
+    'the rank marker must be SUPERADMIN-ONLY — no other role avatar may carry the gold ring'
+);
+// The thread-header pill gains the ★ prefix + the gold-border rank class.
+const rankJsSrc = fs.readFileSync(path.join(__dirname, '..', 'js', 'chat.js'), 'utf8');
+assert(
+    /role === 'superadmin' \? ' chat-role-pill--rank'/.test(rankJsSrc),
+    'the thread-header pill must add the .chat-role-pill--rank class for a superadmin peer'
+);
+assert(
+    /role === 'superadmin' \? '★ ' : ''/.test(rankJsSrc),
+    'the thread-header pill must prefix ★ for a superadmin peer — the rank reads at a glance'
+);
+assert(
+    /\.chat-role-pill--rank \{[^}]*--chat-rank-gold/.test(chatCss),
+    'the rank pill class must exist in chat.css and pull the SAME gold token as the avatar ring'
+);
+assert(
+    /html\[data-theme="dark"\] \.chat-role-pill--rank/.test(darkCss),
+    'the rank pill\'s gold border must have a dark-mode override — a light-tuned gold hairline '
+    + 'disappears on a dark surface'
+);
+// ⚠️ THE CONVERSATION LIST IS ALREADY COVERED — and this pins it. The marker
+// is pure CSS on `.chat-avatar--superadmin`, and the list row renders the
+// SAME class via avatarRoleFor(row.peerEmail), so the gold ring + star appear
+// in the list with no per-surface code. If a refactor ever swaps the list
+// avatar to a bare class (or a hardcoded colour), this fails loudly instead
+// of silently dropping the rank cue from the list.
+assert(
+    /'<span class="chat-avatar ' \+ avatarRoleFor\(row\.peerEmail\) \+ '" aria-hidden="true">'/.test(rankJsSrc),
+    'the conversation-list row must keep rendering the ROLE class via avatarRoleFor(), or the '
+    + 'superadmin rank marker silently disappears from the chat list'
+);
+// The list must not CLIP the ring/star overhang: the star sits 4px outside the
+// circle, so an overflow:hidden on the row would shave it off.
+const chatRowRule = (chatCss.match(/^\.chat-row \{[^}]*\}/m) || [''])[0];
+assert(
+    !/overflow:\s*hidden/.test(chatRowRule),
+    '.chat-row must not clip with overflow:hidden — the rank star overhangs the circle by 4px'
+);
 assert(
     !/chat-role-pill/.test(receiptLog.innerHTML),
     'the message must NOT carry a role word chip — the role lives in the avatar initials now'

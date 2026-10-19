@@ -532,6 +532,7 @@ const violationsNavItem = $('#violationsNavItem');
 const violationsBadge = $('#violationsBadge');
 const violationSearch = $('#violationSearch');
 const violationStoreFilter = $('#violationStoreFilter');
+const violationUploadsFilter = $('#violationUploadsFilter');
 const violationList = $('#violationList');
 const violationModal = $('#violationModal');
 const closeViolationModalBtn = $('#closeViolationModal');
@@ -1295,6 +1296,8 @@ async function initApp() {
         // listener is started directly (not chained after getTickets) so it does
         // not wait on the direct server read.
         const violationsReady = setupViolationListener();
+        // Auto-revert runs on its own 5-second timer, independent of snapshots.
+        startAutoRevertTimer();
         setupTicketListener();
         const ticketsReady = loadTicketsDirect();
 
@@ -4155,6 +4158,7 @@ function displayTickets(tickets) {
         const row = document.createElement('tr');
         // ===== Desktop Notification Feature: Add data-ticket-id for scroll targeting =====
         row.setAttribute('data-ticket-id', ticket.id);
+        if (isAdmin && dotClass === 'high') row.classList.add('ticket-high-priority');
         row.innerHTML = `
             <td class="checkbox-cell"><input type="checkbox" class="ticket-checkbox" value="${ticket.id}" onchange="updateBulkBar()"></td>
             <td><span class="priority-dot"><span class="dot ${dotClass}"></span><span class="ticket-link" onclick="window.openTicketModal('${ticket.id}')">${escapeHTML(ticket.ticketNumber || ticket.id)}</span></span></td>
@@ -5563,7 +5567,8 @@ function renderApprovalList() {
 
             // ===== Delete ticket (replaces old ✉ email retry) =====
             // Same slot in the row — now calls window.deleteTicket() with confirm.
-            const emailBtn = (isApprovedTicket(ticket) && currentUserIsSuperAdmin())
+            // Superadmin-only, for APPROVED and FOR REVISION tickets alike.
+            const emailBtn = ((isApprovedTicket(ticket) || isRejectedTicket(ticket)) && currentUserIsSuperAdmin())
                 ? `<button class="action-btn delete-action" data-tooltip="Delete" onclick="event.stopPropagation(); window.deleteTicket('${ticket.id}')"><i class="fas fa-trash"></i></button>`
                 : '';
 
@@ -5574,15 +5579,22 @@ function renderApprovalList() {
             // card-only envelope "Open chat" button is gone — chat lives in the
             // header's #openChatModal, and every action a phone needs is now
             // exactly the desktop row's action (Approve/Reject included).
+            // HR uploads indicator (replaces the eye button): amber when HR has
+            // attached NOV files to this ticket, grey when none. The row's own
+            // onclick still opens the approval details, so the eye was redundant.
+            const hasHrFiles = window.HrUploads && typeof window.HrUploads.hasUploads === 'function'
+                ? window.HrUploads.hasUploads('tickets/' + ticket.id) : false;
+            const hrUploadBtn = `<span class="action-btn upload-indicator${hasHrFiles ? ' has-uploads' : ''}" data-upload-key="tickets/${ticket.id}" data-upload-label="${escapeHTML(ticket.ticketNumber || ticket.id)}" title="HR NOV files${hasHrFiles ? ' — files attached' : ' — no files'}" onclick="event.stopPropagation(); window.HrUploads && window.HrUploads.openFromButton(this);"><i class="fas fa-file-contract"></i><span class="upload-indicator-label">NOV</span></span>`;
+
             let actionBtns = '';
             if (isPendingApproval(ticket)) {
                 actionBtns = `${resendBtn}${emailBtn}<button class="action-btn approve" data-tooltip="Approve" onclick="event.stopPropagation(); window.approveResolution('${ticket.id}')"><i class="fas fa-check"></i></button>
                     <button class="action-btn reject" data-tooltip="Reject" onclick="event.stopPropagation(); window.rejectTicket('${ticket.id}')"><i class="fas fa-times"></i></button>
                     <button class="action-btn edit" data-tooltip="Edit Approval Info" onclick="event.stopPropagation(); window.openEditApprovalModal('${ticket.id}')"><i class="fas fa-edit"></i></button>
-                    <button class="action-btn view" data-tooltip="Details" onclick="event.stopPropagation(); window.openApprovalDetails('${ticket.id}')"><i class="fas fa-eye"></i></button>`;
+                    ${hrUploadBtn}`;
             } else {
                 actionBtns = `${resendBtn}${emailBtn}<button class="action-btn edit" data-tooltip="Edit Approval Info" onclick="event.stopPropagation(); window.openEditApprovalModal('${ticket.id}')"><i class="fas fa-edit"></i></button>
-                    <button class="action-btn view" data-tooltip="Details" onclick="event.stopPropagation(); window.openApprovalDetails('${ticket.id}')"><i class="fas fa-eye"></i></button>`;
+                    ${hrUploadBtn}`;
             }
             const actions = `<div class="action-group">
                     ${actionBtns}
@@ -5628,6 +5640,9 @@ function renderApprovalList() {
             </tr>`;
         }).join('');
     }
+
+    // Re-flag the HR upload indicators for the rows just drawn (amber = HR has files).
+    try { if (window.HrUploads && window.HrUploads.paintPresence) window.HrUploads.paintPresence(); } catch (e) { /* ignore */ }
 
     // Stats summary — only count tickets that were actually submitted for approval
     // (Pending / In Progress tickets never entered the approval workflow)
@@ -7993,7 +8008,7 @@ function setupViolationListener() {
     if (auth && auth.currentUser) loadViolationsSeen();
 
     return new Promise((resolve) => {
-        const snapshotHandler = (violations) => {
+        const snapshotHandler = async (violations) => {
             allViolations = violations;
             // The violations TABLE renders immediately — this is the thing the
             // operator waits for after a refresh.
@@ -8009,6 +8024,8 @@ function setupViolationListener() {
             // The REPORTS DATABASE panel is independent of the table filters, so it is
             // refreshed straight from the live data (always showing every report).
             renderViolationFolderTree();
+            // Auto-revert is handled by startAutoRevertTimer() — a standalone
+            // interval timer, not here.
             if (!firstSnapshotResolved) {
                 firstSnapshotResolved = true;
                 resolve(allViolations);
@@ -8019,6 +8036,53 @@ function setupViolationListener() {
             console.error('Violations listener error:', error);
         });
     });
+}
+
+// ==============================================================
+//  AUTO-REVERT expired Area Manager transfers
+//
+//  Runs on a standalone interval timer — NOT inside the snapshot handler.
+//  The snapshot handler only renders UI; this timer checks for expirations
+//  independently so it fires even when no document changes for a full minute.
+//  Superadmin-only: only superadmin can delete managerStatus from violations.
+// ==============================================================
+let autoRevertTimer = null;
+
+function autoRevertExpiredTransfers() {
+    if (!currentUserIsSuperAdmin()) return;
+    if (!auth || !auth.currentUser) return;
+    if (!allViolations || !Array.isArray(allViolations)) return;
+
+    const now = Date.now();
+    for (const v of allViolations) {
+        if (v.managerStatus !== 'transferred') continue;
+        // Expiry time when the Area Manager opened the report.
+        // Prefer managerExpiresAtMs (client-computed: open + 1 min).
+        // Fall back to managerOpenedAt + 60000 if ms stamp missing.
+        let expiresAt = v.managerExpiresAtMs || 0;
+        if (expiresAt === 0 && v.managerOpenedAt) {
+            const openedAt = v.managerOpenedAt.toDate?.()?.getTime() || 0;
+            if (openedAt > 0) expiresAt = openedAt + 60 * 1000;
+        }
+        if (expiresAt > 0 && now >= expiresAt) {
+            firestoreService.revertViolationTransferFromAreaManager(
+                v.id,
+                auth.currentUser.email || null,
+                auth.currentUser.displayName || null
+            ).then(() => {
+                console.log('Auto-reverted expired manager transfer for ' + (v.violationNumber || v.id));
+            }).catch((e) => {
+                console.warn('Auto-revert failed:', e);
+            });
+        }
+    }
+}
+
+function startAutoRevertTimer() {
+    if (autoRevertTimer) return;
+    autoRevertTimer = setInterval(autoRevertExpiredTransfers, 5000);
+    // Also run once immediately so a already-expired report reverts without waiting.
+    autoRevertExpiredTransfers();
 }
 
 // ==============================================================
@@ -8236,7 +8300,12 @@ function filterViolations() {
     const now = Date.now();
     const shown = matched.filter(v => isViolationInPeriod(v, period, now));
     violationHiddenByPeriod = matched.length - shown.length;
-    filteredViolations = shown;
+
+    // Uploads filter: only show violations that have HR-uploaded NOV files.
+    const uploadsOnly = violationUploadsFilter && violationUploadsFilter.value === 'with-uploads';
+    filteredViolations = uploadsOnly && window.HrUploads && typeof window.HrUploads.hasUploads === 'function'
+        ? shown.filter(v => window.HrUploads.hasUploads('violations/' + v.id))
+        : shown;
 
     updateViolationPeriodNote(period);
     // Reset to the first page whenever the filters change, then render the
@@ -8499,12 +8568,20 @@ async function toggleViolationTransferToManager(id) {
         if (wasTransferred) {
             await firestoreService.revertViolationTransferFromAreaManager(id, me.email, me.displayName);
             showToast(`Report ${label} removed from the Area Manager dashboard.`, 'success');
+            // Reflect locally so the button updates immediately (not just on listener)
+            v.managerStatus = undefined;
+            delete v.managerExpiresAt;
+            delete v.managerExpiresAtMs;
+            delete v.managerOpenedAt;
+            delete v.managerOpenedBy;
+            delete v.managerOpenedByName;
         } else {
             await firestoreService.transferViolationToAreaManager(id, me.email, me.displayName);
             showToast(`Report ${label} transferred to the Area Manager.`, 'success');
+            // Reflect locally so the button updates immediately
+            v.managerStatus = 'transferred';
         }
-        // The real-time listener re-renders the table, the details modal and
-        // this button, so there is nothing to update by hand here.
+        refreshManagerTransferButtonState(v);
     } catch (error) {
         console.error('Failed to update the Area Manager transfer state:', error);
         showToast('Could not update the transfer: ' + ((error && error.message) || 'unknown error'), 'error');
@@ -8726,10 +8803,11 @@ function displayViolations(violations) {
         // The action stack, built once and used by BOTH the desktop Actions
         // cell and the card's footer — below 900px the desktop cells hide and
         // only the card is on screen (ROW CARD SWAP in style.css).
+        const hasUp = window.HrUploads && typeof window.HrUploads.hasUploads === 'function'
+            ? window.HrUploads.hasUploads('violations/' + v.id) : false;
         const actionsGroup = `
                 <div class="action-group">
-                    <button class="action-btn view" title="View" onclick="window.openViolationModal('${v.id}')"><i class="fas fa-eye"></i></button>
-                    <button class="action-btn report" title="Download &amp; save report PDF" onclick="window.generateViolationReport('${v.id}')"><i class="fas fa-file-pdf"></i></button>
+                    <span class="action-btn upload-indicator${hasUp ? ' has-uploads' : ''}" data-upload-key="violations/${v.id}" data-upload-label="${v.violationNumber || v.id}" title="HR NOV files${hasUp ? ' — files attached' : ' — no files'}" onclick="event.stopPropagation(); window.HrUploads && window.HrUploads.openFromButton(this);"><i class="fas fa-file-contract"></i><span class="upload-indicator-label">NOV</span></span>
                     ${canModify ? `
                         <button class="action-btn edit" title="Edit" onclick="window.openViolationFormModal('${v.id}')"><i class="fas fa-edit"></i></button>
                         <button class="action-btn delete-action" title="Delete" onclick="window.deleteViolationById('${v.id}')"><i class="fas fa-trash"></i></button>
@@ -8799,6 +8877,8 @@ function renderViolationPagination() {
 
     // Rows always render, even if the controls element is missing from the page.
     displayViolations(filteredViolations.slice(start, end));
+    // Re-flag the Upload indicators for the rows just drawn (amber = already has files).
+    try { if (window.HrUploads && window.HrUploads.paintPresence) window.HrUploads.paintPresence(); } catch (e) { /* ignore */ }
 
     if (!violationPagination) return;
 
@@ -9931,6 +10011,7 @@ function bindViolationEvents() {
     if (violationForm) violationForm.addEventListener('submit', saveViolationForm);
     if (violationSearch) violationSearch.addEventListener('input', debounce(filterViolations));
     if (violationStoreFilter) violationStoreFilter.addEventListener('change', filterViolations);
+    if (violationUploadsFilter) violationUploadsFilter.addEventListener('change', filterViolations);
     if (violationPeriodFilter) {
         // Purely a view filter — no report is ever removed or deleted by this.
         violationPeriodFilter.addEventListener('change', filterViolations);

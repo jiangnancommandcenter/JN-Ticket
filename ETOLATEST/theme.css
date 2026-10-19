@@ -54,6 +54,10 @@ html[data-theme="dark"] {
     --chat-role-area-manager: #A78BFA;
     --chat-role-rmsm: #FBBF24;
     --chat-avatar-unknown: #7C8DA5;
+    /* Rank marker steps up with the rest of the role hues so the gold ring and
+       star stay visible on a dark surface (a 0.3-alpha gold hairline would
+       vanish there — the same reason the border tokens are lifted above). */
+    --chat-rank-gold: #FFD166;
 
     --sidebar-bg: #0D1626;
     --sidebar-border: #24334D;
@@ -250,6 +254,13 @@ html[data-theme="dark"] .chat-role-pill--hr {
 }
 html[data-theme="dark"] .chat-role-pill--superadmin {
     color: #7cb8ff; background: rgba(37, 99, 235, 0.22); border-color: rgba(124, 184, 255, 0.45);
+}
+/* RANK marker: the superadmin pill's gold border must also survive dark mode
+   (the light --chat-rank-gold #F5B301 is tuned for a white card). Declared
+   AFTER the role rule above so the gold wins over the blue border — same
+   cascade reasoning as the --chat-rank-gold token itself. */
+html[data-theme="dark"] .chat-role-pill--rank {
+    border-color: var(--chat-rank-gold, #FFD166);
 }
 /* Neutral badge, shown before the role resolves. */
 html[data-theme="dark"] .role-badge:not([class*="superadmin"]):not([class*="owner"]):not([class*="hr"]):not([class*="viewer"]):not([class*="editor"]) {

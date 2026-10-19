@@ -239,6 +239,10 @@
                             <button class="action-btn remarks" type="button" title="Remarks / NOV status"
                                 data-remarks-key="violations/${esc(v.id)}"
                                 data-remarks-label="${esc(v.violationNumber || v.id)}"><i class="fas fa-sticky-note"></i></button>
+                            <span class="action-btn upload-indicator" title="Upload NOV files"
+                                data-upload-key="violations/${esc(v.id)}"
+                                data-upload-label="${esc(v.violationNumber || v.id)}"
+                                onclick="event.stopPropagation(); window.HrUploads.openFromButton(this);"><i class="fas fa-file-contract"></i><span class="upload-indicator-label">NOV</span></span>
                         </div>`;
             return `
                 <tr class="hr-violation-row" data-id="${esc(v.id)}">
@@ -276,6 +280,8 @@
 
         // Re-flag the Remarks buttons for the rows just drawn (red = already has a note).
         try { if (window.Remarks && window.Remarks.paintPresence) window.Remarks.paintPresence(); } catch (e) { /* ignore */ }
+        // Re-flag the Upload buttons for the rows just drawn (amber = already has files).
+        try { if (window.HrUploads && window.HrUploads.paintPresence) window.HrUploads.paintPresence(); } catch (e) { /* ignore */ }
 
         renderPagination(totalPages);
     }
@@ -465,6 +471,7 @@
             if (section) section.classList.remove('active');
             closeModal();
         }
+
         if (allowed) startListener();
     }
 

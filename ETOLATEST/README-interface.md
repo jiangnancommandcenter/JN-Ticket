@@ -325,7 +325,7 @@ So `status === 'Resolved'` also matches work still **queued for review** and wor
 
 ### Expired tickets: the ROW stays, the PAYLOAD goes
 
-An approved ticket whose window has closed **remains in the list** with a red **Access closed** badge in the new **Access** column (reusing `.status-badge.expired` from the Approvals table — see below) — hiding it would look like data loss. Opening it shows the **metadata only**: ticket number, branch, reporter, dates, incident, status. The **issue description, the operator's findings and every attachment** — the CCTV evidence the window exists to protect — are withheld behind an expiry notice, which quotes the window via `formatTrackingAccessWindow()` so it reads "1 minute" while compressed and "2 days" in production.
+An approved ticket whose window has closed **remains in the list** with a red **Expired** badge in the new **Access** column (reusing `.status-badge.expired` from the Approvals table — see below) — hiding it would look like data loss. Opening it shows the **metadata only**: ticket number, branch, reporter, dates, incident, status. The **issue description, the operator's findings and every attachment** — the CCTV evidence the window exists to protect — are withheld behind an expiry notice, which quotes the window via `formatTrackingAccessWindow()` so it reads "1 minute" while compressed and "2 days" in production.
 
 **The check is at RENDER time, not only on the row.** The ticket list is a live `onSnapshot` listener, so a ticket can lapse *while the page is open*; gating only in the list would still open the full report for a ticket whose window closed a second earlier. `openOwnerReport()` re-tests the freshly-read document.
 
@@ -337,10 +337,12 @@ An approved ticket whose window has closed **remains in the list** with a red **
 
 | column | question | values |
 |---|---|---|
-| **Status** | where is this in the pipeline? | the workflow badge, unchanged |
-| **Access** | can this person still open it? | `—` / **Access closed** / **Reopen requested ×N** |
+| **Status** | where is this in the pipeline? | live state: **Pending** / **In Progress** / **Pending Approval** / **Resolved** (never "Resolved" before approval) |
+| **Access** | can this person still open it? | `—` / **Expired** / **Reopen requested ×N** |
 
-**The word is now "Access closed", not "Expired".** `Expired` alone reads as *the ticket* being expired. Nothing about the ticket expires; a **viewing window** closes. The **CSS class is still `status-badge expired`** — it is shared with the superadmin Approvals table in `script.js` and pinned by name in `test/owner-ticket-approval.test.js`, so renaming it would be a breaking change for a page this file does not own. Word and class are now deliberately different things.
+**Status shows the live pipeline state — that is how the manager tracks their own ticket.** The list is a live `onSnapshot` listener, so every superadmin/operator write arrives within a second; `ticketDisplayStatus()` passes that state through instead of collapsing it. A ticket reads **Resolved** only once the superadmin has approved it; a resolved-but-unapproved ticket (queued for review) reads amber **Pending Approval**, so a green Resolved badge never promises content the manager cannot open yet. **"For Revision" and "Insufficient Footage" are operator words and never surface here** — both collapse to **Pending Approval** (the ticket is back awaiting sign-off), so the manager side speaks exactly four labels: **Pending** / **In Progress** / **Pending Approval** / **Resolved**.
+
+**The Access word is now "Expired", matching its class.** It names the **viewing window** (the row stays listed with its metadata; only the report and evidence are withheld), and it now agrees with the shared `.status-badge.expired` class — which is reused from the superadmin Approvals table in `script.js` and pinned by name in `test/owner-ticket-approval.test.js`, so the class name itself is never changed.
 
 ⚠️ **`title` is not a fallback, and this is the actual mobile bug.** The closure date and the reopen reason lived *only* in a `title` attribute. **A phone has no hover.** So on the device this list is built for, the badge was a bare unexplained word: not *what* closed, not *when*, and for a pending reopen, not the reason the manager themselves gave. Both are now rendered as **real text** in `.owner-access-note`, on its own line beneath the badge (`flex: 1 0 100%` inside a wrapping cell).
 
@@ -446,6 +448,27 @@ The "COMMAND CENTER REPORT" PDF builder was extracted out of `script.js` into **
 **HR downloads only.** The command center also re-uploads the regenerated PDF into the report's Cloudinary folder and rewrites `attachments`; HR must not, because that is a Firestore write the `hr` role is denied. So HR regenerates the identical PDF locally and saves it, leaving the stored copy untouched. If jsPDF is unavailable (offline / CDN blocked) both paths fall back to a print-friendly window rather than dead-ending.
 
 * Covered by `test/violation-hr-transfer.test.js` (rules + wiring, static) and `test/violation-hr-view.test.js` (runs `js/hr-violations.js` against a stubbed DOM: role gate, transfer-only filter, search, store filter, empty state).
+
+### The Area Manager's own Transferred Violations tab
+
+> The Area Manager's queue is **separate** from HR's: `main.html`'s Violations tab (and the HR dashboard's) serve `hrStatus`, while the tab on `ownerdashboard.html` serves `managerStatus == 'transferred'` reports scoped to the manager's own branches. It is read-only — no transfer, no edit, no delete.
+
+### The filter row
+
+> Three controls: **search** (debounced keystroke, full-text across number / subject / store / location / details / reporter), **store** (only the stores this manager's branch scope grants) and a **date-period** dropdown with four buckets: **Today** (the default), **This week**, **This month** and **All reports**.
+
+### Date rules
+
+> * A bucket is a **view filter, not a query**: rows outside the window stay in the database and are only hidden in the list.
+> * The window is measured from the **report (filed) date**, not the incident date — a transferred review of an older incident appears on the day it is transferred.
+> * **Dateless reports are never hidden** by the period filter, so the filter can never delete a record.
+> * An empty list is labeled *"No reports in this period — 2 older reports outside the selected date range. Choose "All reports" to view them."* instead of the generic "nothing matches" state, so an RM/SM can tell *"the queue is empty"* from *"the queue is outside the window"*.
+> * The **search + period** combination shares one pipeline, so a narrower bucket narrows the same list the search is running against.
+
+### Covered by
+
+> New section in `test/violation-area-manager-transfer.test.js`: the tab gate (owner-only), the four buckets, dateless-kept, All-restore, empty-state wording, the change-listener wiring, and the search × period × store intersections. `owner-mobile.test.js` th/td pins are untouched — the tab added no columns.
+
 * ⚠️ **Deploy the rules** with `firebase deploy --only firestore:rules`, or HR will hit a permission error until you do.
 
 ## HR Coordination Remarks (the shared "NOV status" log)
@@ -738,6 +761,8 @@ Every message carries an identity block instead of a bare email prefix: a **role
 **The avatar works on existing history immediately.** It is derived from `senderRole`, which `sendMessage()` has always written onto every message — so no migration or backfill is needed. A pre-feature message with no `senderRole` renders a neutral grey avatar rather than guessing or crashing.
 
 **Role colours are fixed per role, not `--color-primary`.** Otherwise roles would inherit the same green and be indistinguishable — which defeats the entire point. Each role has its own hue: superadmin = blue, HR = green, **Area Manager (`owner`) = violet**, **RM/SM (`rmsm`) = amber** (given its own colour so it is told apart from the Area Manager at a glance), unknown = grey. The variables `--chat-role-superadmin` / `--chat-role-hr` / `--chat-role-area-manager` / `--chat-role-rmsm` / `--chat-avatar-unknown` are declared in both `style.css` and `theme.css`; dark mode lightens the avatar fills while keeping them saturated so the white initials stay legible. The same hues drive the `.chat-avatar--*` fills and the `.chat-role-pill--*` thread-header chips.
+
+**⚠️ Rank is a MARKER layered on the role colour — never a second identity colour.** The superadmin avatar keeps its blue fill + `SA` and gains a **gold ring** (`box-shadow` via `--chat-rank-gold`, so the 28px circle keeps its size) plus a **★ corner star** (`::after`, so no markup change); the thread-header pill gains a `★ ` prefix and the gold-bordered `.chat-role-pill--rank` class. Gold reads as "highest rank" everywhere and clashes with none of the four role hues, so "one colour = one role" survives intact — the ring/star are applied for *any* surface that renders `.chat-avatar--superadmin` (message rows, thread header, conversation list) purely in CSS. The token lives in `style.css` (light `#F5B301`) and `theme.css` (dark `#FFD166`), because a light-tuned gold hairline would vanish on a dark surface. Per-person colours were deliberately rejected: names/titles are self-published and editable, so colour cannot come from the profile, and nobody memorises "Maria = teal" — people recognise an *authority marker*. `test/chat-access.test.js` pins the ring, the star, the superadmin-only scope, the pill's ★ and both dark-mode overrides.
 
 **Display name + job title** are optional and self-published. The header's ✎ button opens a small editor; `saveMyProfile()` writes to `chats/{chatId}/profiles/{emailKey}`, and a listener repaints live names as they arrive — so you can go from "maria" to "**Maria** · HR Manager" and see it in the thread immediately. Names and titles are **escaped** before rendering; a profile is user input and must never become an XSS vector.
 

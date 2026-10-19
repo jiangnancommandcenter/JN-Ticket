@@ -526,6 +526,48 @@
         }
         .owner-withheld-note i { color: var(--color-warning); flex-shrink: 0; }
 
+        /* ================================================================
+           PENDING-APPROVAL TICKET (Area Manager / RM-SM dashboard)
+
+           The superadmin has not signed this ticket off yet, so the report and
+           its CCTV evidence are withheld — exactly like the expired case above —
+           but the row is deliberately DIFFERENT in colour: amber, not red. A
+           pending ticket is a normal, expected state on its way to approval, not
+           an access problem, so it must not read as an error. It matches the
+           public Track page's own "still being processed" hourglass notice so the
+           two surfaces feel like one product.
+
+           Every colour is a THEME TOKEN, never a literal — the same rule the
+           expired block follows, and what test/owner-dark-mode.test.js enforces.
+           ================================================================ */
+        .owner-access-pending {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            padding: 18px 20px;
+            margin-bottom: 18px;
+            border: 1px solid var(--color-warning-border, var(--border-color));
+            border-left: 4px solid var(--color-warning);
+            border-radius: var(--radius-md);
+            background: var(--color-warning-bg);
+        }
+        .owner-access-pending-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin: 0;
+            font-size: 0.95rem;
+            font-weight: 700;
+            color: var(--color-warning);
+        }
+        .owner-access-pending-title i { flex-shrink: 0; }
+        .owner-access-pending-body {
+            margin: 0;
+            font-size: 0.85rem;
+            line-height: 1.5;
+            color: var(--text-secondary);
+        }
+
         /* The expiring-window sentence under the Tickets heading. Muted so it
            reads as guidance, not as the tab's primary description. */
         .owner-window-note {
@@ -805,6 +847,29 @@
             --owner-ticket-row-hover: var(--bg-hover);
         }
 
+        /* ===== BIG ROLE INDICATOR (beside the page title) =====
+           #ownerUserRoleBadge used to be a 0.72rem chip in the far-right auth
+           row — it read as chrome, not as "this is your role here". It now sits
+           next to the page title and is deliberately BIG.
+
+           ⚠️ ID-SCOPED, ON PURPOSE. setActiveUser() rewrites
+           `className = 'role-badge <role>'` every time the role resolves, so
+           class-based sizing would be wiped on the first repaint. An ID rule
+           (1,0,0) outranks the shared .role-badge (0,1,0) with no !important.
+           The role COLOURS stay on .role-badge.owner/hr/superadmin/viewer in
+           style.css + theme.css — only SIZE/layout live here, so both themes
+           keep working untouched. The base rule's `margin-left: 8px` (it used
+           to trail the email) is reset: beside the title the gap comes from
+           .header-left's own flex gap. */
+        #ownerUserRoleBadge {
+            margin-left: 0;
+            font-size: 1rem;
+            font-weight: 800;
+            padding: 8px 18px;
+            letter-spacing: 0.5px;
+            box-shadow: var(--owner-elev-0);
+        }
+
         /* Section headers */
         .owner-section-header { margin-bottom: 20px; }
 
@@ -896,7 +961,7 @@
         .owner-toolbar select,
         .owner-filter-wrap select,
         #ownerTicketAccessFilter,
-        #ownerTicketPriorityFilter,
+        #ownerTicketStatusFilter,
         #ownerTicketBranchFilter {
             border: 1px solid var(--border-color);
             background: var(--bg-secondary);
@@ -912,7 +977,7 @@
            old blanket `min-width: 160px` applied to the search input too,
            fighting `.search-box`'s own min-width/max-width. */
         #ownerTicketAccessFilter,
-        #ownerTicketPriorityFilter,
+        #ownerTicketStatusFilter,
         #ownerTicketBranchFilter {
             flex: 0 0 auto;
             width: 168px;
@@ -1039,11 +1104,12 @@
             border-radius: 12px;
             color: var(--text-primary);
         }
-        /* The mockup has exactly two selects; this page has three. Two
-           half-width tiles, then the branch select takes the rest of the
-           row — a lone half-width third tile reads as a mistake. When the
-           JS hides the access filter (no viewing window for this role),
-           the priority tile simply sits alone and the row still holds. */
+        /* The mockup has exactly two selects; this page has five. Full-width
+           search, then half-width tiles in pairs, then the last select takes
+           the rest of the row — a lone half-width tile reads as a mistake.
+           When the JS hides the access/status filters (no viewing window for
+           this role), the remaining tiles simply re-flow and the row still
+           holds. */
         #ownerMainContent .owner-filter-card .owner-filter-group:last-child {
             grid-column: 1 / -1;
         }
@@ -1169,6 +1235,9 @@
             .card { padding: 14px 16px; }
             #ownerKpiCards { gap: 10px; }
             #ownerPageTitle { font-size: 1rem; }
+            /* The big role badge shrinks WITH the title so the header row
+               still fits a 320px phone (menu toggle + title + badge). */
+            #ownerUserRoleBadge { font-size: 0.8rem; padding: 6px 12px; }
         }
 
         /* Extra-small phones: single-column KPIs + compact panel */
@@ -1178,6 +1247,7 @@
             .owner-branch-list .quick-status-item { padding: 10px 12px; }
             #ownerUserEmail { max-width: 120px; }
             #ownerPageTitle { font-size: 0.95rem; }
+            #ownerUserRoleBadge { font-size: 0.72rem; padding: 5px 10px; }
         }
     </style>
 </head>
@@ -1247,6 +1317,22 @@
                     <i class="fas fa-bars"></i>
                 </button>
                 <h1 class="page-title" id="ownerPageTitle">Dashboard</h1>
+                <!-- ===== BIG ROLE INDICATOR =====
+                     Same #ownerUserRoleBadge element that used to sit in the
+                     header-right auth row — MOVED, never cloned: its id is
+                     parsed back by js/hr-violations.js and js/owner-violations.js
+                     (readRole falls back to the badge TEXT), and
+                     setActiveUser() rewrites its className on every role
+                     resolve, so the element must survive with one identity.
+                     It is deliberately BIG and sits beside the page title:
+                     this is the "who am I / what can I do here" signal, and a
+                     0.7rem chip in the far corner was reading as chrome.
+                     ⚠️ The size lives on the ID (#ownerUserRoleBadge), not a
+                     class — setActiveUser() sets `className = 'role-badge …'`
+                     every time, which would wipe any class-based sizing. The
+                     role COLOURS stay on .role-badge.owner/hr/superadmin/viewer
+                     (style.css + theme.css), so both themes are covered for free. -->
+                <span id="ownerUserRoleBadge" class="role-badge viewer">Loading…</span>
             </div>
             <div class="header-right">
                 <div class="header-actions">
@@ -1292,7 +1378,9 @@
                 <div class="header-auth-status" id="ownerAuthStatus">
                     <span class="auth-dot"></span>
                     <span id="ownerUserEmail">Loading...</span>
-                    <span id="ownerUserRoleBadge" class="role-badge viewer">Loading…</span>
+                    <!-- The role badge LIVES BESIDE THE PAGE TITLE now (see
+                         .header-left) — it is the role indicator, not part of
+                         the identity row. Same element, same id. -->
                 </div>
             </div>
         </header>
@@ -1450,10 +1538,23 @@
                         </select>
                     </div>
                     <div class="filter-group owner-filter-group">
-                        <select id="ownerTicketPriorityFilter">
-                            <option value="all">All Priorities</option>
-                            <option value="Low">Low</option>
-                            <option value="High">High</option>
+                        <!-- ⚠️ MANAGER-ONLY STATUS FILTER. HR and superadmin rows are
+                             always approved (always "Resolved"), so for them this
+                             would be a dead control — js/owner-dashboard.js
+                             (applyViewerExpiryChrome) hides it exactly like the
+                             Access filter. The four options are the exact words
+                             the row badges speak (ticketDisplayStatus), so the
+                             filter and the badge can never disagree. 'all' is
+                             first so nothing hides on load; an unrecognised value
+                             falls through to "show everything" in the JS, so
+                             adding an option before the script is updated cannot
+                             blank the list. -->
+                        <select id="ownerTicketStatusFilter" aria-label="Filter by ticket status">
+                            <option value="all">All Statuses</option>
+                            <option value="Pending">Pending</option>
+                            <option value="In Progress">In Progress</option>
+                            <option value="Pending Approval">Pending Approval</option>
+                            <option value="Resolved">Resolved</option>
                         </select>
                     </div>
                     <div class="filter-group owner-filter-group">
@@ -1605,6 +1706,22 @@
                     <label><i class="fas fa-store"></i></label>
                     <select id="ownerViolationStoreFilter">
                         <option value="all">All Stores</option>
+                    </select>
+                </div>
+                <div class="sort-group">
+                    <!-- ⚠️ DISTINCT ID from HR's #violationPeriodFilter — BOTH tabs
+                         exist on this page, and a duplicate id would make
+                         getElementById() hand each module the OTHER tab's select.
+                         Same four buckets and same "Today" default as the HR and
+                         superadmin tabs, so the three surfaces behave alike.
+                         Measured from the REPORT (filed) date — see
+                         js/owner-violations.js applyFilters(). -->
+                    <label for="ownerViolationPeriodFilter"><i class="fas fa-calendar-day"></i></label>
+                    <select id="ownerViolationPeriodFilter" title="Reports are listed by filing date — older ones stay in the database">
+                        <option value="daily" selected>Today</option>
+                        <option value="weekly">Last 7 days</option>
+                        <option value="monthly">This month</option>
+                        <option value="all">All reports</option>
                     </select>
                 </div>
             </div>
@@ -1776,6 +1893,13 @@
          window.Remarks; the ticket and violation rows call
          window.Remarks.openFromButton(this). -->
     <script src="js/remarks.js"></script>
+    <!-- ===== HR coordination file uploads (NOV document attachments) ====
+         Loads after js/remarks.js; mirrors its pattern. Uploads go to
+         Cloudinary and metadata is stored in the `hr_uploads` collection,
+         keyed by targetKey ('tickets/<id>' | 'violations/<id>'). Exposed as
+         window.HrUploads; the ticket and violation rows call
+         window.HrUploads.openFromButton(this). -->
+    <script src="js/hr-uploads.js"></script>
     <!-- ===== Area Manager violations (read-only, branch-scoped) =====
          Loads AFTER owner-dashboard.js because it reads that module's
          getOwnerRole() / getOwnerAssignedBranches() to gate the tab and scope

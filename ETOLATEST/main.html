@@ -871,6 +871,13 @@
                         <option value="all">All reports</option>
                     </select>
                 </div>
+                <div class="sort-group">
+                    <label for="violationUploadsFilter"><i class="fas fa-cloud-upload-alt"></i></label>
+                    <select id="violationUploadsFilter" title="Filter violations by whether HR has attached NOV files">
+                        <option value="all">All Reports</option>
+                        <option value="with-uploads">With NOV</option>
+                    </select>
+                </div>
             </div>
 
             <div class="violation-period-note" id="violationPeriodNote" hidden>
@@ -1922,6 +1929,11 @@
          page deliberately has no <div> for it any more. -->
     <script src="js/attachment-viewer.js"></script>
     <script src="script.js?v=branch-backfill-2"></script>
+    <!-- ===== HR uploads presence tracker (superadmin dashboard) ====
+         Loaded AFTER script.js so window.HrUploads exists when violations
+         rows render their upload indicators. Toggles the amber has-uploads
+         class on [data-upload-key] buttons whenever HR attaches files. -->
+    <script src="js/hr-uploads.js"></script>
     <!-- ===== Command palette + keyboard shortcuts (Ctrl/Cmd+K) =====
          Loaded LAST: it references window.switchTab and window.escapeHTML,
          which script.js defines. Every lookup is guarded, so a missing global

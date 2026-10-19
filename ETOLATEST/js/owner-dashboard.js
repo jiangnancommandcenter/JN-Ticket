@@ -45,7 +45,13 @@ const ownerTicketSearch = $owner('ownerTicketSearch');
 // The list is approved-only now, so the distinction that still matters is
 // whether the viewing window is open.
 const ownerTicketAccessFilter = $owner('ownerTicketAccessFilter');
-const ownerTicketPriorityFilter = $owner('ownerTicketPriorityFilter');
+// ⚠️ MANAGER-ONLY. Unlike Access/Priority/Branch/Period (which slice the
+// approved list), this matches the DISPLAYED badge label —
+// pendingApproval ? ticketDisplayStatus(t) : raw status — the exact expression
+// the row renderer uses (see statusLabel below). Hidden for HR/superadmin in
+// applyViewerExpiryChrome(): their rows are always approved, always
+// "Resolved", so for them this would be a dead control.
+const ownerTicketStatusFilter = $owner('ownerTicketStatusFilter');
 const ownerTicketBranchFilter = $owner('ownerTicketBranchFilter');
 const ownerTicketPeriodFilter = $owner('ticketPeriodFilter');
 const ownerTicketsBody = $owner('ownerTicketsBody');
@@ -896,6 +902,66 @@ function isApprovedTicket(ticket) {
 }
 
 /**
+ * True when a ticket has NOT yet been signed off by the superadmin.
+ *
+ * The exact complement of isApprovedTicket(), so it covers EVERY not-yet-approved
+ * state the lifecycle can be in — freshly filed ('pending'), resolved and queued
+ * for the superadmin ('pending_approval'), and sent back for revision ('rejected')
+ * — plus a legacy ticket with no field at all (which defaults to 'pending', i.e.
+ * not approved).
+ *
+ * ⚠️ This is a DISPLAY signal only, never an authorisation one. firestore.rules
+ * already lets any signed-in user read every ticket, so surfacing a pending
+ * ticket to the manager who filed it grants no new read. The sensitive payload
+ * (description, findings, footage) is still withheld until approval — see the
+ * pending branch of openOwnerReport(), which mirrors the expired branch.
+ */
+function isPendingApprovalTicket(ticket) {
+  return !isApprovedTicket(ticket);
+}
+
+/**
+ * The label the Status column / badge shows.
+ *
+ * ⚠️ PIPELINE-HONEST, NOT COLLAPSED — with ONE hard rule. The manager must be
+ * able to track their own ticket live: when the superadmin starts work the
+ * row has to move to "In Progress", while the operator resolves it moves to
+ * "Pending Approval", and so on — the raw status arrives on every Firestore
+ * snapshot already (setupOwnerTicketListener re-renders per snapshot), so
+ * hiding it here is what made the RM/SM list look frozen on "Pending".
+ *
+ * The one thing this must NEVER do is promise content the manager cannot
+ * open yet: a ticket reads "Resolved" ONLY once the superadmin has approved
+ * it. So a resolved-but-unapproved ticket (status 'Resolved', queued for
+ * review) still reads "Pending Approval", never "Resolved".
+ *
+ * ⚠️ "For Revision" is an OPERATOR word and never reaches this side. When the
+ * superadmin sends a resolution back (status 'For Revision', approvalStatus
+ * 'rejected') or the manager's own footage request sends it back
+ * (status 'Insufficient Footage'), the manager reads "Pending Approval" —
+ * the ticket is back in the queue awaiting sign-off, which is all the
+ * manager needs to know. The visible labels are therefore exactly four:
+ * Pending / In Progress / Pending Approval / Resolved.
+ *
+ * Those four words map 1:1 onto badge classes already defined in
+ * ownerdashboard.html (.status-badge.pending / .in-progress /
+ * .pending-approval / .resolved), so the badge colours follow with no CSS
+ * change.
+ */
+function ticketDisplayStatus(t) {
+  if (isApprovedTicket(t)) return 'Resolved';
+  const raw = String((t && t.status) || 'Pending').trim();
+  const key = raw.toLowerCase();
+  // The queued-for-review state: operator resolved, superadmin not signed off.
+  // Never "Resolved" — that word promises readable content that is withheld.
+  if (key === 'resolved') return 'Pending Approval';
+  // Send-back states are operator business: the resolution was rejected or
+  // more footage was requested, so the ticket is back awaiting sign-off.
+  if (key === 'for revision' || key === 'insufficient footage') return 'Pending Approval';
+  return raw || 'Pending';
+}
+
+/**
  * ⚠️ DOES THE EXPIRING VIEWING WINDOW APPLY TO WHO IS LOOKING?
  *
  * The 2-day window is the REQUESTER's condition, not an employee's: it exists
@@ -1385,6 +1451,12 @@ function applyViewerExpiryChrome() {
   if (table) table.classList.toggle('owner-hides-access', !showsWindow);
 
   renderOwnerWindowNote();
+
+  // The Status filter is manager-only too: HR/superadmin rows are always
+  // approved (always "Resolved"), so for them it would be a dead control.
+  const statusFilterWrap = ownerTicketStatusFilter ? ownerTicketStatusFilter.closest('.filter-group') : null;
+  if (ownerTicketStatusFilter) ownerTicketStatusFilter.style.display = showsWindow ? '' : 'none';
+  if (statusFilterWrap) statusFilterWrap.style.display = showsWindow ? '' : 'none';
 }
 
 function renderOwnerWindowNote() {
@@ -1510,6 +1582,14 @@ window.openOwnerReport = function(reportId) {
     rawData.id = reportId;
     const data = normalizeTicketReport(rawData);
 
+    // ⚠️ IS THIS TICKET STILL AWAITING THE SUPERADMIN? Computed from the freshly
+    // read document (not a cached list row) and gated to the manager roles, for
+    // the same reason the list append is: HR and superadmins have their own
+    // review flow and must not be shown a manager's "still pending" shell. When
+    // true, the modal renders the pending branch (subject + notice, no payload)
+    // instead of the full report — see the `const html = …` assembly below.
+    const pendingApproval = isAreaManager() && isPendingApprovalTicket(rawData);
+
     // ⚠️ FIRST OPEN STARTS THE CLOCK.
     //
     // An approved ticket nobody has opened has NO expiry at all — it does not
@@ -1534,7 +1614,13 @@ window.openOwnerReport = function(reportId) {
     // so loudly, because until it is fixed no approved ticket on this page can
     // ever expire. An expected decline (already stamped, legacy ticket) stays
     // quiet — those are correct behaviour, not failures.
-    if (expiryAppliesToViewer()) {
+    //
+    // ⚠️ SKIPPED FOR A PENDING TICKET. A not-yet-approved ticket has no viewing
+    // window at all, so there is no clock to start — markTrackingAccessOpened()
+    // would decline with 'not-approved' anyway. Skipping it here keeps the intent
+    // explicit (and avoids a pointless write attempt) rather than relying on the
+    // helper's own guard.
+    if (expiryAppliesToViewer() && !pendingApproval) {
         if (typeof window.markTrackingAccessOpened !== 'function') {
             // ⚠️ LOUD ON PURPOSE. This is the stale-cache case, and it silently
             // disables the entire viewing window for every manager on this page.
@@ -1599,8 +1685,10 @@ window.openOwnerReport = function(reportId) {
     // Split the ticket's files into requester attachments vs operator footage
     const attachments = splitOwnerAttachments(rawData);
 
-    // Status badge in the modal header
-    const statusText = String(data.status || 'Resolved');
+    // Status badge in the modal header. A pending ticket shows its live pipeline
+    // label via the same ticketDisplayStatus() the list row uses, so the header
+    // and the row never disagree about the same ticket.
+    const statusText = pendingApproval ? ticketDisplayStatus(rawData) : String(data.status || 'Resolved');
     const statusClass = statusText.toLowerCase().replace(/\s+/g, '-');
     if (ownerReportDetailsStatus) {
       ownerReportDetailsStatus.textContent = statusText;
@@ -1797,6 +1885,42 @@ window.openOwnerReport = function(reportId) {
         <div class="owner-withheld-note">
           <i class="fas fa-eye-slash"></i>
           Issue description, operator findings and all attachments are withheld while access is closed.
+        </div>
+      </div>
+    ` : pendingApproval ? `
+      <!-- ===== PENDING APPROVAL: subject + notice, NO payload ===== -->
+      <!-- ⚠️ Mirrors the expired branch above on purpose: the row stays and the
+           manager sees WHICH ticket this is, but the issue description, the
+           operator's findings and every attachment stay withheld until the
+           superadmin approves it. There is no viewing window yet, so — unlike
+           the expired case — there is nothing to count down and nothing to
+           request re-access to. -->
+      <div class="owner-access-pending">
+        <p class="owner-access-pending-title"><i class="fas fa-hourglass-half"></i> Approval still Pending</p>
+        <p class="owner-access-pending-body">
+          This ticket has not been approved by the admin yet, so the report and its
+          CCTV evidence are not available here. It will open in full once the
+          superadmin approves it. The subject is shown below so you can tell which
+          ticket this is.
+        </p>
+      </div>
+
+      <div class="review-card">
+        <div class="review-card-header">
+          <h3><i class="fas fa-ticket-alt"></i> Ticket Details</h3>
+        </div>
+        <div class="review-meta-grid">
+          <div class="review-meta"><label>Ticket Number</label><span>${escapeHTML(data.ticketNumber || data.id || 'N/A')}</span></div>
+          <div class="review-meta"><label>Branch</label><span>${escapeHTML(data.branchName)}</span></div>
+          <div class="review-meta"><label>Reporter</label><span>${escapeHTML(data.authorName)}</span></div>
+          <div class="review-meta"><label>Reported Date</label><span>${escapeHTML(formatDate(data.submittedAt))}</span></div>
+          <div class="review-meta"><label>Subject</label><span>${escapeHTML(data.title || '—')}</span></div>
+          <div class="review-meta"><label>Priority</label><span>${escapeHTML(data.priority || '—')}</span></div>
+          <div class="review-meta"><label>Status</label><span>${escapeHTML(ticketDisplayStatus(rawData))}</span></div>
+        </div>
+        <div class="owner-withheld-note">
+          <i class="fas fa-eye-slash"></i>
+          Issue description, operator findings and all attachments are withheld until this ticket is approved.
         </div>
       </div>
     ` : `
@@ -2017,14 +2141,17 @@ function closeOwnerReportModalFn() {
  */
 function renderOwnerTickets(allTickets) {
   // Tickets date-period filter (Today / Last 7 days / This month / All).
-  // Purely a VIEW filter — nothing is deleted; a ticket outside the selected
-  // period stays in Firestore and returns with "All". Age is measured from when
-  // the ticket was FILED (`submittedAt`, which normalizeTicketReport() resolves
-  // from createdAt/dateCreated/submittedAt/...). Tickets without a usable date
-  // are always KEPT — safer than hiding a real ticket with a missing timestamp.
+  // Defaults to TODAY on load (the markup's `selected` option) — the manager
+  // triages today's work first, and "All" stays one click away for older
+  // tickets. Purely a VIEW filter — nothing is deleted; a ticket outside the
+  // selected period stays in Firestore and returns with "All". Age is measured
+  // from when the ticket was FILED (`submittedAt`, which normalizeTicketReport()
+  // resolves from createdAt/dateCreated/submittedAt/...). Tickets without a
+  // usable date are always KEPT — safer than hiding a real ticket with a
+  // missing timestamp.
   const OWNER_TICKET_PERIODS = { daily: 1, weekly: 7, monthly: 'month', all: 0 };
-  const periodValue = (ownerTicketPeriodFilter && ownerTicketPeriodFilter.value) || 'all';
-  const selectedPeriod = OWNER_TICKET_PERIODS[periodValue] !== undefined ? periodValue : 'all';
+  const periodValue = (ownerTicketPeriodFilter && ownerTicketPeriodFilter.value) || 'daily';
+  const selectedPeriod = OWNER_TICKET_PERIODS[periodValue] !== undefined ? periodValue : 'daily';
   let periodStart = null;
   if (selectedPeriod !== 'all') {
     periodStart = new Date();
@@ -2051,7 +2178,18 @@ function renderOwnerTickets(allTickets) {
     // value falls through to "show everything" so an <option> added to the
     // markup before this script is updated cannot blank the list.
     const selectedAccess = ownerTicketAccessFilter ? ownerTicketAccessFilter.value : 'all';
-    const selectedPriority = ownerTicketPriorityFilter ? ownerTicketPriorityFilter.value : 'all';
+    // ⚠️ THE STATUS FILTER matches the badge, not the raw field. The row renders
+    // pendingApproval ? ticketDisplayStatus(t) : raw status (see statusLabel
+    // below); filtering on anything else would let the dropdown and the badge
+    // disagree about the same row. 'all' is the default so nothing hides on
+    // load, and an unrecognised value falls through to "show everything".
+    const selectedTicketStatus = ownerTicketStatusFilter ? ownerTicketStatusFilter.value : 'all';
+    const statusLabelMatches = (t, status) => {
+      if (selectedTicketStatus === 'all') return true;
+      const pendingApproval = isAreaManager() && isPendingApprovalTicket(t);
+      const label = pendingApproval ? ticketDisplayStatus(t) : String(status || 'Pending').trim();
+      return label === selectedTicketStatus;
+    };
     const selectedBranch = ownerTicketBranchFilter ? ownerTicketBranchFilter.value : '';
     const searchText = ownerTicketSearch ? ownerTicketSearch.value.trim().toLowerCase() : '';
 
@@ -2089,9 +2227,14 @@ function renderOwnerTickets(allTickets) {
       tickets = tickets.filter((t) => String(t.status || 'Pending').trim() === selectedStatus);
     }
 
-    if (selectedPriority !== 'all') {
-      tickets = tickets.filter((t) => String(t.priority || 'Low').trim() === selectedPriority);
-    }
+    // (No priority filter on this dashboard — the priority dot on each row
+    // already carries that signal, so a separate dropdown added noise, not value.)
+
+    // ⚠️ THE STATUS FILTER applies to the badge label, not the raw field — via
+    // statusLabelMatches(), which reuses the row's own label expression. For an
+    // approved row the label IS the raw status, so 'Resolved' keeps matching
+    // exactly as the force-locked `selectedStatus` above already required.
+    tickets = tickets.filter((t) => statusLabelMatches(t, t.status));
 
     if (searchText) {
       tickets = tickets.filter((t) => {
@@ -2128,7 +2271,78 @@ function renderOwnerTickets(allTickets) {
       });
     }
 
+    // ⚠️ NOT-YET-APPROVED TICKETS — the manager's own indicator.
+    //
+    // The gates above deliberately hide unapproved work: isApprovedTicket() and
+    // the force-locked `selectedStatus = 'Resolved'` both drop it, and a pending
+    // ticket has no viewing window for the access filter to match. That is correct
+    // for the DEFAULT view, but it also means a ticket the manager filed is
+    // invisible until a superadmin signs it off — the exact "where is my ticket?"
+    // gap this closes.
+    //
+    // So for the two manager roles ONLY, re-scan the same raw list for tickets
+    // that are NOT approved, run them through the SAME branch / access / search /
+    // period / priority / status predicates (so every control keeps working),
+    // and append.
+    // The two test-pinned gate lines are untouched and still run first.
+    //
+    // ⚠️ DISPLAY ONLY. Clicking a pending ticket opens a modal that shows the
+    // subject and an "Approval still Pending" notice and withholds the
+    // description, findings and footage — the same payload an expired window
+    // protects. It
+    // grants no new read: firestore.rules already lets any signed-in user read
+    // every ticket, so nothing here widens access.
+    if (isAreaManager()) {
+      const pending = allRaw
+        .map((doc) => normalizeTicketReport(doc))
+        .filter((t) => isPendingApprovalTicket(t))
+        .filter((t) => {
+          const branch = String(t.branch || t.branchName || '').trim();
+          return allowedBranches.includes(branch);
+        })
+        .filter((t) => {
+          if (selectedBranch && String(t.branch || t.branchName || '').trim() !== selectedBranch) return false;
+          // A pending ticket has no viewing window, so it is never "expired";
+          // accessMatches() therefore keeps it under "All"/"Not expired" and
+          // hides it under "Expired" — exactly right.
+          if (!accessMatches(t)) return false;
+          // The badge label, same as the row renders it — so e.g. "In Progress"
+          // keeps a started ticket visible under that option.
+          if (!statusLabelMatches(t, t.status)) return false;
+          if (searchText) {
+            const haystack = [
+              t.ticketNumber, t.title, t.incident, t.authorName, t.author,
+              t.reporter, t.name, t.branch, t.branchName, t.description, t.location
+            ]
+              .concat(dateSearchTokens(t.submittedAt))
+              .filter(Boolean).join(' ').toLowerCase();
+            if (!haystack.includes(searchText)) return false;
+          }
+          if (periodStart) {
+            const raw = t.submittedAt;
+            const d = raw && raw.toDate ? raw.toDate() : (raw ? new Date(raw) : null);
+            if (d && !isNaN(d.getTime()) && d.getTime() < periodStart.getTime()) return false;
+          }
+          return true;
+        });
+      // Concat, not push: `tickets` is a fresh array from the filters above, but
+      // this keeps the two lists independent so a future change to one cannot
+      // mutate the other. The sort below then re-orders the combined list, with
+      // pending rows above resolved ones.
+      tickets = tickets.concat(pending);
+    }
+
+    // ⚠️ ORDERING: pending rows FLOAT TO THE TOP, resolved rows sit BELOW them,
+    // each group still newest-first. "Pending" here means exactly what the row's
+    // Status badge means — isAreaManager() && isPendingApprovalTicket(t) — so the
+    // visual order and the badge can never disagree about which rows are pending.
+    // For a role that has no pending rows at all (HR / superadmin, whose list is
+    // approved-only) both sides of the first test are always false, so this block
+    // collapses to a pure newest-first date sort and their order is unchanged.
     tickets.sort((a, b) => {
+      const aPending = isAreaManager() && isPendingApprovalTicket(a);
+      const bPending = isAreaManager() && isPendingApprovalTicket(b);
+      if (aPending !== bPending) return aPending ? -1 : 1;
       const aTime = a.submittedAt && a.submittedAt.toDate ? a.submittedAt.toDate().getTime() : new Date(a.submittedAt || 0).getTime();
       const bTime = b.submittedAt && b.submittedAt.toDate ? b.submittedAt.toDate().getTime() : new Date(b.submittedAt || 0).getTime();
       return bTime - aTime;
@@ -2145,7 +2359,21 @@ function renderOwnerTickets(allTickets) {
     }
     ownerTicketsBody.innerHTML = tickets.map((t) => {
       const status = String(t.status || 'Pending');
-      const statusClass = status.toLowerCase().replace(/\s+/g, '-');
+      // ⚠️ HONEST PIPELINE STATE, never a bare "Resolved" for an unapproved row.
+      // `status` below is the raw stored value, which for a resolved-but-unqueued
+      // ticket is literally 'Resolved' even though the superadmin has not signed
+      // it off — showing a green Resolved badge promises content the manager
+      // cannot open yet. So a pending row is labelled via ticketDisplayStatus():
+      // it shows the live pipeline state ('Pending' freshly filed, 'In Progress'
+      // when work starts, 'Pending Approval' when queued for review — including
+      // the send-back states 'For Revision' / 'Insufficient Footage', which are
+      // operator words and never surface here) and only an approved ticket
+      // keeps the raw status (always "Resolved"). The four labels collapse onto
+      // the existing .status-badge.* classes, so approved rows are byte-for-byte
+      // unchanged.
+      const pendingApproval = isAreaManager() && isPendingApprovalTicket(t);
+      const statusLabel = pendingApproval ? ticketDisplayStatus(t) : status;
+      const statusBadgeClass = statusLabel.toLowerCase().replace(/\s+/g, '-');
       const priority = String(t.priority || 'Low').toLowerCase();
       const dotClass = priority === 'high' ? 'high' : 'low';
       const createdDate = t.submittedAt?.toDate ? formatDate(t.submittedAt.toDate()) : formatDate(t.submittedAt);
@@ -2205,12 +2433,11 @@ function renderOwnerTickets(allTickets) {
       // badges side by side under the label "Status" is why this read as
       // cluttered: the LABEL was doing the damage, not the badges.
       //
-      // `.status-badge.expired` is kept as the CLASS even though the visible
-      // word is now "No access": that class is shared with the superadmin
+      // `.status-badge.expired` is kept as the CLASS and the visible word is now
+      // "Expired" to match it: that class is shared with the superadmin
       // Approvals table, and test/owner-ticket-approval.test.js pins it by name.
-      // Only the WORD changes — the class is a machine-readable hook, and
-      // renaming it here would be a breaking change for code this page does
-      // not own.
+      // Word and class now agree, so nothing here is a machine-readable hook the
+      // page does not own.
       let accessCell;
       if (reopenPending && expiryAppliesToViewer()) {
         // The amber chip REPLACES the red one, as before — the manager asked,
@@ -2227,11 +2454,12 @@ function renderOwnerTickets(allTickets) {
         // considered and rejected: a ticket vanishing from a list reads as data
         // loss, and the manager has no way to tell it apart from a mistake.
         //
-        // The word is "No access", which is the fact in the manager's own terms.
-        // The old "Access closed" described the mechanism; this describes what
-        // it means for them right now.
+        // The word is "Expired", which is the viewing window's own state in the
+        // manager's terms. It names the WINDOW (not the ticket): the ticket is
+        // still listed with its metadata, only its report and evidence are
+        // withheld.
         accessCell = `<span class="status-badge expired" title="${escapeHTML(expiryTitle)}">`
-          + `No access</span>`;
+          + `Expired</span>`;
       // ⚠️ THE LIVE COUNTDOWN IS THE `else` — the genuinely OPEN case. Only here is
       // there a deadline to count down to, so it is the only branch that gets a
       // ticking element. Everything above it is a static state.
@@ -2269,8 +2497,8 @@ function renderOwnerTickets(allTickets) {
           + escapeHTML(formatDate(expiresAt)) + '</div>';
       }
 
-      const statusCell = `<span class="status-badge ${expired ? 'resolved' : statusClass}">`
-        + escapeHTML(status) + '</span>';
+      const statusCell = `<span class="status-badge ${expired ? 'resolved' : statusBadgeClass}">`
+        + escapeHTML(statusLabel) + '</span>';
 
       // ⚠️ THE ACCESS FOOT IS GATED ON `expiryAppliesToViewer()` — the SAME
       // predicate applyViewerExpiryChrome() uses to hide the Access column
@@ -2302,6 +2530,15 @@ function renderOwnerTickets(allTickets) {
            </button>`
         : '';
 
+      const uploadBtn = isHrOrSuperAdmin()
+        ? `<span class="btn btn-icon action-btn upload-indicator" data-tooltip="Upload NOV files"
+             data-upload-key="tickets/${escapeHTML(t.id)}"
+             data-upload-label="${escapeHTML(t.ticketNumber)}"
+             onclick="event.stopPropagation(); window.HrUploads.openFromButton(this);">
+             <i class="fas fa-file-contract"></i><span class="upload-indicator-label">NOV</span>
+           </span>`
+        : '';
+
       const cardFoot = `<div class="approval-card-foot">
              ${cardAccessBlock}
              <div class="approval-card-actions">
@@ -2309,11 +2546,12 @@ function renderOwnerTickets(allTickets) {
                  <i class="fas fa-eye"></i>
                </button>
                ${remarksBtn}
+               ${uploadBtn}
              </div>
            </div>`;
 
       return `
-      <tr onclick="window.openOwnerReport('${escapeHTML(t.id)}')">
+      <tr onclick="window.openOwnerReport('${escapeHTML(t.id)}')"${activeUserIsSuperAdmin && dotClass === 'high' ? ' class="ticket-high-priority"' : ''}>
         <td data-label="Ticket"><span class="priority-dot"><span class="dot ${dotClass}"></span><span class="ticket-link">${escapeHTML(t.ticketNumber)}</span></span></td>
         <td data-label="Created">${escapeHTML(createdDate)}</td>
         <td data-label="Branch">${escapeHTML(t.branchName)}</td>
@@ -2322,18 +2560,19 @@ function renderOwnerTickets(allTickets) {
         <td data-label="Status">${statusCell}</td>
         <td data-label="Access">${accessCell}${accessNote}</td>
         <td>
-          <div class="action-stack compact">
+          <div class="action-group">
             <button type="button" class="btn btn-icon action-btn view" data-tooltip="${expired ? 'View details (access closed)' : 'View'}">
               <i class="fas fa-eye"></i>
             </button>
             ${remarksBtn}
+            ${uploadBtn}
           </div>
         </td>
         <td class="approval-card-cell" data-label="Card">
           <div class="approval-card">
             <div class="approval-card-head">
               <span class="approval-card-branch"><i class="fas fa-ticket-alt"></i>${escapeHTML(t.ticketNumber)}</span>
-              <span class="approval-card-pill approval-card-pill--${expired ? 'resolved' : statusClass}">${escapeHTML(status)}</span>
+              <span class="approval-card-pill approval-card-pill--${expired ? 'resolved' : statusBadgeClass}">${escapeHTML(statusLabel)}</span>
             </div>
             <div class="approval-card-grid">
               <div class="approval-card-field"><span class="approval-card-label">Branch</span><span class="approval-card-value">${escapeHTML(t.branchName)}</span></div>
@@ -2352,6 +2591,8 @@ function renderOwnerTickets(allTickets) {
       ownerTicketPagination.innerHTML = `<span class="page-info">${tickets.length} ticket(s)</span>`;
       // Re-flag the Remarks buttons for the rows just drawn (red = already has a note).
       try { if (window.Remarks && window.Remarks.paintPresence) window.Remarks.paintPresence(); } catch (e) { /* ignore */ }
+      // Re-flag the Upload buttons for the rows just drawn (amber = already has files).
+      try { if (window.HrUploads && window.HrUploads.paintPresence) window.HrUploads.paintPresence(); } catch (e) { /* ignore */ }
     }
     // ⚠️ THE ROW COUNTDOWNS NEED THE TICKER TOO, not just the modal's. Started
     // here as well as on open because the LIST is where a manager triages
@@ -2443,7 +2684,7 @@ function bindOwnerEvents() {
 
   ownerTicketSearch?.addEventListener('input', () => renderOwnerTickets(ownerAllTicketsCache));
   ownerTicketAccessFilter?.addEventListener('change', () => renderOwnerTickets(ownerAllTicketsCache));
-  ownerTicketPriorityFilter?.addEventListener('change', () => renderOwnerTickets(ownerAllTicketsCache));
+  ownerTicketStatusFilter?.addEventListener('change', () => renderOwnerTickets(ownerAllTicketsCache));
   ownerTicketBranchFilter?.addEventListener('change', () => renderOwnerTickets(ownerAllTicketsCache));
   ownerTicketPeriodFilter?.addEventListener('change', () => renderOwnerTickets(ownerAllTicketsCache));
   closeOwnerReportModal?.addEventListener('click', closeOwnerReportModalFn);
@@ -2492,11 +2733,15 @@ bindOwnerEvents();
 // The DOM is original-desktop-first: #ownerAuthStatus STARTS in
 // .header-right — exactly where it lived before the strip existed — so at
 // >=900px, and on any page where this script does not run, the header is
-// unchanged. On phones the auth row moves into the strip's slot, which is
-// where the pasted mockup puts it. It is ONE node with ONE set of ids (never
-// cloned), so setActiveUser()'s writes to #ownerUserEmail / #ownerUserRoleBadge
-// and js/hr-violations.js's badge read keep working across the move — element
-// references are not invalidated by relocating the node.
+// unchanged. On phones the auth row (dot + EMAIL only) moves into the strip's
+// slot, which is where the pasted mockup puts it. It is ONE node with ONE set
+// of ids (never cloned), so setActiveUser()'s writes to #ownerUserEmail keep
+// working across the move — element references are not invalidated by
+// relocating the node. ⚠️ #ownerUserRoleBadge is NOT in this node any more: it
+// lives BESIDE THE PAGE TITLE (see ownerdashboard.html .header-left) as the
+// big role indicator, and deliberately stays there on phones too — it never
+// moves, so its id/text reads (setActiveUser + the readRole fallbacks in
+// js/hr-violations.js / js/owner-violations.js) are simpler than ever.
 (function placeOwnerAuthStatus() {
   const auth = document.getElementById('ownerAuthStatus');
   const headerRight = document.querySelector('#ownerMainContent .header-right');

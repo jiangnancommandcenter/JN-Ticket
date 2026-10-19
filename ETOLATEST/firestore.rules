@@ -423,6 +423,15 @@ service cloud.firestore {
       allow update: if isOperatorOrSuperAdmin()
         && request.resource.data.diff(resource.data).affectedKeys()
              .hasOnly(['attachments', 'subject', 'updatedAt']);
+      // Area Manager (owner) may stamp the open/expiry time on a transferred
+      // violation so the Superadmin's client can auto-revert after the countdown.
+      // Restricted to the manager* fields only — never touches managerStatus,
+      // hrStatus, or any report data.
+      allow update: if isOwner()
+        && isTransferredToAreaManager()
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['managerOpenedAt', 'managerExpiresAt', 'managerExpiresAtMs',
+                       'managerOpenedBy', 'managerOpenedByName', 'updatedAt']);
       allow update, delete: if isSuperAdmin() || (isOperatorOrSuperAdmin() && isOwnViolation());
     }
 
@@ -455,6 +464,18 @@ service cloud.firestore {
       allow create: if isHrOrSuperAdmin()
         && request.resource.data.byEmail == selfEmail();
       // No update, no delete: the log is append-only.
+    }
+
+    // HR coordination file uploads: NOV documents and supporting evidence
+    // attached to transferred tickets or violations. HR/superadmin may read
+    // and create; the uploader may delete their own uploads.
+    match /hr_uploads/{uploadId} {
+      allow read: if isHrOrSuperAdmin();
+      allow create: if isHrOrSuperAdmin()
+        && request.resource.data.uploadedBy == selfEmail();
+      allow delete: if isHrOrSuperAdmin()
+        && resource.data.uploadedBy == selfEmail();
+      // No update: upload metadata is immutable once created.
     }
 
     // ---------------- chats ----------------

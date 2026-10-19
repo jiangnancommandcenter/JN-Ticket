@@ -210,17 +210,14 @@ console.log('\n=== The tables become CARDS via the SHARED row-card swap ===');
         'pipeline) and Access (can this person still open it) are different questions.');
     assert(/<td data-label="Access">/.test(ownerRow),
         'the Access cell must carry data-label="Access", or it renders unlabelled on a phone');
-    assert(/No access<\/span>/.test(ownerRow),
-        'the closed state must be VISIBLE TEXT reading "No access" INSIDE the badge span, ' +
+    assert(/Expired<\/span>/.test(ownerRow),
+        'the closed state must be VISIBLE TEXT reading "Expired" INSIDE the badge span, ' +
         'not a title attribute — a phone has no hover, so a tooltip is invisible there');
-    // ⚠️ "No access" IS STILL ABOUT THE VIEWING WINDOW, NOT THE TICKET. The bare
-    // word "Expired" was rejected for exactly this reason: managers read it as the
-    // ticket itself having expired, and then chased the wrong problem. "No access"
-    // says the same thing without that ambiguity — they still have the ticket, they
-    // just cannot open it.
-    assert(!/>Expired<\/span>/.test(ownerRow),
-        'the bare word "Expired" is ambiguous — it reads as the TICKET being expired, ' +
-        'not the viewing window closing. The visible text is "No access".');
+    // ⚠️ "Expired" HERE IS ABOUT THE VIEWING WINDOW, NOT THE TICKET. The word was
+    // changed to "Expired" on request to match the shared .status-badge.expired
+    // class; the Access column heading (and the .owner-access-note beneath the
+    // badge, which names the closure date) are what disambiguate it — the ticket
+    // itself is still listed, only its report and evidence are withheld.
     assert(/owner-access-note/.test(ownerRow),
         'the closure date and the reopen reason must render as real text (.owner-access-note) — ' +
         'they are unreachable on a touch device');

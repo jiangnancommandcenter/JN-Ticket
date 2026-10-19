@@ -496,6 +496,13 @@ body.chat-ticket-open .modal-overlay {
     background: rgba(37, 99, 235, 0.12);
     border-color: rgba(37, 99, 235, 0.35);
 }
+/* RANK marker on the superadmin pill: a gold border (and the ★ that
+   js/chat.js prefixes into the text) so the thread header says RANK, not just
+   role. The blue fill/text stay — gold accents the pill, it never replaces
+   the role hue. */
+.chat-role-pill--rank {
+    border-color: var(--chat-rank-gold, #F5B301);
+}
 
 .chat-thread-avatar {
     width: 32px;
@@ -651,7 +658,30 @@ body.chat-ticket-open .modal-overlay {
     align-self: flex-end;
 }
 
-.chat-avatar--superadmin { background: var(--chat-role-superadmin, #4A9EFF); }
+.chat-avatar--superadmin {
+    background: var(--chat-role-superadmin, #4A9EFF);
+    /* RANK MARKER — gold ring + corner star, layered on the role fill.
+       ⚠️ This is a marker of RANK, not a second identity colour: the circle
+       stays blue (--chat-role-superadmin) so "one colour = one role" survives.
+       Gold reads as highest rank everywhere and clashes with none of the four
+       role hues. The ring uses box-shadow (not border) so the 28px circle
+       keeps its size, and the star is a ::after so the avatar's markup — and
+       every existing test that pins it — stays untouched. */
+    box-shadow: 0 0 0 2px var(--chat-rank-gold, #F5B301);
+    position: relative;
+}
+.chat-avatar--superadmin::after {
+    content: "\2605"; /* ★ */
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    font-size: 0.55rem;
+    line-height: 1;
+    color: var(--chat-rank-gold, #F5B301);
+    /* Keeps the star readable over any surface, dark or light. */
+    text-shadow: 0 0 2px var(--bg-primary, #fff);
+    pointer-events: none;
+}
 .chat-avatar--hr         { background: var(--chat-role-hr, #16A34A); }
 /* Area Manager (stored role 'owner'). It USED to fall through to the neutral
    "unknown" grey, which was correct while owners were excluded from chat

@@ -1,0 +1,608 @@
+
+> implement@1.0.0 test
+> node --check firebase.js && node --check script.js && node --check js/auth.js && node --check js/notifications.js && node --check js/owner-dashboard.js && node --check js/owner-ticket-form.js && node --check js/email.js && node --check js/email-config.js && node --check js/chat.js && node --check js/chat-unsend.js && node --check js/error-reporter.js && node --check js/command-palette.js && node --check js/onboarding.js && node --check js/violation-report.js && node --check js/attachment-viewer.js && node --check js/hr-violations.js && node --check js/owner-violations.js && node --check js/remarks.js && node --check scripts/seed.js && node test/tracking-access.test.js && node test/ticket-email.test.js && node test/chat-access.test.js && node test/chat-ticket-mentions.test.js && node test/chat-violation-mentions.test.js && node test/chat-conversations.test.js && node test/chat-rules.test.js && node test/set-role.test.js && node test/owner-ticket-approval.test.js && node test/owner-pending-tickets.test.js && node test/approval-default-filter.test.js && node test/ticket-date-search.test.js && node test/owner-ticket-form.test.js && node test/owner-mobile.test.js && node test/violations-badge.test.js && node test/violation-hr-transfer.test.js && node test/violation-hr-view.test.js && node test/error-reporter.test.js && node test/owner-dark-mode.test.js && node test/command-palette.test.js && node test/onboarding.test.js && node test/uptime-offline.test.js && node test/auth-guard.test.js && node test/script-collision.test.js && node test/email-config-deploy.test.js && node test/bootstrap-seed.test.js && node test/attachment-shapes.test.js && node test/attachment-viewer.test.js && node test/footage-accumulation.test.js && node test/operator-upload-indicator.test.js && node test/violation-area-manager-transfer.test.js && node test/no-demo-reseed.test.js && node test/expiry-on-first-open.test.js && node test/access-countdown.test.js && node test/approval-rearm.test.js && node test/hr-remarks.test.js && node test/chat-unsend.test.js && node test/add-status-modal.test.js
+
+ΓÜá∩╕ÅΓÜá∩╕Å TIME-COMPRESSION ACTIVE (Tier 2 testing): window = 60000 ms (1 minute) ΓÇö production value is 2 days.
+OK: all 2-day tracking access assertions passed
+OK: all approval-email assertions passed
+Testing chat access gate...
+Γ£à Chat access gate tests passed (hr + superadmin + Area Manager chat 1:1; the All HR group stays hr + superadmin only; operator excluded everywhere).
+
+=== The pairing matrix (who may start a thread with whom) ===
+  PASS  the full pairing matrix, including the co-manager exclusion
+  PASS  the refusals are the PAIRING rule, not an email coincidence
+  PASS  every co-manager is refused, not just the first
+  PASS  pairing is symmetric for all four chat roles
+  PASS  self is never startable
+Testing chat UI wiring (fake DOM + fake Firestore)...
+  PASS  the group chat renders for HR and is absent for an Area Manager
+Testing draggable launcher...
+Γ£à Draggable launcher tests passed (drag moves it, click opens chat, clamped + resettable).
+Testing typing indicator and incoming sound...
+Testing chat read receipts (Sent / Seen ticks)...
+Testing live read receipts (no refresh needed)...
+Γ£à Live receipt tests passed (ticks repaint without a refresh; a CLOSED chat does not mark seen).
+Testing chat mentions...
+Γ£à Mention tests passed (roster, stored mentions, highlight, mentions-me flag, XSS-safe).
+Γ£à Mention picker tests passed (opens on @, filters, closes on space/email, inserts on pick).
+Γ£à Branch-room @mention roster tests passed (exactly the members; no members yet ΓåÆ senders only; never a directory-wide roster).
+[Chat] group mention roster load failed: Error: denied
+    at Object.catch (C:\Users\user\Desktop\ETOLATEST\test\chat-access.test.js:2061:58)
+    at Object.loadGroupMentionRoster (evalmachine.<anonymous>:21:17)
+    at runLoader (C:\Users\user\Desktop\ETOLATEST\test\chat-access.test.js:2078:12)
+Γ£à All HR group @mention roster tests passed (superadmin gets approved hr+superadmin; HR no-ops; denied read degrades safely).
+    at runReceiptTests (C:\Users\user\Desktop\ETOLATEST\test\chat-access.test.js:2107:20)
+Γ£à Mention colour tests passed (blue, themed via shared variable in light + dark).
+Testing chat profiles (role avatar + name/title)...
+Γ£à Profile tests passed (role-tinted avatars, no visible badge, live display name/title, grouping, escaping).
+Γ£à Profile editor tests passed (opens, saves own profile only, collapses after save ΓÇö success AND failure).
+Γ£à Read receipt tests passed (single tick on send; blue seen tick; own receipt excluded).
+Testing paginated history...
+Γ£à Pagination tests passed (prepend, cursor advances, no chime, no false unread, scroll preserved, terminates).
+Testing unread threshold + divider...
+Γ£à Unread tests passed (Firestore receipt is the source of truth; divider marks the unread boundary).
+Testing chat notification sound...
+Γ£à Chat sound tests passed (every conversation announces, once per message; first run silent; own messages and the open room excluded; stale snapshots dropped).
+[Chat] Cannot watch messages in dm_c__d (permission-denied); falling back to the room-summary sound for that conversation.
+Γ£à Unread tests passed (Firestore receipt is the source of truth; divider marks the unread boundary).
+Testing emoji reactions...
+Γ£à Reaction tests passed (chips render, counts aggregate, own reaction marked, ONE reaction per message, owner-only, optimistic, hover-to-open, animated).
+Γ£à Legacy reaction tests passed (removes the real doc; migrates legacy id on emoji switch).
+Testing chat replies...
+Γ£à Reply tests passed (quote block, replyTo stored, banner clears, no chaining, graceful fallback, escaped, header carries no action buttons).
+Γ£à Context menu tests passed (reply + reactions in one menu; touch long-press opens it).
+Γ£à Long-press focus overlay tests passed (dim+blur scrim, only the held bubble lifted, scale pop, tap-to-dismiss; desktop hover unaffected).
+Γ£à Native-menu + auto-focus tests passed (user-select/touch-callout suppress the OS callout; contextmenu prevented; composer auto-focus is desktop-only).
+Γ£à Long-press flicker + iMessage text-action tests passed (release-click no longer closes the menu; Copy/Unsend/Reply are text below the emoji row).
+Γ£à Read receipt tests passed (single tick on send; blue seen tick; own receipt excluded).
+Γ£à Chat tests passed (hr + superadmin only; owner/operator excluded; messages escaped; draft-based typing indicator; sound).
+Testing chat ticket mentions (type "ticket", click to open)...
+
+=== No schema change: the reference is part of the text ===
+
+=== Matching: what becomes a link, and what does not ===
+
+=== A ticket reference can never inject markup ===
+
+=== The click opens the right modal on each page ===
+
+=== Only Resolved tickets can be mentioned ===
+
+=== Wiring ===
+
+=== The picker must not recurse (the freeze regression) ===
+
+=== The modal replaces the chat; X restores it ===
+
+=== HR: the report modal opens after a Firestore read ===
+
+=== HR: X on the report modal returns to the chat ===
+
+OK: HR async ticket modal tests passed
+
+=== A report read that never resolves still returns the chat ===
+
+OK: HR async ticket modal tests passed (a ticket chip suspends the chat, the report modal opens after its Firestore read, and X returns to the thread with the draft intact; the resolved-ticket modal uses the same two-section Requester/Operator layout as the Reports modal).
+Testing chat violation mentions (type "violation" or "@violation", click to open)...
+
+=== No schema change: the reference is part of the text ===
+
+=== Matching: what becomes a link, and what does not ===
+
+=== The chip: escaped, inert, and still a link ===
+
+=== Only transferred reports can be mentioned ===
+
+=== Every read is filtered (HR cannot read unfiltered) ===
+
+=== "@ticket" / "@violation" triggers ===
+
+=== The triggers, proved by RUNNING them (not just reading them) ===
+
+=== The click opens the report, or explains why not ===
+
+=== The picker must not recurse (the freeze regression) ===
+
+=== The chip is styled ===
+
+=== The mouse picks a violation row, like a ticket row ===
+
+=== An empty picker explains itself, and stays inert ===
+
+=== CREATE: only HR + superadmin. CLICK: the Area Manager too ===
+  PASS  CREATE gate: only HR + superadmin mention; no picker/index/placeholder for the Area Manager
+  PASS  CLICK gate: the Area Manager gets a real chip, resolving managerStatus reports only
+  PASS  the resolver queries the field the roleΓÇÖs rules admit; the opener routes to OwnerViolations FIRST
+  PASS  HR and superadmin still work; the ticket linkifier is untouched
+  PASS  the chat list stays in lockstep with hr-violations.js applyRole()
+
+OK: chat violation mention tests passed
+(an "@violation VIO-0007" reference renders as a chip that swallows the "@" and opens that report; "@violation" is the ONLY picker trigger, because the bare word fired on ordinary prose; only TRANSFERRED reports are openable ΓÇö hrStatus for HR/superadmin, managerStatus for the Area Manager ΓÇö and every read is filtered, because an unfiltered violations query is denied for HR by design. The bare form still linkifies, so older messages keep their chip. CREATE Γëá CLICK: the Area Manager may not mention, but sees a clickable chip for reports transferred to them, opened through OwnerViolations.openModal ΓÇö the chip that used to render as plain text.
+Testing the conversation list...
+
+=== An Area Manager: no personal chat, group no, co-managers no ===
+  PASS  the roster is EMPTY for the Area Manager ΓÇö no personal chat under the new spec
+  PASS  offered: none; refused: RM/SM + HR + superadmin + co-manager + operator (all in the branch group chat)
+  PASS  the All HR group row is absent for an Area Manager
+  PASS  the group chat still works for HR, and the Area Manager stays refused
+  PASS  the first group message on a FRESH Firestore saves, writing no room document
+Γ£à Conversation list tests passed (symmetric room ids; strict 1:1 role pairing superadmin <-> HR only ΓÇö an AREA MANAGER is offered NO personal chat (never RM/SM, never HR, never superadmin, never the group row, never another manager ΓÇö store personnel meet in the BRANCH GROUP chat); the role-gated All HR GROUP chat (pinned, live, no per-room writes attempted in it ΓÇö including its FIRST message on a brand-new Firestore); search by name and message; listeners follow the open room; unread cleared on open; starting a conversation from a list row (no ∩╝ï button, no picker); the room committed BEFORE the first message; every HR account listed for a superadmin from `users`, every superadmin listed for an HR through the role-scoped query, and new accounts appearing LIVE in both directions; a DENIED list query rebuilt from per-room document reads; a conversation survives its peer leaving every roster; a message refused by an OLD deployed rule is retried in three shapes (short payload, then without the room preview) and never disables the chat; the accepted shape is remembered, and the sidebar line is derived from the message stream; escaping).
+Testing chat Firestore rules...
+Γ£à Chat rules tests passed (create/update split; HR+superadmin only; membership-scoped reads and writes; the room written BEFORE the message; legacy archive read-only; members frozen; messages immutable; receipts owner-only; directory reuses the DEPLOYED profiles path; reactions owner-only + immutable; both sides of the roster read from `users` (superadmin whole, HR role-scoped; the HR half needs a deploy); a denied list query rebuilt from per-room document reads; the room read rule also provable for the list query; the group chat is role-gated so new accounts join automatically; the modal has a fixed height; client/rules allowlists agree).
+  Γ£ô Branch group chat tests passed (approval hook, seeded membership, rules).
+
+Γ£à All chat-rules tests passed (rules, roster, branch group chats, modal CSS).
+Testing "Set Role" (Owner / HR) assignment...
+Γ£à Set Role tests passed (owner + hr + rmsm; unknown/privileged roles clamped; Area Manager is a label-only rename; +Ticket is gated, ship-hidden and really hides).
+Γ£à Locked-role write-guard tests passed (superadmin displays as Superadmin and can never be demoted by an Approve/Save on this screen).
+Γ£à Approval-queue role filter tests passed (superadmin + operator are excluded from the queue; owner/hr/rmsm remain; the filter runs after the fallback).
+Testing the Area Manager ticket approval + expiry gate...
+  PASS  the approval gate: approved only, legacy/unknown defaults to NOT approved
+  PASS  only the Area Manager has a viewing window; HR and superadmin always get the full report
+  PASS  the Access column, its filter and the window sentence all follow the role
+  PASS  expiry semantics, including the legacy approvedAt fallback and the unapproved case
+  PASS  both gates are wired: the list filters, the modal withholds
+  PASS  the dead Reports code is gone and the rule is documented in the UI
+  PASS  the new styles are token-based, not hardcoded light values
+
+=== The tickets header: stacked layout + the access split ===
+  PASS  stacked header; dead dropdown gone; three plain-label buckets; same expiry predicate as the badges
+  PASS  the re-access state readers, including a non-array comments field
+  PASS  the write contract matches the existing superadmin workflow
+  PASS  the three request states, and the shared amber chip in the list
+  PASS  the submit is delegated once, and the requester is identified
+  PASS  the footage state readers, including a non-array comments field
+  PASS  the write contract matches the Track page hand-off
+  PASS  the footage UI states, role gate and expiry gate
+  PASS  the submit is delegated once, and the ticket id is set/cleared with the modal
+  PASS  a hostile ?ticket= cannot reach openOwnerReport()
+  PASS  the deep link gates on APPROVAL (as firestore.rules does) and names the real reason
+  PASS  branch matching is case- and whitespace-insensitive
+  PASS  approve/save refuse to strip a user's branch access silently
+  PASS  the deep link fires once and is consumed
+  PASS  both the listener and the fallback load apply the deep link
+
+Γ£à Area Manager approval + expiry tests passed (approved-only list; pending_approval/rejected/legacy hidden; expiry delegated to firebase.js; expired rows stay listed but badged; the modal withholds description, findings and ALL attachments; dead Reports code removed; themed styles; and a re-access request that writes the SAME two fields the existing superadmin workflow reads; the dashboard Request-additional-footage form is RESTORED for the Area Manager / RM/SM (same footage_request hand-off the public Track page performs).
+
+=== Ticket Reviews phone card ===
+  PASS  the approvals table becomes a mockup-style card on phones
+Testing the not-yet-approved ("pending") tickets on the Area Manager dashboard...
+  PASS  isPendingApprovalTicket() is the exact complement of the approved gate
+  PASS  ticketDisplayStatus() is pipeline-honest ("Resolved" reserved for approved)
+  PASS  the approved gate is untouched; pending is appended for isAreaManager() and respects every filter
+  PASS  the row relabels a pending ticket without disturbing the approved row or the cell layout
+  PASS  the pending modal shows the subject and withholds description, findings and ALL attachments
+  PASS  the header badge agrees with the row, and no viewing window is started for a pending ticket
+  PASS  the pending styles are token-based, not hardcoded light values
+  PASS  no dead statusClass left behind in the row renderer
+
+Γ£à Not-yet-approved ("pending") ticket tests passed (complement helpers; approved gate untouched and still first; pending appended for isAreaManager() through every filter; row labelled with the live pipeline state without disturbing the approved row or the two-cell layout; the modal shows the subject and withholds the description, findings and ALL footage; no viewing window is started; token-only styles).
+Testing the Ticket Reviews default filter...
+  Γ£ô Ticket Reviews opens on "All"
+
+Γ£à Ticket Reviews default-filter tests passed (the "All" option carries `selected` and is the only selected one; "Pending Approval" no longer is; every status option survives; applyApprovalFilters() reads the select and still treats "all" as no status filter; nothing overwrites the select's value; and opening the tab re-runs the filter).
+Testing Command Center Tickets date search...
+Γ£à Command Center Tickets date-search tests passed (Date Created searchable in the superadmin month-short format + numeric + ISO; missing/invalid dates degrade to no match).
+Testing the Area Manager ticket form + the public status portal...
+
+=== The payload key set is a CONTRACT, not just data ===
+
+=== BOTH attachment arrays, and they are the same evidence ===
+
+=== Only the manager's ASSIGNED branches are offered ===
+
+=== Full-screen modal: an exit, a scroll, and a dialog contract ===
+
+=== Required fields, and what is pre-filled ===
+
+=== A failed write must NOT destroy what the manager typed ===
+
+=== The dashboard supplies the form its context (one source of truth) ===
+
+=== submit-ticket.html is a STATUS PORTAL, and stays alive ===
+
+=== Upload limits match the form they replaced ===
+
+=== Mobile: the modal must survive a real phone ===
+
+=== Rules: creation is authenticated, the portal read stays open ===
+
+=== Running the suites ===
+  PASS  every key its consumers read by name is present
+  PASS  the document id IS the ticket number (the Track lookup is exact-match)
+  PASS  approvalStatus starts pending ΓÇö never approved, never missing
+  PASS  createdAt is the server timestamp; text is trimmed
+  PASS  a real Cloudinary upload reaches BOTH attachment arrays
+  PASS  attachments === requesterAttachments (the operator can see the footage)
+  PASS  the URL is Cloudinary's secure_url, not an unserialisable File
+  PASS  the progress bar is XHR-backed, so it is not a fake 0-100 jump
+  PASS  only assigned branches are offered; others are absent entirely
+  PASS  a single branch is pre-selected; several are left unchosen
+  PASS  no assigned branches => the submit is refused, with a message
+  PASS  a STANDARD .modal-container.modal-lg, like all 19 others
+  PASS  the header holds exactly ONE control, and it is the app close glyph
+  PASS  no full-screen class, no Back button, no .modal-body scroll override
+  PASS  close, backdrop and Escape all close it
+  PASS  role=dialog / aria-modal / aria-labelledby / aria-hidden are all set
+  PASS  name and email are pre-filled, and the email stays editable
+  PASS  each required field blocks the write when empty
+  PASS  a malformed email blocks it, and says why
+  PASS  a missing service degrades to a message, not a thrown error
+[TicketForm] Submit failed Error: offline
+    at h.sandbox.firestoreService.generateTicketNumber (C:\Users\user\Desktop\ETOLATEST\test\owner-ticket-form.test.js:587:76)
+    at handleSubmit (owner-ticket-form.js:651:26)
+    at C:\Users\user\Desktop\ETOLATEST\test\owner-ticket-form.test.js:72:77
+    at Array.forEach (<anonymous>)
+    at Object.dispatch (C:\Users\user\Desktop\ETOLATEST\test\owner-ticket-form.test.js:72:61)
+    at submit (C:\Users\user\Desktop\ETOLATEST\test\owner-ticket-form.test.js:227:39)
+    at testFailureKeepsData (C:\Users\user\Desktop\ETOLATEST\test\owner-ticket-form.test.js:590:5)
+    at run (C:\Users\user\Desktop\ETOLATEST\test\owner-ticket-form.test.js:968:11)
+  PASS  a failed write reports the error and keeps the form open
+  PASS  the typed description survives, and Submit is re-enabled
+  PASS  the dashboard exposes assigned branches + display name, by copy
+  PASS  the email is NOT bridged (auth is the single source)
+  PASS  owner-dashboard.js loads first; the form consumes the bridge
+  PASS  the form, its uploader, the success modal and the Track button are gone
+  PASS  the Track modal, its two-factor fields and the lightbox survive
+  PASS  ?track= auto-open is no longer gated on the removed button
+  PASS  the email portal URL and ?track= link are unchanged
+  PASS  the page stays reachable without a login
+  PASS  the same Cloudinary cloud + preset as script.js
+  PASS  the 100MB cap and the accepted file types are preserved
+  PASS  inputs are 16px and 44px tall (no iOS zoom, thumb-sized)
+  PASS  density cuts: body 14px, header 12px, gaps 12px, textarea 90px
+  PASS  .form-row collapses to one column; remove buttons always visible
+  PASS  no dvh / safe-area / landscape / stacked-actions leftovers
+  PASS  open() does not autofocus on a phone (no keyboard over the form)
+  PASS  every block comment in style.css is closed
+  PASS  ticket creation requires a session (the public form is gone)
+  PASS  the approved-ticket READ stays open ΓÇö the Track portal is login-free
+  PASS  delete stays superadmin-only; the public update keeps its TODO
+
+├ù Ticket form tests passed (exact payload key set; BOTH attachment arrays written from one real upload; assigned-branch restriction including the blocked empty-permissions case; a STANDARD .modal-container.modal-lg with a single close, matching all nineteen other modals ΓÇö with guards against the full-screen / Back-button version creeping back; pre-filled but editable identity; required-field and email validation; a failed write that keeps the manager's typed report; the dashboard context bridge and its load order; submit-ticket.html reduced to a status portal with the ?track= deep link, the two-factor lookup and the email portal URL all intact ΓÇö including the specific regression where removing the Track button would have silently killed every deep link already sent by email; upload limits unchanged; and the mobile rules that survive at any container size ΓÇö 16px inputs, 44px targets, one-column rows, no autofocus keyboard ΓÇö with the full-screen-only ones asserted ABSENT).
+Testing the Area Manager dashboard phone layer...
+
+=== The tables become CARDS via the SHARED row-card swap ===
+  PASS  the shared ROW CARD SWAP drives the card layout; the one-off is gone
+  PASS  owner tickets: 9 headers / 9 cells, 1 unlabelled (Actions), card cell last
+  PASS  HR violations: 9 headers / 9 cells, 1 unlabelled (Actions), card cell last
+  PASS  Access is its own column; its detail is visible text, not a tooltip
+
+=== The ticket card mirrors the row (nothing dropped, nothing doubled) ===
+  PASS  the card mirrors every desktop field, with actions + access in the foot
+  PASS  hiding the Actions cell cannot hide the empty state
+
+=== KPI row, branch list, and touch targets ===
+  PASS  KPI cards are two-up with the icon above the text
+  PASS  branch list fits two per row; header targets are >= 44x44
+  PASS  clickable rows have :active feedback
+
+=== The container stops inviting a swipe that does nothing ===
+  PASS  the table container no longer invites a dead horizontal swipe
+  PASS  every block comment in style.css is closed
+
+├ù Owner dashboard phone layer tests passed (all THREE owner tables render as cards on a phone via the shared row-card swap, with the th/td counts checked against the real markup so an unlabelled cell cannot be added silently, and the private one-off conversion asserted GONE so the design cannot fork again; the card mirrors every desktop field with actions and the access note as visible text in the foot, gated on the same viewer predicate that hides the desktop Access column; the empty state is not mistaken for the Actions cell; the header is two rows and every selector in the owner block is scoped to #ownerMainContent so main.html cannot be affected; four KPI cards go two-up with minmax(0,1fr) so a long label cannot blow out the grid; header targets are 44x44 and clickable rows have active feedback; and the CSS comment-balance guard is kept, because a missing comment opener once deleted a whole block of rules in silence).
+Testing violations badge (unseen reports)...
+Γ£à Violations badge tests passed (per-report: clears only when a report is actually opened).
+Testing the violation -> HR transfer (privacy + wiring)...
+
+=== firestore.rules: HR is gated on the transfer flag ===
+
+=== firestore.rules: HR still cannot write ===
+
+=== The HR tab is view-only ===
+
+=== The nav item is HR-only and hidden by default ===
+
+=== The transferred-only query ===
+
+=== Transfer and revert ===
+
+=== The shared report builder is loaded by both pages ===
+
+=== The transfer pill is styled ===
+
+=== The Violations nav button reveals from a safe role cache ===
+  PASS  cached hr/superadmin reveals; placeholder/failed/mismatched-email do not; logout clears
+
+OK: violation -> HR transfer tests passed (rules gate HR to transferred reports only; HR cannot write; no write controls in the HR UI; transfer is superadmin-only and reversible; one shared PDF layout for both pages).
+HR violations module OK: role gate, transfer-only filter, search, store filter and empty state all behave correctly.
+Testing error reporter...
+  PASS  the reporter never touches Firestore
+  PASS  no app_errors rule remains in firestore.rules
+  PASS  the Error Log tab is gone from the command center
+  PASS  a report logs one line carrying the debugging context
+  PASS  a signed-out visitor is reported, not dropped
+  PASS  no toast is shown ΓÇö the popup was dropped deliberately
+  PASS  the same error twice logs ONE line, not two
+  PASS  different errors are both logged
+  PASS  a repeat after the dedupe window logs again
+  PASS  a completely bare sandbox still works (no db, no auth, no navigator)
+  PASS  a missing payload does not throw
+  PASS  a broken console does not throw (the reporter cannot break the page)
+  PASS  a report raised from inside a report cannot recurse
+  PASS  long messages are truncated
+  PASS  truncate handles odd input
+  PASS  it hooks error and unhandledrejection, but not console
+  PASS  a window error is reported with a readable source
+  PASS  a <script> resource failure is ignored (the pages handle those)
+  PASS  an unhandled rejection is reported
+  PASS  the reporter is loaded on both pages before the other scripts
+OK: 20/20 error reporter assertions passed
+  PASS  the page has inline <style> blocks to check
+
+=== No hardcoded light surfaces in consuming rules ===
+  PASS  no hardcoded rgba(255,255,255,...) background - that is the invisible-text bug
+  PASS  no hardcoded near-white background (surface tokens only)
+  PASS  no hardcoded dark-navy drop shadow (invisible on a dark surface)
+  PASS  no hardcoded low-alpha blue border/focus ring
+
+=== The ticket table specifically ===
+  PASS  the ticket table still styles its body cells
+  PASS  cell background must come from a token, not a literal white
+  PASS  the cell rule must not contain a literal white (this exact line was the bug)
+  PASS  row hover must come from a token too
+  PASS  the sticky header background must come from a token
+
+=== Every light token needs a dark counterpart ===
+  PASS  a :root token block exists
+  PASS  an html[data-theme="dark"] token block exists
+  PASS  the :root block defines --owner-* tokens (11)
+  PASS  --owner-elev-0 has a dark-mode value (a light-only token is the next regression)
+  PASS  --owner-elev-1 has a dark-mode value (a light-only token is the next regression)
+  PASS  --owner-elev-2 has a dark-mode value (a light-only token is the next regression)
+  PASS  --owner-elev-3 has a dark-mode value (a light-only token is the next regression)
+  PASS  --owner-hover-border has a dark-mode value (a light-only token is the next regression)
+  PASS  --owner-focus-border has a dark-mode value (a light-only token is the next regression)
+  PASS  --owner-focus-ring has a dark-mode value (a light-only token is the next regression)
+  PASS  --owner-ticket-link-hover has a dark-mode value (a light-only token is the next regression)
+  PASS  --owner-ticket-head has a dark-mode value (a light-only token is the next regression)
+  PASS  --owner-ticket-row has a dark-mode value (a light-only token is the next regression)
+  PASS  --owner-ticket-row-hover has a dark-mode value (a light-only token is the next regression)
+
+=== Dark palette prerequisites ===
+  PASS  theme.css defines --bg-hover, which the dark row-hover token relies on
+  PASS  theme.css defines --shadow-lg, which the dark elevation tokens rely on
+  PASS  theme.css sets color-scheme:dark so native <select> dropdowns follow the theme
+
+=== Role badge contrast in dark mode ===
+  PASS  .role-badge.superadmin #fbbf24 on its chip = 6.98:1 (needs 4.5:1)
+  PASS  .role-badge.owner #a78bfa on its chip = 5.29:1 (needs 4.5:1)
+  PASS  .role-badge.hr #5eead4 on its chip = 8.58:1 (needs 4.5:1)
+  PASS  .role-badge.viewer #93c5fd on its chip = 6.97:1 (needs 4.5:1)
+  PASS  .role-badge.editor resolves its dark colour via --color-resolved
+
+=== Section headings declare their own colour ===
+  PASS  .owner-section-header h2 declares color: var(--text-primary) instead of inheriting it
+  PASS  .owner-section-header p declares its colour explicitly
+
+=== Dark palette completeness (the general guard) ===
+  PASS  the light palette declares colour variables (11 found)
+  PASS  every --bg-/--text-/--border- variable has a dark value ΓÇö a missing one keeps its LIGHT value on a dark surface and its text vanishes
+
+=== style.css owner-dashboard block must be tokenised too ===
+  PASS  the #ownerMainContent rule must exist in style.css
+  PASS  end of the owner block not found in style.css
+  PASS  no hardcoded white background in the style.css owner block ΓÇö a literal white stays white in dark mode
+  PASS  no hardcoded near-white background in the style.css owner block
+  PASS  no hardcoded navy drop shadow in the style.css owner block ΓÇö it is invisible on dark
+  PASS  .owner-panel background must come from a token (it was rgba(255,255,255,0.85) ΓÇö a white slab in dark mode)
+  PASS  #ownerMainContent must use a token, not a hardcoded light gradient (it was #f8fafcΓåÆ#f1f5f9)
+  PASS  the reports table cells must use a token (a near-white wash is the unreadable-text bug)
+  PASS  .owner-filter-wrap must use a token (it was rgba(255,255,255,0.8))
+  PASS  the page's #ownerMainContent rule must DECLARE a background ΓÇö an empty rule cannot override a declaration, so the hardcoded light gradient kept winning
+  PASS  the page's #ownerMainContent must declare background via a token
+  PASS  --text-primary on --bg-primary = 15.19:1 (primary body text on the page background)
+  PASS  --text-secondary on --bg-primary = 9.09:1 (secondary text (section blurbs, labels) on the page)
+  PASS  --text-muted on --bg-primary = 5.54:1 (muted text (hints, counts) on the page)
+  PASS  --text-primary on --bg-card = 13.98:1 (primary text on a card surface)
+  PASS  --text-secondary on --bg-card = 8.36:1 (secondary text on a card surface)
+
+OK: Owner dashboard dark-mode tests passed (no hardcoded light surfaces; every token has a dark value; badge contrast meets WCAG AA; dark palette is complete).
+Testing command palette + keyboard shortcuts...
+
+=== Typing safety: a shortcut must never fire while the user types ===
+
+=== Browser and OS shortcuts are never hijacked ===
+
+=== Fuzzy matching ===
+
+=== The shortcut sheet matches the implemented shortcuts ===
+
+=== Accessibility wiring (static) ===
+
+=== XSS: rendered labels are escaped ===
+
+=== Role gating: never offer a command the user cannot run ===
+
+=== Motion, theming and wiring (static) ===
+
+=== The .u-hidden utility must stay overridable by JS ===
+
+OK: command palette + shortcuts tests passed (typing safety, no browser hijacking, fuzzy match, role gating, a11y wiring, XSS escaping, reduced motion, script order, .u-hidden overridability).
+Testing onboarding tour...
+
+=== The tour only runs on the command center ===
+
+=== It shows once, and only once ===
+
+=== Steps point at real elements ===
+
+=== The user can always escape ===
+
+=== Wiring, accessibility and motion ===
+
+OK: onboarding tour tests passed (page scoping, once-only persistence, real targets, escapability, a11y, reduced motion, theme tokens, replay path).
+Testing downtime/uptime panels (offline branches must not read 100%)...
+Γ£à Downtime/uptime panel tests passed (offline branches show real downtime; no double counting).
+Testing the login gate (protected pages must require a session)...
+Γ£à Login gate tests passed (main.html + ownerdashboard.html require a session; public pages stay reachable; ?next= cannot be used as an open redirect; the ?ticket= deep link survives the login bounce and cannot smuggle a redirect).
+  PASS  a superadmin is returned to main.html, carrying ?ticket=, and main.html opens it
+  PASS  a rejected/denied account is gated to pending-approval.html, approved and missing-status accounts still get in
+Γ£à Account status gate tests passed (a rejected user can no longer log in to ownerdashboard.html).
+  PASS  an approved account auto-forwards to its designated dashboard via a live watch ΓÇö no Check Status click needed
+Γ£à Pending-page auto-forward tests passed (approval redirects automatically; rejected/missing status stays put).
+Testing cross-file global collisions on ownerdashboard.html...
+
+=== The reported bug: a delegated global that overwrites itself ===
+  PASS  window.showToast survives owner-dashboard.js and terminates (depth=1)
+
+=== The genuine 3-arg toast from notifications.js stays installed ===
+  PASS  the surviving showToast is the real renderer (appended 1 node)
+
+=== owner-dashboard.js must not declare page-global helpers ===
+  PASS  no top-level `function showToast` in owner-dashboard.js
+  PASS  the delegating helper carries its self-guard
+
+=== Consumers on this page still resolve a callable toast ===
+  PASS  window.showToast is callable for chat / error-reporter / hr-violations
+
+=== main.html is not affected ΓÇö guard against regression there too ===
+  PASS  script.js declares no global showToast; main.html is unaffected
+
+Γ£à Cross-file collision tests passed (notifications.js keeps window.showToast; no self-delegating global; all consumers resolve a working toast).
+  note: EMAIL_CONFIG.portalUrl is empty - the link auto-derives from the superadmin's current page (fine locally; MUST be pinned to a public address before go-live).
+  note: EMAIL_CONFIG.ownerDashboardUrl is empty - the link auto-derives from the superadmin's current page (fine locally; MUST be pinned to a public address before go-live).
+OK: portal link deploy-safety assertions passed (portalUrl=empty/auto-derive).
+Testing the empty-Firestore bootstrap (login.html picker + scripts/seed.js)...
+  PASS  the seeded documents match the shapes the app reads
+  PASS  the seeded branch list matches the one shown at registration
+  PASS  validation happens first, nothing is overwritten, and no password is logged
+  PASS  credentials are external, the key is gitignored, and the SDK is declared
+
+Γ£à Bootstrap tests passed (an empty Firestore no longer dead-ends registration: the picker falls back on an empty read as well as a failed one; scripts/seed.js writes the document shapes the app reads; the branch list cannot drift from login.html; and the first superadmin - which no in-app account can ever be - is created out of band).
+Testing attachment rendering (both writer shapes + no empty href)...
+  PASS  both writer shapes normalise to one canonical attachment
+  PASS  every ticket renderer gates its anchor on a real URL
+  PASS  preventDefault() runs before the empty-URL bail-out
+  PASS  attachmentUrl() always returns a string, never undefined
+  PASS  all 10 resolutionAttachmentUrl writes are undefined-safe
+
+Γ£à Attachment tests passed (both writer shapes normalise to one canonical record; a URL-less record renders an unclickable card instead of an empty anchor; the click guard cancels navigation before bailing; and the Area Manager form writes the canonical keys so the two writers can no longer drift apart).
+  PASS  a URL-less record is detected, and junk input is safe
+Testing shared attachment viewer (main.html + ownerdashboard.html)...
+  ok  one shared module, loaded by both pages, no duplicated dialog
+  ok  selectors cover both the main and owner attachment dialects
+  ok  owner attachment chips open the shared modal with name + counter
+  ok  prev/next wrap, non-previewable types explained, Esc closes
+  ok  ctrl-click and the Open button still reach a new tab
+  ok  every rendered preview is an anchor, so every one is clickable
+  ok  all 5 grids share one builder, one shape guard, one normaliser
+  ok  image + video both get a thumbnail; doc shows an icon; dead shows link-slash
+  ok  the owner dashboard's own container scopes prev/next too
+  ok  hidden-modal tiles load eagerly; the long violation tree still lazy-loads
+  ok  a failed thumbnail retries, then falls back to an icon ΓÇö never a broken glyph
+
+All attachment viewer tests passed.
+Testing footage accumulation (added clips are added, never replaced)...
+  PASS  AM requests -> operator adds -> superadmin adds -> re-approve keeps all 5 clips
+  PASS  the legacy resolvedAdditionalFootage fallback still rescues old tickets
+  PASS  a repeated upload is de-duplicated, first entry wins, keyless files survive
+  PASS  removals compose with additions, and default to removing nothing
+  PASS  all four write sites share one helper, and removals are actually applied
+  PASS  footage is never filed under the requester, and damaged tickets self-repair
+  PASS  the added marker is opt-in, on both card builders, clear of the Remove button
+
+Testing the project reset tool (what it must never delete)...
+  PASS  the tool lives in docs/ and is excluded from hosting
+  PASS  branches and counters are hard-protected; users is role-filtered
+  PASS  only owner/hr/rmsm are deletable; superadmin and operator always survive
+  PASS  the gate fails closed, is re-checked before the write, and needs a typed RESET
+  PASS  one click, no separate scan; the outcome is still reported from live counts
+  PASS  every planned collection is deletable; no chat subcollection was widened
+  PASS  chat rooms are deleted by computed id, with the read rule untouched
+  PASS  a blocked collection is reported, not fatal, and names the deploy command
+  PASS  the duplicated Firebase config matches firebase.js
+  PASS  the page warns about Cloudinary, orphaned messages, and irreversibility
+
+Γ£à Reset tool tests passed (excluded from hosting; branches and counters hard-protected; only owner/hr deletable and superadmin/operator always survive; the gate fails closed and is re-checked before the write; one click with no separate scan; every planned collection is deletable under the rules with no chat subcollection widened; the config matches firebase.js; and the page warns about Cloudinary, orphaned messages and irreversibility).
+Testing operator upload/submit indicators (Resolve + Revise + Violation)...
+  Γ£ô operator upload/submit indicator ΓÇö all checks passed
+Testing the violation ΓåÆ Area Manager handoff...
+  Γ£ô violation ΓåÆ Area Manager handoff
+
+Γ£à Area-Manager violation handoff tests passed (firestore.rules admits the 'owner' role for managerStatus==='transferred' while every WRITE rule still refuses it; the listener filters on managerStatus only, so it needs no composite index and can never run an unfiltered query; transfer stamps and revert deletes managerStatus without touching hrStatus, so the two handoffs are independent; main.html gains its own button beside the HR one and both are refreshed wherever either is; the Area Manager gets its own #tabOwnerViolations rather than sharing HR's, with no edit/delete/transfer control; the branch scope is case/whitespace-insensitive and fails CLOSED on an empty list, a missing store, and at openModal(); and readRole() rejects the async 'viewer' placeholder so the tab actually appears once the real role lands).
+Testing that deleted tickets stay deleted...
+
+=== the demo-ticket seeder is GONE ===
+
+=== the load path WRITES nothing ===
+
+=== an empty list still renders properly ===
+
+├ù Deletion-sticks tests passed (seedSampleTickets() no longer exists and is called from nowhere; the demo ticket literals are gone from the app; every firestoreService call in the ticket load path is an allowlisted READ so neither the happy path nor the error branch can write; isInitialTicketLoad is cleared on a single unconditional path; and the "No tickets found" empty state is still in place for the now-reachable empty collection). NOTE: the equivalent branch auto-seeder is still present and is deliberately NOT covered by this file.
+Testing that the viewing window starts on first open...
+
+=== an approved but UNOPENED ticket never expires ===
+
+=== opening it starts the clock ===
+
+=== the clock KEEPS RUNNING after the modal closes ===
+
+=== only the AREA MANAGER stamps it ===
+
+=== unapproved and LEGACY tickets are untouched ===
+
+=== a failed write must not break the report ===
+
+=== ΓÜá∩╕Å a missing helper must be LOUD, never a silent skip ===
+
+=== ΓÜá∩╕Å the ticket must carry its DOCUMENT ID, not just its fields ===
+
+├ù First-open tests passed (an approved ticket with no first-open stamp has a NULL expiry and never expires, however far in the past it was approved; opening it writes ONE server-timestamped accessOpenedAt that is mirrored onto the local copy so the first render does not flash the withheld state; the deadline is anchored to the FIRST open and a second open neither rewrites the stamp nor writes anything, so closing the modal does not extend anything; the stamp is gated on expiryAppliesToViewer so an HR or superadmin reading the ticket cannot burn the manager's window; unapproved and pre-feature legacy tickets are neither stamped nor expired, so existing tickets keep the approvedAt + window rule they were created under; a stored expiry still wins over a stale stamp; and a failed write reports write-failed with the underlying error instead of throwing, leaving the report readable). Every refusal returns a DISTINGUISHABLE reason ΓÇö no-id, not-approved, legacy-no-marker, already-stamped, write-failed ΓÇö because they used to all return a bare null. That is how a ticket read with snap.data() and handed to the helper WITHOUT its document id stopped EVERY viewing window from ever starting, silently: doc(undefined) throws inside the SDK, the catch reported null, and null looked identical to a normal second open. openOwnerReport() now grafts the id on from the argument it already had, the helper refuses an id-less object by name before attempting any write, and an id-less ticket is proven never to reach Firestore).
+Testing the live expiry countdown...
+
+=== the human countdown is legible at BOTH scales ===
+
+=== the ticker updates text IN PLACE ===
+
+=== urgency is proportional, so it works at 1 minute AND 2 days ===
+
+=== the OPEN modal shows a clock too ===
+
+=== the styles exist and the comments balance ===
+
+=== ΓÜá∩╕Å the helpers are TOP-LEVEL, not nested ===
+
+├ù Live-countdown tests passed (all four countdown helpers are declared at column zero rather than nested inside ownerTicketExpiry(), which is the one failure that parsed cleanly, read correctly as source, passed every other assertion here, and still emptied the Area Manager's ticket list at runtime because renderOwnerTickets() threw a ReferenceError its own catch turned into "Unable to load tickets."; the human formatter reads in seconds at the time-compressed 1-minute window and rolls up to days+hours at the real 2-day one, with zero reported as a state rather than "0s"; the ticker writes textContent in place and cannot reach renderOwnerTickets() on the normal path, so the table is never rebuilt once a second ΓÇö but at zero it DOES re-render the list AND re-derive the open modal, because that is where the report and footage are; urgency is a tenth of the window rather than an absolute number of seconds, so it fires correctly at either scale, and the node carries its total window length for exactly that reason; the open modal carries its own banner and starts the ticker, which is idempotent so the per-snapshot list re-render cannot stack intervals; the readout is tabular so the row does not jitter each tick; and the CSS comment-balance guard is kept).
+Testing footage-cycle re-approval re-arms the viewing window...
+OK: footage-cycle re-approval re-arms the viewing window
+Testing HR coordination remarks (the shared NOV-status log)...
+
+=== firestore.rules: the remarks log is HR/superadmin, append-only ===
+
+=== the report documents are never touched by a remark ===
+
+=== the violation row opens Remarks, not the modal, on the sticky-note ===
+
+=== the Remarks button is drawn for HR/superadmin on both surfaces ===
+
+=== functional: open renders the log, submit stamps who/when ===
+
+Γ£à HR remarks tests passed (append-only log gated to HR/superadmin; report documents untouched; button on tickets + violations; live open/render/submit).
+Testing chat UNSEND (retire my own message)...
+
+=== wiring: button, handler, export ===
+
+=== functional: unsendMessage writes the tombstone, and only for the author ===
+  PASS  the Unsend button, handler, export and script load are wired
+
+=== functional: the Unsend button is hidden on other people's messages ===
+  PASS  the button shows on my message and hides on everyone else's
+  PASS  ownership is case-insensitive
+
+=== regression: the picker never leaks a visible Unsend button ===
+  PASS  the [hidden] attribute actually hides the button (CSS override present)
+  PASS  opening on another person's message hides a stale visible button
+  PASS  the re-anchor guard still re-syncs (the early-return fix)
+  PASS  the button shows on my message and is hidden when the picker closes
+  PASS  author unsend writes { text:"", unsent:true, unsentAt } and nothing else
+  PASS  a non-author cannot unsend (client guard fires before any write)
+  PASS  an already-unsent message is a no-op
+[Chat] Unsend failed: permission denied
+  PASS  a permission-denied unsend degrades to a reload hint, not a crash
+
+Γ£à Chat UNSEND tests passed (author-only tombstone; button gated to my messages; phone-friendly confirm; rendered as "Unsent message").
+Testing the Add Status modal Branch field...
+
+OK: Add Status modal resets the Branch field on open + close; the New toggle moves nothing (no hiding, no scroll) and swaps required correctly.

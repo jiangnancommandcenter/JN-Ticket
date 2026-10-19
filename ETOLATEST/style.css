@@ -59,6 +59,11 @@
     --chat-role-area-manager: #8B5CF6;
     --chat-role-rmsm: #F59E0B;
     --chat-avatar-unknown: #64748B;
+    /* RANK marker (superadmin only) — deliberately NOT a role hue. Gold reads
+       as "highest rank" everywhere, clashes with none of the four role colours,
+       and keeps "one colour = one role" intact: the rank is a RING + STAR
+       layered on the existing blue fill, never a second identity colour. */
+    --chat-rank-gold: #F5B301;
 
     /* Sidebar: plain white */
     --sidebar-bg: #FFFFFF;
@@ -1627,6 +1632,11 @@ tr.row-online {
 .priority-dot .dot.high { background-color: #dc2626; }
 .priority-dot .dot.low { background-color: #22c55e; }
 
+.ticket-high-priority {
+    outline: 3px solid #dc2626; /* matches .priority-dot .dot.high */
+    outline-offset: -1px;
+}
+
 .ticket-link {
     color: var(--color-primary);
     font-weight: 600;
@@ -1738,6 +1748,70 @@ tr.row-online {
     border-radius: 50%;
     background: var(--color-danger);
     border: 1.5px solid var(--bg-card);
+}
+
+/* Upload files / NOV attachment button: amber once files are attached,
+   so HR can see at a glance which tickets/violations already carry a NOV.
+   Class is toggled by js/hr-uploads.js (presence tracker). */
+.action-btn.upload { background: var(--bg-tertiary); color: var(--text-secondary); }
+.action-btn.upload:hover { background: var(--bg-hover); color: var(--text-primary); }
+.action-btn.upload.has-uploads {
+    background: var(--color-warning-bg);
+    color: var(--color-warning);
+    box-shadow: inset 0 0 0 1px var(--color-warning-border, var(--color-warning));
+}
+.action-btn.upload.has-uploads:hover { background: var(--color-warning); color: #fff; }
+/* Small solid dot in the corner — the "there is a file here" cue. */
+.action-btn.upload.has-uploads::before {
+    content: '';
+    position: absolute;
+    top: 3px;
+    right: 3px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--color-warning);
+    border: 1.5px solid var(--bg-card);
+}
+
+/* HR NOV contract-glyph indicator (NOV label under the icon). Red when HR has
+   attached NOV files; grey when none. Shares the presence dot with the older
+   upload button; both are toggled by js/hr-uploads.js. */
+.action-btn.upload-indicator {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    min-width: 38px;
+    padding: 4px 6px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    border-radius: 6px;
+    cursor: pointer;
+}
+.action-btn.upload-indicator i {
+    font-size: 0.95rem;
+    line-height: 1;
+}
+.action-btn.upload-indicator:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+.action-btn.upload-indicator.has-uploads {
+    background: var(--color-danger-bg, rgba(220, 38, 38, 0.12));
+    color: var(--color-danger, #dc2626);
+    box-shadow: inset 0 0 0 1px var(--color-danger-border, var(--color-danger, #dc2626));
+}
+.action-btn.upload-indicator.has-uploads:hover {
+    background: var(--color-danger, #dc2626);
+    color: #fff;
+}
+.upload-indicator-label {
+    font-size: 0.55rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    line-height: 1;
 }
 
 /* 2-Day tracking access: superadmin re-opens an expired ticket's window */
@@ -3490,6 +3564,456 @@ branch name, let alone pick one. */
 }
 
 /* ============================================================== */
+/*  HR COORDINATION FILE UPLOADS  (NOV document upload modal)     */
+/*  Markup injected by js/hr-uploads.js. Reuses .modal-overlay.   */
+/* ============================================================== */
+.uploads-modal {
+    padding: 0;
+}
+
+.uploads-header {
+    gap: 12px;
+}
+
+.uploads-title-group {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+    flex: 1;
+}
+
+.uploads-icon {
+    flex: 0 0 40px;
+    width: 40px;
+    height: 40px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--color-warning-bg, rgba(245, 158, 11, 0.12));
+    color: var(--color-warning-hover, #d97706);
+    font-size: 1rem;
+}
+
+.uploads-title-text {
+    min-width: 0;
+    flex: 1;
+}
+
+.uploads-title-text h2 {
+    margin: 0;
+}
+
+.uploads-count {
+    display: inline-flex;
+    align-items: center;
+    margin-left: 8px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    font-size: 0.66rem;
+    font-weight: 800;
+    letter-spacing: 0.02em;
+    background: var(--color-warning-bg);
+    color: var(--color-warning);
+    border: 1px solid var(--border-color);
+    vertical-align: middle;
+}
+.uploads-count[hidden] { display: none; }
+
+.uploads-subject {
+    margin: 2px 0 0 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.uploads-body {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.uploads-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+    gap: 12px;
+    max-height: 48vh;
+    overflow-y: auto;
+    padding: 4px 6px 4px 2px;
+    background: transparent;
+    border: none;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-light) transparent;
+}
+.uploads-list::-webkit-scrollbar { width: 6px; }
+.uploads-list::-webkit-scrollbar-track { background: transparent; }
+.uploads-list::-webkit-scrollbar-thumb {
+    background: var(--border-light);
+    border-radius: 999px;
+}
+.uploads-list > .u-section-sub {
+    margin: 0;
+    padding: 18px 0;
+    text-align: center;
+}
+
+/* Explorer "Large Icons" tiles: a real thumbnail for images/videos,
+   a big typed glyph for everything else, name + meta below. */
+.uploads-tile {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 8px 12px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+    text-decoration: none;
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: var(--transition);
+}
+.uploads-tile:hover {
+    border-color: var(--color-primary);
+    box-shadow: var(--shadow-md);
+    text-decoration: none;
+    color: var(--text-primary);
+}
+.uploads-tile-preview {
+    width: 100%;
+    height: 110px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    background: var(--bg-primary);
+    border-radius: 8px;
+    position: relative;
+}
+.uploads-tile-preview .attachment-thumb {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+.uploads-tile-preview .attachment-file-icon {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-primary);
+    font-size: 2.6rem;
+}
+.uploads-tile-name {
+    font-size: 0.78rem;
+    font-weight: 600;
+    max-width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.uploads-attached-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--color-success, #166534);
+    background: var(--color-success-bg, rgba(22, 101, 52, 0.1));
+    border: 1px solid var(--color-success-border, rgba(22, 101, 52, 0.25));
+    border-radius: 999px;
+    padding: 2px 8px;
+    margin-top: 4px;
+    white-space: nowrap;
+}
+.uploads-attached-badge i {
+    font-size: 0.7rem;
+}
+.uploads-tile-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    font-size: 0.68rem;
+    color: var(--text-muted);
+    text-align: center;
+    max-width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.uploads-doc-frame {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    display: block;
+    background: #fff;
+}
+/* Stacked behind the live frame: if the embed never paints (blocked
+   account, bad MIME), Cloudinary's own pg_1 render still shows. The
+   frame sits on top; if it DOES paint, it covers this fully. */
+.uploads-doc-fallback {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    background: #fff;
+}
+.uploads-tile-open {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--color-primary);
+    text-decoration: none;
+}
+.uploads-tile-open:hover {
+    text-decoration: underline;
+}
+.uploads-tile .uploads-delete {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    z-index: 2;
+    width: 26px;
+    height: 26px;
+    border: none;
+    border-radius: 50%;
+    background: rgba(220, 38, 38, 0.92);
+    color: #fff;
+    font-size: 0.72rem;
+    cursor: pointer;
+}
+.uploads-tile .uploads-delete:hover {
+    background: var(--color-danger, #dc2626);
+    transform: scale(1.08);
+}
+.uploads-tile .uploads-delete:focus {
+    outline: 2px solid var(--color-danger);
+}
+
+.uploads-empty {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--text-primary);
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    padding: 14px 16px;
+    box-shadow: var(--shadow-sm);
+}
+.uploads-empty-icon {
+    flex: 0 0 32px;
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--color-warning-bg);
+    color: var(--color-warning);
+    font-size: 1.1rem;
+}
+.uploads-empty strong { display: block; font-size: 0.95rem; }
+.uploads-empty span { font-size: 0.82rem; color: var(--text-muted); }
+
+.uploads-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: var(--text-primary);
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    padding: 10px 14px;
+    box-shadow: var(--shadow-sm);
+    transition: var(--transition);
+}
+.uploads-item:hover {
+    border-color: var(--border-light);
+    box-shadow: var(--shadow-md);
+}
+.uploads-item-icon {
+    flex: 0 0 52px;
+    width: 52px;
+    height: 52px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--color-warning-bg);
+    color: var(--color-warning);
+    font-size: 1.6rem;
+}
+.uploads-item-info { flex: 1; min-width: 0; }
+.uploads-item-name {
+    font-weight: 600;
+    font-size: 0.9rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.uploads-item-meta {
+    display: flex;
+    gap: 10px;
+    font-size: 0.76rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.uploads-item-actions {
+    flex: 0 0 auto;
+}
+.uploads-item-actions a {
+    color: var(--text-muted);
+    text-decoration: none;
+}
+.uploads-item-actions a:hover { color: var(--color-primary); }
+
+.uploads-delete {
+    background: transparent;
+    border: none;
+    color: var(--color-danger, #dc2626);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    font-size: 0.85rem;
+}
+.uploads-delete:hover {
+    background: var(--color-danger-bg, rgba(220, 38, 38, 0.1));
+    color: var(--color-danger);
+}
+.uploads-delete:focus { outline: 2px solid var(--color-danger); }
+
+.uploads-compose {
+    margin-top: 4px;
+    padding: 14px 16px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+}
+.uploads-compose-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+}
+.uploads-compose label {
+    font-weight: 700;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+}
+.uploads-visibility {
+    font-size: 0.74rem;
+    color: var(--text-muted, #64748b);
+}
+.uploads-visibility i { font-size: 0.68rem; }
+.uploads-input-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+.uploads-input-row input[type="file"] { flex: 1; }
+.uploads-compose-bottom {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 0.78rem;
+    color: var(--text-muted, #64748b);
+}
+.uploads-hint { font-size: 0.78rem; color: var(--text-muted, #64748b); }
+
+.uploads-dropzone-wrap {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+}
+.uploads-dropzone {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 18px 14px;
+    border: 2px dashed var(--border-color);
+    border-radius: var(--radius-lg);
+    background: var(--bg-input);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: var(--transition);
+    flex: 1;
+    min-width: 0;
+}
+.uploads-dropzone i {
+    font-size: 1.4rem;
+    color: var(--color-primary);
+    cursor: pointer;
+}
+.uploads-dz-text {
+    font-weight: 600;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+}
+.uploads-dz-hint {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+}
+.uploads-dropzone.dragover {
+    border-color: var(--color-primary);
+    background: var(--color-primary-bg);
+    color: var(--color-primary);
+}
+.uploads-dropzone.dragover i,
+.uploads-dropzone.dragover .uploads-dz-text,
+.uploads-dropzone.dragover .uploads-dz-hint {
+    color: var(--color-primary);
+}
+.uploads-dropzone input[type="file"] {
+    display: none;
+}
+.uploads-selected-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--color-success, #166534);
+    background: var(--color-success-bg, rgba(22, 101, 52, 0.1));
+    border: 1px solid var(--color-success-border, rgba(22, 101, 52, 0.25));
+    border-radius: 999px;
+    padding: 4px 10px;
+    margin-top: 8px;
+    white-space: nowrap;
+}
+.uploads-selected-badge i {
+    font-size: 0.75rem;
+}
+
+@media (max-width: 640px) {
+    .uploads-list {
+        padding: 2px 4px;
+        max-height: 52vh;
+    }
+    .uploads-item {
+        padding: 10px 13px;
+        gap: 10px;
+    }
+    .uploads-compose {
+        padding: 12px 13px;
+    }
+    .uploads-send span { display: none; }
+}
+
+/* ============================================================== */
 /*  PRINT ACTION CARD                                             */
 /* ============================================================== */
 
@@ -3509,6 +4033,18 @@ branch name, let alone pick one. */
 .print-action-card:hover {
     border-color: rgba(114, 191, 106, 0.4);
     box-shadow: var(--shadow-sm);
+}
+
+/* High priority ticket row — red gradient like print-action-card but red */
+.ticket-high-priority {
+    background: linear-gradient(135deg, rgba(220, 38, 38, 0.12), rgba(220, 38, 38, 0.04));
+    border-radius: var(--radius-md);
+    border: none;
+    outline: none;
+}
+.ticket-high-priority td {
+    border: none;
+    outline: none;
 }
 
 .print-action-icon {
@@ -6395,6 +6931,38 @@ body.mobile-nav-open .mobile-nav-backdrop {
 
     /* Printable monthly report never goes off-screen */
     .print-header { flex-direction: column; text-align: center; }
+
+/* ============================================================== */
+/*  Area Manager violation countdown timer (modal header)         */
+/* ============================================================== */
+.ov-countdown-bar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 8px 16px;
+    background: #FEF3C7;
+    border-top: 1px solid #F59E0B;
+    font-size: 13px;
+    color: #92400E;
+    margin-right: 10px;     /* space between timer and the X (close) button */
+}
+
+#ov-countdown-timer {
+    font-weight: 800;
+    font-size: 16px;
+    font-variant-numeric: tabular-nums;
+}
+
+.ov-countdown-warn {
+    color: #B45309;
+    animation: ovCountdownPulse 1s infinite;
+}
+
+@keyframes ovCountdownPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
     .print-title-block { text-align: center; }
 }
 

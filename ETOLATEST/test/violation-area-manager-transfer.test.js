@@ -69,9 +69,18 @@ console.log('Testing the violation → Area Manager handoff...');
         assert(!/isAreaManager\(\)/.test(w),
             'no violations WRITE rule may mention isAreaManager() — the Area '
             + 'Manager tab is read-only: "' + w.trim() + '"');
-        assert(!/isOwner\(\)/.test(w),
-            'no violations WRITE rule may mention isOwner() either — the tab '
-            + 'is read-only: "' + w.trim() + '"');
+    }
+    // The Area Manager may stamp open/expiry time on a transferred violation:
+    // a narrow, field-restricted update gated on isTransferredToAreaManager().
+    // isOwner() in a WRITE rule is only allowed for that specific rule.
+    if (/isOwner\(\)/.test(block)) {
+        const ownerIdx = block.indexOf('allow update: if isOwner()');
+        assert(ownerIdx > -1, 'isOwner() write rule must start with "allow update: if isOwner()"');
+        const ownerRule = block.slice(ownerIdx, ownerIdx + 500);
+        assert(/isTransferredToAreaManager\(\)/.test(ownerRule),
+            'owner write must be gated on isTransferredToAreaManager()');
+        assert(/managerExpiresAt/.test(ownerRule) || /managerOpenedAt/.test(ownerRule),
+            'owner write must be limited to manager open/expiry fields');
     }
 }
 
@@ -343,3 +352,203 @@ console.log('\n✅ Area-Manager violation handoff tests passed (firestore.rules 
     + 'scope is case/whitespace-insensitive and fails CLOSED on an empty list, a '
     + 'missing store, and at openModal(); and readRole() rejects the async '
     + "'viewer' placeholder so the tab actually appears once the real role lands).");
+
+// ---------------------------------------------------------------------------
+// 8. THE PERIOD FILTER — #ownerViolationPeriodFilter (Today / This week /
+//    This month / All reports) on the Area Manager's Transferred Violations
+//    tab. Mirrors the HR tab's #violationPeriodFilter on the same page.
+// ---------------------------------------------------------------------------
+const src = ownerViolationsJs;
+{
+    // ---- stub the DOM elements the module reads at load ----
+    function makeEl(value) {
+        return {
+            value,
+            listeners: {},
+            addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },
+            dispatch(type) { (this.listeners[type] || []).forEach(fn => fn()); },
+            classList: {
+                _s: new Set(),
+                add(c) { this._s.add(c); },
+                remove(c) { this._s.delete(c); },
+                toggle(c, force) { if (force === undefined) { this._s.has(c) ? this._s.delete(c) : this._s.add(c); } else if (force) { this._s.add(c); } else { this._s.delete(c); } },
+                contains(c) { return this._s.has(c); }
+            },
+            style: {},
+            dataset: {},
+            innerHTML: '',
+            textContent: ''
+        };
+    }
+    const nodes = {};
+    ['ownerViolationsNavItem', 'ownerViolationSearch', 'ownerViolationStoreFilter',
+     'ownerViolationPeriodFilter', 'ownerViolationsBody', 'ownerViolationPagination',
+     'ownerViolationModal', 'ownerViolationModalTitle', 'ownerViolationModalBody',
+     'ownerViolationAttachmentsGrid', 'btnOwnerViolationReport',
+     'closeOwnerViolationModal', 'tabOwnerViolations', 'ownerUserRoleBadge'].forEach(id => {
+        nodes[id] = makeEl('');
+    });
+    nodes.ownerViolationPeriodFilter.value = 'all';
+
+    const ctx = {
+        window: {},
+        console,
+        setTimeout,
+        clearTimeout,
+        Date,
+        Array,
+        Set,
+        parseInt,
+        String,
+        Math,
+        URL: { createObjectURL: () => 'blob:x', revokeObjectURL() {} },
+        document: {
+            readyState: 'complete',
+            getElementById: (id) => nodes[id] || null,
+            addEventListener() {}
+        },
+        capturedCb: null,
+        firestoreService: {
+            // THE ONLY SHAPE THE MODULE CALLS — the result populates
+            // allViolations on the listener, then applyFilters().
+            listenTransferredViolationsForAreaManager(cb) {
+                ctx.capturedCb = cb;
+                return () => {};
+            }
+        },
+        showToast() {},
+        escapeHTML: (v) => String(v == null ? '' : v),
+        // Branch scope the manager resolves — the module re-reads this on
+        // every filter, so injecting it mid-test is legal.
+        getOwnerAssignedBranches: () => ['Banawe']
+    };
+    ctx.window = ctx;
+    ctx.document.window = ctx.document;
+    ctx.firestoreService.window = ctx.firestoreService;
+    vm.createContext(ctx);
+    vm.runInContext(src, ctx);
+
+    const H = ctx.window.OwnerViolations;
+    assert(H, 'OwnerViolations must be exported');
+
+    // ---- the tab shows only for the Area Manager, never for HR ----
+    H.applyRole('owner');
+    assert.strictEqual(nodes.ownerViolationsNavItem.style.display, 'flex',
+        'the Area Manager (owner) sees the Transferred Violations tab');
+    H.applyRole('hr');
+    assert.strictEqual(nodes.ownerViolationsNavItem.style.display, 'none',
+        'HR is never shown the tab');
+
+    // ---- seed the listener, then watch the period filter work ----
+    const now = new Date('2026-10-15T12:00:00.000Z');
+    const aDayAgo = new Date(now); aDayAgo.setDate(aDayAgo.getDate() - 1);
+    const aWeekAgo = new Date(now); aWeekAgo.setDate(aWeekAgo.getDate() - 10);
+    const aMonthAgo = new Date(now); aMonthAgo.setDate(aMonthAgo.getDate() - 20);
+
+    const seed = () => ctx.capturedCb([
+        { id: 'v1', violationNumber: 'VIO-2001', store: 'Banawe', managerStatus: 'transferred',
+          reportDateTime: now.toISOString(), subject: 'Cash missing' },
+        { id: 'v2', violationNumber: 'VIO-2002', store: 'Banawe', managerStatus: 'transferred',
+          reportDateTime: aWeekAgo.toISOString(), subject: 'Smash and grab' },
+        { id: 'v3', violationNumber: 'VIO-2003', store: 'Banawe', managerStatus: 'transferred',
+          reportDateTime: aMonthAgo.toISOString(), subject: 'Broken window' },
+        { id: 'v4', violationNumber: 'VIO-2004', store: 'Banawe', managerStatus: 'transferred',
+          subject: 'Undated report' }     // no reportDateTime → never hidden
+    ]);
+
+    const body = () => nodes.ownerViolationsBody.innerHTML;
+    const rowCount = () => (body().match(/data-id=/g) || []).length;
+
+    // Today (default) → today's row + dateless row; the week-old and month-old
+    // rows are cut, but the dateless one still shows.
+    seed();
+    nodes.ownerViolationPeriodFilter.value = 'daily';
+    H.applyFilters();
+    assert.strictEqual(rowCount(), 2, 'Today bucket: today + dateless, got ' + rowCount());
+    assert.ok(/VIO-2001/.test(body()), 'today row shown (default bucket)');
+    assert.ok(!/VIO-2002/.test(body()), 'week-old row cut by "Today"');
+    assert.ok(!/VIO-2003/.test(body()), 'month-old row cut by "Today"');
+    assert.ok(/VIO-2004/.test(body()), 'dateless reports are NEVER hidden, even outside today');
+
+    // Weekly → today + dateless only; v2 is 20 days old, in the month but not
+    // in the week, so this bucket is identical to "Today" with this seed.
+    nodes.ownerViolationPeriodFilter.value = 'weekly';
+    H.applyFilters();
+    assert.strictEqual(rowCount(), 2, 'This week: today + dateless, got ' + rowCount());
+
+    // Monthly → today + week-old + dateless (v2 is inside the current month);
+    // v3 is 40 days old and falls out.
+    nodes.ownerViolationPeriodFilter.value = 'monthly';
+    H.applyFilters();
+    assert.strictEqual(rowCount(), 3, 'This month: today + week-old + dateless, got ' + rowCount());
+    assert.ok(/VIO-2002/.test(body()), 'month-old row shown in "This month"');
+
+    // All → nothing is cut by the period filter.
+    nodes.ownerViolationPeriodFilter.value = 'all';
+    H.applyFilters();
+    assert.strictEqual(rowCount(), 4, 'All reports shows every row');
+
+    // ---- the filter never deletes, it only hides ----
+    // Re-seed, then narrow and widen again: rows come back out of the window.
+    seed();
+    nodes.ownerViolationPeriodFilter.value = 'monthly';
+    H.applyFilters();
+    assert.strictEqual(rowCount(), 3, 'monthly hides 1 row (v3), keeps today + week-old + dateless');
+    nodes.ownerViolationPeriodFilter.value = 'all';
+    H.applyFilters();
+    assert.strictEqual(rowCount(), 4, 'switching to All restores all 4');
+
+    // ---- the empty state distinguishes "no reports transferred" from
+    //      "reports outside the selected period" and points at All ----
+    // A seed with NO in-window and NO dateless row empties the daily bucket;
+    // the "2 older reports" count proves the period predicate cut them.
+    ctx.capturedCb([
+        { id: 'v2', violationNumber: 'VIO-2002', store: 'Banawe', managerStatus: 'transferred',
+          reportDateTime: aWeekAgo.toISOString(), subject: 'Smash and grab' },
+        { id: 'v3', violationNumber: 'VIO-2003', store: 'Banawe', managerStatus: 'transferred',
+          reportDateTime: aMonthAgo.toISOString(), subject: 'Broken window' }
+    ]);
+    nodes.ownerViolationPeriodFilter.value = 'daily';
+    H.applyFilters();
+    assert.strictEqual(rowCount(), 0, 'nothing from 10/20 days ago survives the Today bucket');
+    assert.ok(/No reports in this period/i.test(body()),
+        'empty state says "no reports in this period", not a generic "nothing matches"');
+    assert.ok(/2 older reports? outside the selected date range/i.test(body()),
+        'empty state counts the reports that fell outside the window');
+    assert.ok(/All reports/i.test(body()),
+        'empty state points the manager back to "All reports" so the row count can be restored');
+
+    // "No reports have been transferred to you yet" is still reachable: re-seed an
+    // empty array and the period filter must not manufacture a report.
+    ctx.capturedCb([]);
+    nodes.ownerViolationPeriodFilter.value = 'daily';
+    H.applyFilters();
+    assert.ok(/No violation reports have been transferred to you yet/i.test(body()),
+        '"no violation reports transferred yet" stays true when the list never populated');
+
+    // ---- the period change is wired through the listener, not just the test ----
+    seed();
+    nodes.ownerViolationPeriodFilter.value = 'weekly';
+    nodes.ownerViolationPeriodFilter.dispatch('change');
+    assert.strictEqual(rowCount(), 2,
+        'a change on the period select re-runs the filter by itself');
+
+    // ---- search + period work together ----
+    nodes.ownerViolationSearch.value = 'CASH';
+    H.applyFilters();
+    assert.strictEqual(rowCount(), 1, 'search narrows inside the period bucket');
+    nodes.ownerViolationSearch.value = '';
+    H.applyFilters();
+
+    // ---- store + period together (the store is already scoped to the manager) ----
+    seed();
+    nodes.ownerViolationStoreFilter.value = 'Banawe';
+    nodes.ownerViolationPeriodFilter.value = 'all';
+    H.applyFilters();
+    assert.strictEqual(rowCount(), 4, 'store + All: every scoped row shows');
+    nodes.ownerViolationPeriodFilter.value = 'daily';
+    H.applyFilters();
+    assert.strictEqual(rowCount(), 2, 'store + Today: the two filters intersect cleanly');
+    nodes.ownerViolationStoreFilter.value = 'all';
+}
+

@@ -3238,8 +3238,15 @@
             // innerHTML is safe: role comes from the allowlist in
             // normalizeRole() + roleLabel(), never from user text.
             if (label && (role === 'owner' || role === 'hr' || role === 'superadmin' || role === 'rmsm')) {
+                // ⚠️ RANK MARKER for the superadmin: a ★ prefix + the
+                // .chat-role-pill--rank gold border (chat.css), so the thread
+                // header says RANK at a glance, not just role. The blue role
+                // pill stays underneath — gold ACCENTS it, never replaces it
+                // ("one colour = one role"). The ★ is a literal glyph from an
+                // allowlisted label, never user text, so innerHTML stays safe.
                 els.chatSubtitle.innerHTML = '<span class="chat-role-pill chat-role-pill--' +
-                    role + '">' + label + '</span>';
+                    role + (role === 'superadmin' ? ' chat-role-pill--rank' : '') + '">' +
+                    (role === 'superadmin' ? '★ ' : '') + label + '</span>';
             } else {
                 els.chatSubtitle.textContent = label;
             }

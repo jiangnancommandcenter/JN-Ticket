@@ -42,6 +42,7 @@
     const navItem = $ov('ownerViolationsNavItem');
     const search = $ov('ownerViolationSearch');
     const storeFilter = $ov('ownerViolationStoreFilter');
+    const periodFilter = $ov('ownerViolationPeriodFilter');
     const tableBody = $ov('ownerViolationsBody');
     const pagination = $ov('ownerViolationPagination');
     const modal = $ov('ownerViolationModal');
@@ -60,6 +61,53 @@
     let listenerStarted = false;
     let allowed = false;        // arm the managerStatus listener + openModal (owner OR rmsm)
     let tabVisible = false;     // show the violations TAB (owner ONLY)
+    let hiddenByPeriod = 0;     // reports cut from the list by the period filter
+
+    // ===== Countdown (1-minute auto-revert for Area Manager only) =====
+    let countdownTimer = null;            // setInterval handle (one shared timer)
+    let countdownDeadline = 0;            // epoch ms when the countdown expires
+    let countdownDeadlineFor = null;      // violationId this deadline belongs to
+    let countdownPendingRevert = false;   // true while a revert is in flight
+    let expirySweepTimer = null;          // periodic sweep that hides expired reports
+
+    const COUNTDOWN_LS_KEY = 'ov_countdown_deadline';   // localStorage key
+    const COUNTDOWN_LS_ID   = 'ov_countdown_for';       // violationId key
+
+    /** Persist the running deadline so a page refresh does not reset it. */
+    function persistCountdown() {
+        try {
+            localStorage.setItem(COUNTDOWN_LS_KEY, String(countdownDeadline));
+            localStorage.setItem(COUNTDOWN_LS_ID,   String(countdownDeadlineFor));
+        } catch (e) {
+            // localStorage may be blocked in private mode — ignore silently.
+        }
+    }
+
+    /** Restore a persisted deadline from localStorage. Returns true if usable. */
+    function restoreCountdown() {
+        try {
+            const savedDeadline = Number(localStorage.getItem(COUNTDOWN_LS_KEY) || '0');
+            const savedId       = localStorage.getItem(COUNTDOWN_LS_ID) || null;
+            if (savedId && savedDeadline > Date.now()) {
+                countdownDeadlineFor = savedId;
+                countdownDeadline    = savedDeadline;
+                return true;
+            }
+        } catch (e) {
+            // ignore
+        }
+        return false;
+    }
+
+    /** Clear persisted countdown data from localStorage. */
+    function clearPersistedCountdown() {
+        try {
+            localStorage.removeItem(COUNTDOWN_LS_KEY);
+            localStorage.removeItem(COUNTDOWN_LS_ID);
+        } catch (e) {
+            // ignore
+        }
+    }
 
     // ===== Helpers =====
 
@@ -69,6 +117,28 @@
             .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
     }
+
+    // ===== DATE PERIOD (VIEW FILTER) — see ownerdashboard.html's
+    // #ownerViolationPeriodFilter. Four buckets, one default (Today), exactly
+    // like the HR sibling tab (#violationPeriodFilter) on this same page and
+    // the superadmin's violations tab. Measured from the REPORT (filed) date —
+    // a transferred review of an older incident is shown the day it lands —
+    // and a report with no usable timestamp is ALWAYS kept, so the filter can
+    // never delete a record. Purely a view filter: it never deletes anything.
+    // An unrecognised value (or 'all') means "no window at all", so even if the
+    // script is updated before the markup, nothing disappears.
+    function ownerViolationPeriodStart() {
+        const value = periodFilter ? periodFilter.value : 'all';
+        if (value === 'all') return null;
+        const start = new Date();
+        start.setHours(0, 0, 0, 0);
+        if (value === 'weekly') start.setDate(start.getDate() - 6);
+        else if (value === 'monthly') start.setDate(1);
+        // 'daily' → today 00:00
+        return start;
+    }
+
+    // ===== BRANCH SCOPE =====
 
     function toast(message, type) {
         if (typeof window.showToast === 'function') window.showToast(message, type || 'info');
@@ -117,6 +187,17 @@
         const lib = window.ViolationReport;
         if (lib && lib.reportDate) return lib.reportDate(v);
         const raw = v && (v.reportDateTime || v.createdAt);
+        if (!raw) return null;
+        if (raw.toDate) return raw.toDate();
+        const d = new Date(raw);
+        return isNaN(d.getTime()) ? null : d;
+    }
+
+    /** Date a transferred violation was handed to this Area Manager. */
+    function managerTransferredDate(v) {
+        const lib = window.ViolationReport;
+        if (lib && lib.managerTransferredDate) return lib.managerTransferredDate(v);
+        const raw = v && v.managerTransferredAt;
         if (!raw) return null;
         if (raw.toDate) return raw.toDate();
         const d = new Date(raw);
@@ -172,6 +253,17 @@
         if (current && (current === 'all' || stores.includes(current))) storeFilter.value = current;
     }
 
+    /** True when the Area Manager's viewing window has expired.
+     *  The window starts when managerExpiresAtMs is stamped (openModal) and
+     *  lasts 1 minute. After that the report disappears from this list —
+     *  exactly like an expired ticket vanishes from the tickets tab. */
+    function isManagerViewingExpired(v) {
+        if (v.managerStatus !== 'transferred') return false;
+        const expiresAt = v.managerExpiresAtMs || 0;
+        if (expiresAt === 0) return false;  // never opened, never expires
+        return Date.now() >= expiresAt;
+    }
+
     // ===== List =====
     function applyFilters() {
         const term = (search && search.value || '').trim().toLowerCase();
@@ -184,6 +276,7 @@
         filtered = keys.length
             ? allViolations.filter(v => {
                 if (v.managerStatus !== 'transferred') return false;
+                if (isManagerViewingExpired(v)) return false;
                 if (!scopeIn(v, keys)) return false;
                 if (store !== 'all' && (v.store || '') !== store) return false;
                 if (!term) return true;
@@ -195,6 +288,23 @@
             })
             : [];
 
+        const periodStart = ownerViolationPeriodStart();
+        // Reset first: a stale count from the previous run would otherwise tell
+        // the empty state reports were "cut by the period" that never existed.
+        hiddenByPeriod = 0;
+        if (periodStart) {
+            const before = filtered.length;
+            filtered = filtered.filter(v => {
+                // A transferred violation should fall inside the period by its
+                // TRANSFER date (managerTransferredAt), not its original filing
+                // date (reportDateTime). So a report filed last week but
+                // transferred today shows up under "Today".
+                const d = managerTransferredDate(v) || reportDate(v);
+                if (!d) return true;              // dateless rows always kept
+                return d.getTime() >= periodStart.getTime();
+            });
+            hiddenByPeriod = before - filtered.length;
+        }
         page = 1;
         render(keys.length === 0);
         populateStoreFilter();
@@ -215,7 +325,9 @@
             const message = noBranches
                 ? 'Your branch access has not loaded, so no reports can be shown.'
                 : (hasAny
-                    ? 'No transferred reports match your search.'
+                    ? (hiddenByPeriod > 0
+                        ? `No reports in this period — ${hiddenByPeriod} older report${hiddenByPeriod === 1 ? '' : 's'} outside the selected date range. Choose "All reports" to view them.`
+                        : 'No transferred reports match your search.')
                     : 'No violation reports have been transferred to you yet.');
             tableBody.innerHTML = '<tr><td colspan="9" class="empty-state">'
                 + '<i class="fas fa-video"></i><p>' + esc(message) + '</p></td></tr>';
@@ -341,10 +453,63 @@
             toast('That report is not for one of your branches.', 'error');
             return false;
         }
+
         currentId = id;
         if (modalTitle) modalTitle.textContent = v.violationNumber || 'Violation Report';
         if (modalBody) modalBody.innerHTML = detailsHtml(v);
         renderAttachments(v.attachments);
+
+        // ⚠️ AREA MANAGER ONLY: 1-minute countdown starts when the modal opens.
+        // HR and superadmin never reach this path (their violation lists are
+        // separate and read-only on their own tabs).
+        const role = readRole();
+        if (role === 'owner' || role === 'area manager' || role === 'am') {
+            const now = Date.now();
+
+            // If the violation already has a valid expiry time from a previous
+            // open (stamped in Firestore as managerExpiresAtMs), CONTINUE that
+            // deadline instead of resetting it. Closing and reopening the modal
+            // must not restart the countdown.
+            const existingExpiry = v.managerExpiresAtMs || 0;
+            if (existingExpiry > now) {
+                countdownDeadlineFor = v.id;
+                countdownDeadline = existingExpiry;
+                persistCountdown();
+                injectCountdownBar();
+                ensureCountdownTimer();
+                updateCountdownUI();
+            } else {
+                // No valid expiry — start a fresh 1-minute deadline.
+                countdownDeadlineFor = v.id;
+                countdownDeadline = now + 60 * 1000;
+                persistCountdown();
+                injectCountdownBar();
+                ensureCountdownTimer();
+                updateCountdownUI();
+
+                // Stamp the open/expiry time in Firestore so the Superadmin's
+                // client can auto-revert (delete managerStatus) after the
+                // countdown. Area Manager cannot write managerStatus directly,
+                // but firestore.rules now permits stamping the managerOpened*
+                // / managerExpires* fields on transferred reports.
+                try {
+                    const service = window.firestoreService;
+                    const me = (typeof auth !== 'undefined' && auth && auth.currentUser) || {};
+                    if (service && typeof service.markViolationOpenedForAreaManager === 'function') {
+                        service.markViolationOpenedForAreaManager(
+                            id,
+                            me.email || null,
+                            me.displayName || null
+                        ).catch((e) => {
+                            console.warn('Could not stamp violation open time:', e);
+                        });
+                    }
+                } catch (e) {
+                    console.warn('Could not stamp violation open time:', e);
+                }
+            }
+        }
+
         if (modal) {
             modal.classList.add('active');
             return true;
@@ -352,7 +517,99 @@
         return false;
     }
 
+    /** Show a minimal countdown timer inside the modal header (Area Manager only). */
+    function injectCountdownBar() {
+        if (!modal) return;
+        // Avoid duplicate bars if openModal is re-entered.
+        if (document.getElementById('ov-countdown-bar')) return;
+        const header = modal.querySelector('.modal-header');
+        if (!header) return;
+        const bar = document.createElement('div');
+        bar.id = 'ov-countdown-bar';
+        bar.className = 'ov-countdown-bar';
+        bar.innerHTML = `
+            <span id="ov-countdown-timer">1:00</span>
+        `;
+        // Insert before the close (X) button so X stays at far right.
+        const closeBtn = document.getElementById('closeOwnerViolationModal');
+        if (closeBtn && closeBtn.parentElement === header) {
+            closeBtn.parentElement.insertBefore(bar, closeBtn);
+        } else {
+            header.appendChild(bar);
+        }
+    }
+
+    /** Update the countdown text every second. */
+    function updateCountdownUI() {
+        const el = document.getElementById('ov-countdown-timer');
+        if (!el) return;
+        const remaining = Math.max(0, Math.ceil((countdownDeadline - Date.now()) / 1000));
+        const m = Math.floor(remaining / 60);
+        const s = remaining % 60;
+        el.textContent = `${m}:${String(s).padStart(2, '0')}`;
+        if (remaining <= 10) el.classList.add('ov-countdown-warn');
+        if (remaining <= 0) {
+            el.textContent = '0:00';
+            stopCountdown();
+            autoRevertAfterCountdown();
+        }
+    }
+
+    /** Start the 1-minute countdown for the given report. */
+    function startCountdownFor(violationId) {
+        countdownDeadline = Date.now() + 60 * 1000; // 1 minute from now
+
+        // No Firestore stamp — Area Manager cannot write to violations.
+        // The expiry deadline lives in localStorage only. The actual revert
+        // is done by the Superadmin's client via the violations listener.
+
+        updateCountdownUI();
+        countdownTimer = setInterval(updateCountdownUI, 1000);
+    }
+
+    /** Stamp was REMOVED — Area Manager cannot write to violations (read-only
+     *  per firestore.rules). The expiry deadline lives in localStorage only.
+     *  The actual Firestore revert is done by the Superadmin's client. */
+    function ensureCountdownTimer() {
+        if (countdownTimer) return;
+        countdownTimer = setInterval(updateCountdownUI, 1000);
+    }
+
+    /** Stop the running countdown and remove the bar. */
+    function stopCountdown() {
+        if (countdownTimer) {
+            clearInterval(countdownTimer);
+            countdownTimer = null;
+        }
+        countdownDeadline = 0;
+        countdownDeadlineFor = null;
+        const bar = document.getElementById('ov-countdown-bar');
+        if (bar) bar.remove();
+    }
+
+    /** Countdown reached zero — hide locally and notify. The actual Firestore
+     *  revert (deleting managerStatus) is done by the Superadmin's client via
+     *  the violations listener in script.js, because Area Manager cannot write
+     *  to the violations collection (read-only per firestore.rules). */
+    async function autoRevertAfterCountdown() {
+        if (countdownPendingRevert || !currentId) return;
+        countdownPendingRevert = true;
+
+        try {
+            toast('Countdown ended — violation returned to Superadmin.', 'info');
+        } catch (e) {
+            console.error('Toast failed:', e);
+        } finally {
+            countdownPendingRevert = false;
+            clearPersistedCountdown();
+            closeModal();
+        }
+    }
+
     function closeModal() {
+        // Keep the countdown running in the background — only hide the visual bar.
+        const bar = document.getElementById('ov-countdown-bar');
+        if (bar) bar.remove();
         if (modal) modal.classList.remove('active');
         currentId = null;
     }
@@ -471,14 +728,28 @@
             // A role with no store-side violation access at all (HR, superadmin,
             // operator, unknown) — nothing to show and nothing to open.
             closeModal();
+            stopExpirySweep();
         }
-        if (allowed) startListener();
+        if (allowed) { startListener(); startExpirySweep(); }
     }
 
     /** Re-run the scope. Called when the branches arrive after the first paint. */
     function refresh() {
         if (!allowed) return;
         applyFilters();
+    }
+
+    /** Periodic sweep that hides expired reports from the list — exactly like
+     *  the ticket expiry ticker. Runs every 5 seconds so a report that hits
+     *  its 1-minute deadline disappears without a page refresh. */
+    function startExpirySweep() {
+        if (expirySweepTimer) return;
+        if (typeof setInterval !== 'function') return;
+        expirySweepTimer = setInterval(() => { if (allowed) applyFilters(); }, 5000);
+    }
+    function stopExpirySweep() {
+        if (expirySweepTimer && typeof clearInterval === 'function') clearInterval(expirySweepTimer);
+        expirySweepTimer = null;
     }
 
     // ===== Events =====
@@ -491,6 +762,7 @@
             });
         }
         if (storeFilter) storeFilter.addEventListener('change', () => { if (allowed) applyFilters(); });
+        if (periodFilter) periodFilter.addEventListener('change', () => { if (allowed) applyFilters(); });
         if (btnCloseModal) btnCloseModal.addEventListener('click', closeModal);
         if (modal) modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
         // The modal's button always prints whatever report is currently open.
@@ -580,6 +852,10 @@
 
     function init() {
         bindEvents();
+
+        // Restore any persisted countdown deadline from localStorage so a page
+        // refresh does not reset the timer.
+        restoreCountdown();
 
         // owner-dashboard.js resolves the role asynchronously from Firestore, so
         // on first paint it may not be known yet. Poll briefly, then stop: an
