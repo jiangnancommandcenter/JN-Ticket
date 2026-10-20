@@ -588,9 +588,9 @@
      * approves (or re-saves) a member's branch assignment.
      *
      * Three sources, all from the `users` collection:
-     *   1. `approvedEmail` — the person the approval was just for. Added
-     *      unconditionally so they are in the room even if the snapshot has
-     *      not caught up with the status write yet.
+     *   1. `approvedEmail` — the person the approval was just for, force-added
+     *      ONLY while the store has a real team (the gate below): a roster-lag
+     *      net that can never seed or keep a teamless room alive.
      *   2. every approved SUPERADMIN and every approved HR — the superadmin
      *      owns and manages every branch room (canManageBranchRoom) and may
      *      hold no branches of their own, and HR's access is company-wide by
@@ -638,12 +638,22 @@
           var e = String(email || '').trim().toLowerCase();
           if (e) seen[e] = true;
       };
-      if (approvedEmail) add(approvedEmail);
-
       // ⚠️ Does this branch have ANY approved Area Manager (owner) or RM/SM
       // assigned to it? If not, the store has no team yet — the room must NOT
       // be created, so Super Admin / HR do not get a phantom room.
       var hasStoreUser = branchHasStoreTeam(branch, users);
+
+      // ⚠️ The just-approved/saved account is force-added ONLY while the store
+      // has a real team. It used to be added unconditionally, so RE-SAVING an
+      // Area Manager whose role had just changed to HR (updateUserPermissions
+      // passes the account itself) re-added them to `members` whatever the
+      // roster said — and with the save-path phantom delete also exempted, the
+      // teamless store's room survived as a 1-member ghost, so its branch rooms
+      // never left that person's chat list. A person's own role or branch
+      // access must never seed or keep a teamless room: the roster decides —
+      // this stays only as a roster-lag net for somebody who genuinely belongs
+      // to a store that HAS a team.
+      if (approvedEmail && hasStoreUser) add(approvedEmail);
 
       (users || []).forEach(function (u) {
           if (!u) return;
@@ -2856,7 +2866,20 @@
                         const peer = roomId === LEGACY_ROOM_ID
                             ? ''
                             : String(peerFromRoomId(roomId) || '').toLowerCase();
-                        if (peopleSettled && peer && startableEmails().indexOf(peer) === -1) {
+                        // ⚠️ A STORE ROOM HAS NO PEER (peerFromRoomId() is null
+                        // for `branch-` ids), so the rule below can never fire
+                        // for it — yet a refused STORE-room read means the room
+                        // was DELETED (phantom cleanup: the store lost its Area
+                        // Manager / RM-SM) or this account is no longer in its
+                        // `members` (re-roled away). The LIST QUERY is the
+                        // authority: if membership ever returns,
+                        // `chats where members array-contains me` puts the row
+                        // back. Without this branch the denial lands in the retry
+                        // set below and this device re-reads a dead room every
+                        // DENIED_ROOM_RETRY_MS for the rest of the session.
+                        if (peopleSettled && isBranchRoom(roomId)) {
+                            forgetRoom(roomId);
+                        } else if (peopleSettled && peer && startableEmails().indexOf(peer) === -1) {
                             // Gone for good. It must leave BOTH the remembered
                             // list and the retry set — re-adding it to the retry
                             // set would keep re-reading it every minute for the

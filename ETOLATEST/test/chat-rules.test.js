@@ -1627,6 +1627,13 @@ assert(
         '(Super Admin and HR are NOT auto-seeded into empty branches — the chat ' +
         'appears only once a store user is assigned)'
     );
+    assert.deepStrictEqual(
+        branchGroupMembers('Nowhere', users, 'ex-am@x.com'),
+        [],
+        "a saved/approved account's OWN access must never seed or keep a TEAMLESS room — " +
+        're-saving an Area Manager as HR for a store whose team has gone must drop them ' +
+        'from `members` (the "Banawe/Sucat never leave the chat list" bug)'
+    );
 
     // branchHasStoreTeam is the single source of truth the phantom-cleanup
     // delete keys off - HR/superadmin alone must NOT count as a store team.
@@ -1651,9 +1658,15 @@ assert(
         'ensureBranchGroupChats() must consult branchHasStoreTeam() to decide whether the room should exist'
     );
     assert(
-        /!approvedEmail[\s\S]{0,240}?roomRef\.delete\(\)/.test(ensureFn),
-        'a branch with no store team (roster-only path, approvedEmail null) must DELETE the room, ' +
-        'not leave an empty shell the remembered-rooms fallback would resurrect'
+        /roomExists\s*&&\s*chat\.branchHasStoreTeam[\s\S]{0,300}?roomRef\.delete\(\)/.test(ensureFn),
+        'a branch with no store team must DELETE the room on EVERY path — approve/save ' +
+        '(approvedEmail set) included — or re-saving an Area Manager as HR leaves a ' +
+        '1-member ghost that never leaves that person\'s chat list'
+    );
+    assert(
+        !/!approvedEmail\s*&&\s*roomExists/.test(ensureFn),
+        'the phantom delete must NOT be gated to roster-only paths (approvedEmail null) — ' +
+        'every call path reads the roster fresh, after the account write'
     );
     assert(
         ensureFn.indexOf('chat.forgetBranchRoom') > -1,

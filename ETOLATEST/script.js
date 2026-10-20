@@ -1987,8 +1987,9 @@ async function approveUser(email) {
  * the slug.
  *
  * `approvedEmail` is optional: the approve/save paths pass the account they
- * just wrote (added to the room even if the roster snapshot has not caught
- * up yet); the backfill passes null because nobody is being approved — the
+ * just wrote — force-added ONLY while the store has a real team (see the gate
+ * in branchGroupMembers(); it can never seed or keep a teamless room);
+ * the backfill passes null because nobody is being approved — the
  * roster alone decides membership. `allUsers` is an optional pre-loaded
  * roster: given it, NO users read happens, so the backfill's N branches
  * cost one `users` read in total.
@@ -2052,16 +2053,21 @@ async function ensureBranchGroupChats(approvedEmail, branches, allUsers) {
             // PHANTOM CLEANUP - a Store chat must only exist when the branch has
             // a real team (an approved Area Manager / RM/SM). HR and the
             // Superadmin are company-wide by spec and must NOT, on their own,
-            // keep a store room alive. In the roster-only paths (the dashboard
-            // backfill sweep and the branch-REMOVAL reseed - both pass
-            // approvedEmail = null), if the branch has no store team we DELETE
+            // keep a store room alive. If the branch has no store team we DELETE
             // the room instead of leaving an empty shell the superadmin's
-            // remembered-rooms fallback would keep resurrecting. The APPROVAL
-            // path (approvedEmail set) never deletes: the account being assigned
-            // may be the very team member the roster snapshot has not caught up
-            // with yet. The superadmin `allow delete` rule (already present for
-            // the reset tool) authorises this.
-            if (!approvedEmail && roomExists && chat.branchHasStoreTeam
+            // remembered-rooms fallback would keep resurrecting.
+            //
+            // ⚠️ THIS RUNS ON EVERY PATH — approve/save included. The approvedEmail
+            // gate that used to exempt them is gone: every call path reads `users`
+            // FRESH, after the account write, so the old "the roster may not have
+            // caught up with the approval" fear could not hold — and the exemption
+            // did real damage. Re-saving an Area Manager as HR force-added the
+            // account back into `members` (branchGroupMembers) and SKIPPED this
+            // delete, so the teamless store's room survived as a 1-member ghost
+            // and its branches never left that person's chat list. The superadmin
+            // `allow delete` rule (already present for the reset tool) authorises
+            // this.
+            if (roomExists && chat.branchHasStoreTeam
                 && !chat.branchHasStoreTeam(branch, allUsers)) {
                 op = 'delete room';
                 await roomRef.delete();
