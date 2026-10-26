@@ -435,6 +435,7 @@ service cloud.firestore {
       allow update, delete: if isSuperAdmin() || (isOperatorOrSuperAdmin() && isOwnViolation());
     }
 
+
     // ---------------- remarks ----------------
     // The HR coordination log: a free-text note ("has an NOV been issued?")
     // attached to a ticket or a violation, so the several HR staff who share

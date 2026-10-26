@@ -3028,7 +3028,7 @@ branch name, let alone pick one. */
         text-align: left;
         margin-bottom: 18px;
         padding-bottom: 12px;
-        border-bottom: 2px solid #222;
+        border-bottom: none;
     }
 
     .print-brand {
@@ -3062,7 +3062,7 @@ branch name, let alone pick one. */
         text-align: right;
         margin-bottom: 18px;
         padding-bottom: 12px;
-        border-bottom: 2px solid #222;
+        border-bottom: none;
     }
 
     .print-header h1 {

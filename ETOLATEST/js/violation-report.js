@@ -38,7 +38,7 @@
 
     // Full-width letterhead banner (1768x174 px) shown end-to-end at the top of
     // every generated "COMMAND CENTER REPORT" PDF. No border, no margins.
-    var HEADER_URL = 'https://res.cloudinary.com/gbd9cguj/image/upload/v1789552764/nlnjl9cvf0s6t1pcvsbx.png';
+    var HEADER_URL = 'https://res.cloudinary.com/gbd9cguj/image/upload/v1792676243/cfydlot1i8uwsegwmhmp.png';
     // Hardcoded aspect from the uploaded asset, used only if image probing fails.
     var HEADER_ASPECT = 1768 / 174;
 
