@@ -459,29 +459,78 @@
         if (modalBody) modalBody.innerHTML = detailsHtml(v);
         renderAttachments(v.attachments);
 
-        // ⚠️ AREA MANAGER ONLY: 1-minute countdown starts when the modal opens.
+        // ⚠️ STORE-SIDE MANAGERS ONLY (Area Manager + RM/SM): 1-minute countdown starts when the modal opens.
         // HR and superadmin never reach this path (their violation lists are
         // separate and read-only on their own tabs).
         const role = readRole();
-        if (role === 'owner' || role === 'area manager' || role === 'am') {
+        if (role === 'owner' || role === 'area manager' || role === 'am' || role === 'rmsm' || role === 'rm/sm' || role === 'rm sm') {
             const now = Date.now();
 
-            // If the violation already has a valid expiry time from a previous
-            // open (stamped in Firestore as managerExpiresAtMs), CONTINUE that
-            // deadline instead of resetting it. Closing and reopening the modal
-            // must not restart the countdown.
-            const existingExpiry = v.managerExpiresAtMs || 0;
+            // Consult every available source of the deadline so a reopen does NOT
+            // reset the countdown: the Firestore-stamped value, the in-memory
+            // value (survives closing the modal) and the localStorage-persisted
+            // value (survives a page refresh).
+            let existingExpiry = Number(v.managerExpiresAtMs) || 0;
+            if (countdownDeadlineFor === v.id && countdownDeadline > existingExpiry) {
+                existingExpiry = countdownDeadline;
+            }
+            try {
+                if (restoreCountdown() && countdownDeadlineFor === v.id && countdownDeadline > existingExpiry) {
+                    existingExpiry = countdownDeadline;
+                }
+            } catch (e) { /* ignore */ }
+
             if (existingExpiry > now) {
                 countdownDeadlineFor = v.id;
                 countdownDeadline = existingExpiry;
+                if (v) v.managerExpiresAtMs = existingExpiry;
                 persistCountdown();
                 injectCountdownBar();
                 ensureCountdownTimer();
                 updateCountdownUI();
+
+                // Still stamp Firestore so the Superadmin's client can detect
+                // the expiry and delete managerStatus via auto-revert. This
+                // runs even when continuing an existing deadline, in case the
+                // previous stamp never persisted.
+                try {
+                    const service = window.firestoreService;
+                    const me = (typeof auth !== 'undefined' && auth && auth.currentUser) || {};
+                    if (service && typeof service.markViolationOpenedForAreaManager === 'function') {
+                        service.markViolationOpenedForAreaManager(
+                            id,
+                            me.email || null,
+                            me.displayName || null
+                        ).then((expiresAt) => {
+                            const ms = expiresAt && typeof expiresAt.getTime === 'function'
+                                ? expiresAt.getTime() : 0;
+                            if (ms > Date.now() && ms !== countdownDeadline) {
+                                countdownDeadline = ms;
+                                countdownDeadlineFor = v.id;
+                                if (v) v.managerExpiresAtMs = ms;
+                                persistCountdown();
+                                updateCountdownUI();
+                            }
+                        }).catch((e) => {
+                            console.warn('Could not stamp violation open time:', e);
+                        });
+                    }
+                } catch (e) {
+                    console.warn('Could not stamp violation open time:', e);
+                }
+            } else if (existingExpiry > 0) {
+                // A previous viewing window already expired — do NOT restart
+                // the 1-minute clock (and do NOT re-stamp Firestore), otherwise
+                // the report would be re-armed and reappear in the list.
+                try { toast('Viewing window expired.', 'info'); } catch (e) {}
+                clearPersistedCountdown();
+                closeModal();
+                return false;
             } else {
                 // No valid expiry — start a fresh 1-minute deadline.
                 countdownDeadlineFor = v.id;
                 countdownDeadline = now + 60 * 1000;
+                if (v) v.managerExpiresAtMs = countdownDeadline;
                 persistCountdown();
                 injectCountdownBar();
                 ensureCountdownTimer();
@@ -500,7 +549,17 @@
                             id,
                             me.email || null,
                             me.displayName || null
-                        ).catch((e) => {
+                        ).then((expiresAt) => {
+                            const ms = expiresAt && typeof expiresAt.getTime === 'function'
+                                ? expiresAt.getTime() : 0;
+                            if (ms > Date.now() && ms !== countdownDeadline) {
+                                countdownDeadline = ms;
+                                countdownDeadlineFor = v.id;
+                                if (v) v.managerExpiresAtMs = ms;
+                                persistCountdown();
+                                updateCountdownUI();
+                            }
+                        }).catch((e) => {
                             console.warn('Could not stamp violation open time:', e);
                         });
                     }
@@ -596,12 +655,16 @@
         countdownPendingRevert = true;
 
         try {
-            toast('Countdown ended — violation returned to Superadmin.', 'info');
+            toast('Countdown ended — viewing window expired.', 'info');
         } catch (e) {
             console.error('Toast failed:', e);
         } finally {
             countdownPendingRevert = false;
             clearPersistedCountdown();
+            // Drop the now-expired report from the local list immediately,
+            // instead of waiting for the Superadmin's revert to trigger a
+            // snapshot.
+            try { applyFilters(); } catch (e) {}
             closeModal();
         }
     }
@@ -684,20 +747,15 @@
     /**
      * TWO decisions, deliberately split, because CREATE/OPEN ≠ SEE-THE-TAB:
      *
-     *   tabVisible — show the violations TAB. Area Manager ('owner') ONLY.
+     *   tabVisible — show the violations TAB. Both store-side roles ('owner' + 'rmsm').
      *   allowed    — arm the managerStatus listener AND let openModal() work.
      *                'owner' AND 'rmsm'.
      *
-     * ⚠️ WHY RM/SM NEEDS `allowed` BUT NOT `tabVisible`. RM/SM has no violations
-     * tab (Overview + Tickets only), so tabVisible stays false and the nav item
-     * is hidden. BUT a violation MENTIONED in the store chat must still OPEN for
-     * them — and openModal(id) resolves against `allViolations`, which is
-     * populated ONLY by the listener started here. Without `allowed`, an RM/SM
-     * clicking a chip would get "That report has not finished loading yet"
-     * forever, exactly the dead-end the Area Manager branch in chat.js avoids.
-     * firestore.rules admits 'rmsm' for `managerStatus == 'transferred'` (via
-     * isRmsm()), and openModal() re-checks branch scope, so this grants nothing
-     * beyond a transferred, in-branch report — and there is no list to browse.
+     * ⚠️ RM/SM now gets the SAME tab as the Area Manager: RM/SM is a store-side
+     * manager too (isAreaManager() === true), so the Transferred Violations list
+     * and its 1-minute expiry countdown apply to them identically. There is no
+     * separate "transfer to RM/SM" — the same managerStatus == 'transferred'
+     * flag covers both, and branch scope is enforced by assignedBranches().
      *
      * ⚠️ HR IS DELIBERATELY NOT `allowed`, and superadmin is not either.
      * Superadmin works the command center's own Violations tab and HR has its
@@ -711,8 +769,8 @@
      */
     function applyRole(role) {
         var r = String(role || '').toLowerCase();
-        tabVisible = r === 'owner';               // the TAB is owner-only
-        allowed = r === 'owner' || r === 'rmsm';  // listener + openModal: both store-side roles
+        tabVisible = r === 'owner' || r === 'rmsm' || r === 'area manager' || r === 'am' || r === 'rm/sm' || r === 'rm sm';  // both store-side roles now get the tab
+        allowed = r === 'owner' || r === 'rmsm' || r === 'area manager' || r === 'am' || r === 'rm/sm' || r === 'rm sm';      // listener + openModal: both store-side roles
         if (navItem) {
             navItem.style.display = tabVisible ? 'flex' : 'none';
             navItem.classList.toggle('u-hidden', !tabVisible);

@@ -427,7 +427,7 @@ service cloud.firestore {
       // violation so the Superadmin's client can auto-revert after the countdown.
       // Restricted to the manager* fields only — never touches managerStatus,
       // hrStatus, or any report data.
-      allow update: if isOwner()
+      allow update: if (isOwner() || isRmsm())
         && isTransferredToAreaManager()
         && request.resource.data.diff(resource.data).affectedKeys()
              .hasOnly(['managerOpenedAt', 'managerExpiresAt', 'managerExpiresAtMs',

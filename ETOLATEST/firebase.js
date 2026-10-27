@@ -531,9 +531,18 @@ const firestoreService = {
      * have their own violation lists and never call this.
      */
     async markViolationOpenedForAreaManager(violationId, openedByEmail, openedByName) {
-        const now = new Date();
-        const expiresAt = new Date(now.getTime() + 60 * 1000); // +1 minute
-        await db.collection('violations').doc(violationId).update({
+        const ref = db.collection('violations').doc(violationId);
+        const snap = await ref.get();
+        const existingMs = snap.exists ? (Number(snap.data().managerExpiresAtMs) || 0) : 0;
+        const now = Date.now();
+        // Idempotent: if a valid (future) expiry already exists, do NOT reset
+        // the countdown. Closing and reopening the modal (or a duplicate stamp)
+        // must continue the original deadline, not restart it.
+        if (existingMs > now) {
+            return new Date(existingMs);
+        }
+        const expiresAt = new Date(now + 60 * 1000); // +1 minute
+        await ref.update({
             managerOpenedAt: firebase.firestore.FieldValue.serverTimestamp(),
             managerExpiresAt: firebase.firestore.FieldValue.serverTimestamp(),
             // Client-computed expiry so the countdown UI can start without

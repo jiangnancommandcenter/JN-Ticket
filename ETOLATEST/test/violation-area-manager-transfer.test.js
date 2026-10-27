@@ -73,9 +73,9 @@ console.log('Testing the violation → Area Manager handoff...');
     // The Area Manager may stamp open/expiry time on a transferred violation:
     // a narrow, field-restricted update gated on isTransferredToAreaManager().
     // isOwner() in a WRITE rule is only allowed for that specific rule.
-    if (/isOwner\(\)/.test(block)) {
-        const ownerIdx = block.indexOf('allow update: if isOwner()');
-        assert(ownerIdx > -1, 'isOwner() write rule must start with "allow update: if isOwner()"');
+    if (/isOwner\(\)/.test(block) || /isRmsm\(\)/.test(block)) {
+        const ownerIdx = block.indexOf('allow update: if (isOwner() || isRmsm())');
+        assert(ownerIdx > -1, 'isOwner()/isRmsm() write rule must start with "allow update: if (isOwner() || isRmsm())"');
         const ownerRule = block.slice(ownerIdx, ownerIdx + 500);
         assert(/isTransferredToAreaManager\(\)/.test(ownerRule),
             'owner write must be gated on isTransferredToAreaManager()');
@@ -337,7 +337,7 @@ console.log('Testing the violation → Area Manager handoff...');
         'listener/openModal path (allowed) so RM/SM opens a chip but sees no tab');
     assert(/navItem\.style\.display\s*=\s*tabVisible/.test(gate2),
         'the nav item must show only when tabVisible (owner), never when merely ' +
-        'allowed (rmsm) — RM/SM must not gain a violations tab');
+        'allowed (rmsm) — RM/SM now gets the same violations tab');
 }
 
 console.log('  ✓ violation → Area Manager handoff');
@@ -431,10 +431,13 @@ const src = ownerViolationsJs;
     const H = ctx.window.OwnerViolations;
     assert(H, 'OwnerViolations must be exported');
 
-    // ---- the tab shows only for the Area Manager, never for HR ----
+    // ---- the tab shows for both store-side managers (Area Manager + RM/SM), never for HR ----
     H.applyRole('owner');
     assert.strictEqual(nodes.ownerViolationsNavItem.style.display, 'flex',
         'the Area Manager (owner) sees the Transferred Violations tab');
+    H.applyRole('rmsm');
+    assert.strictEqual(nodes.ownerViolationsNavItem.style.display, 'flex',
+        'RM/SM also sees the Transferred Violations tab');
     H.applyRole('hr');
     assert.strictEqual(nodes.ownerViolationsNavItem.style.display, 'none',
         'HR is never shown the tab');
