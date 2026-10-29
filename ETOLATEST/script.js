@@ -331,6 +331,7 @@ function buildReopenRequestCard(ticket) {
                 </div>
                 <div class="review-meta-grid">
                     <div class="review-meta full"><label>Reason</label><p class="review-note">${escapeHTML(req.reason || 'No reason provided.')}</p></div>
+                    ${req.attachment && (req.attachment.url || req.attachment.secure_url) ? `<div class="review-meta full"><label>Police Report</label><a class="police-report-chip" href="${escapeHTML(req.attachment.url || req.attachment.secure_url)}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:6px;padding:7px 12px;border:2px solid #ef4444;background:rgba(239,68,68,0.18);border-radius:8px;color:#7f1d1d;text-decoration:none;font-size:0.87rem;font-weight:700;"><i class="fas fa-file" style="color:#ef4444;font-size:1rem;"></i> Police Report</a></div>` : ""}
                     <div class="review-meta"><label>Requested By</label><span>${escapeHTML(requester)}</span></div>
                     <div class="review-meta"><label>Requested At</label><span>${escapeHTML(when(req.requestedAt) || '\u2014')}</span></div>
                     <div class="review-meta"><label>Times Requested</label><span>${count}&times;</span></div>
@@ -601,7 +602,8 @@ const approvalDetailsTitle = $('#approvalDetailsTitle');
 const approvalDetailsBody = $('#approvalDetailsBody');
 const approvalDetailsStatus = $('#approvalDetailsStatus');
 const approvalModalFooter = $('#approvalModalFooter');
-const btnApproveApproval = $('#btnApproveApproval');
+const btnTransferToHr = $('#btnTransferToHr');
+const btnTransferToStore = $('#btnTransferToStore');
 const btnRejectApproval = $('#btnRejectApproval');
 // 2-Day tracking access: superadmin-only "Approve Request & Resend", shown on
 // an expired approved ticket ONLY when somebody has asked to reopen it.
@@ -4685,9 +4687,13 @@ window.openApprovalDetails = function(id) {
     const showResendAction = expiryInfo.expired && reopenPending && currentUserIsSuperAdmin();
     const showFooter = showApproveActions || showResendAction;
     if (approvalModalFooter) approvalModalFooter.style.display = showFooter ? 'flex' : 'none';
-    if (btnApproveApproval) {
-        btnApproveApproval.style.display = showApproveActions ? '' : 'none';
-        btnApproveApproval.onclick = () => window.approveResolution(id);
+    if (btnTransferToHr) {
+        btnTransferToHr.style.display = showApproveActions ? '' : 'none';
+        btnTransferToHr.onclick = () => window.transferTicketToHr(id);
+    }
+    if (btnTransferToStore) {
+        btnTransferToStore.style.display = showApproveActions ? '' : 'none';
+        btnTransferToStore.onclick = () => window.transferTicketToStore(id);
     }
     if (btnRejectApproval) {
         btnRejectApproval.style.display = showApproveActions ? '' : 'none';
@@ -5095,6 +5101,103 @@ window.approveResolution = async function(id) {
         console.log('Failed to approve resolution.');
     }
 };
+// ==============================================================
+//  TICKET HANDOFF — Transfer to HR / Transfer to Store
+//  (replaces the old single "Approve Report" button)
+// ==============================================================
+
+window.transferTicketToHr = async function(id) {
+    const confirmed = await showConfirmDialog({
+        title: 'Transfer to HR',
+        message: 'Transfer this ticket to HR only? It will be <strong>hidden</strong> from the Area Manager/RM/SM dashboard and sent to HR for investigation. The requester will be notified that the ticket is under investigation.',
+        confirmText: 'Transfer to HR',
+        danger: false,
+        icon: 'fa-user-shield'
+    });
+    if (!confirmed) return;
+    const approvedTicket = allTickets.find(t => t.id === id) || null;
+    const approvedByEmail = (auth.currentUser && auth.currentUser.email) || 'unknown';
+    try {
+        await firestoreService.transferTicketToHr(id, approvedByEmail, (auth.currentUser && auth.currentUser.displayName) || approvedByEmail);
+        if (approvalDetailsModal) approvalDetailsModal.classList.remove('active');
+        currentApprovalTicketId = null;
+        updateApprovalsBadge();
+        applyApprovalFilters(false);
+        if (typeof showToast === 'function') showToast('Ticket transferred to HR. It is now hidden from the Area Manager/RM/SM dashboard.', 'success');
+
+        // ===== Email the REQUESTER (not HR) =====
+        await notifyRequesterOfHrTransfer(approvedTicket, { id: id, approvedBy: approvedByEmail });
+    } catch (error) {
+        console.error('Transfer to HR error:', error);
+        if (typeof showToast === 'function') showToast('Failed to transfer to HR. Please try again.', 'error');
+    }
+};
+
+window.transferTicketToStore = async function(id) {
+    const confirmed = await showConfirmDialog({
+        title: 'Transfer to Store',
+        message: 'Transfer this ticket to Store? HR and the Area Manager/RM/SM will both be able to view it. The requester will be notified that the ticket was completed.',
+        confirmText: 'Transfer to Store',
+        danger: false,
+        icon: 'fa-store'
+    });
+    if (!confirmed) return;
+    const approvedTicket = allTickets.find(t => t.id === id) || null;
+    const prevApprovalStatus = approvedTicket ? (approvedTicket.approvalStatus || 'pending_approval') : '';
+    const approvedByEmail = (auth.currentUser && auth.currentUser.email) || 'unknown';
+    const accessStartsOnOpen = true;
+    try {
+        await firestoreService.transferTicketToStore(id, approvedByEmail, (auth.currentUser && auth.currentUser.displayName) || approvedByEmail);
+        if (approvalDetailsModal) approvalDetailsModal.classList.remove('active');
+        currentApprovalTicketId = null;
+        updateApprovalsBadge();
+        applyApprovalFilters(false);
+        if (typeof showToast === 'function') showToast('Ticket transferred to Store. HR and Area Manager/RM/SM can now view it.', 'success');
+
+        // ===== Email the requester (normal approval email) =====
+        await notifyRequesterOfApproval(approvedTicket, {
+            id: id,
+            approvedBy: approvedByEmail,
+            prevApprovalStatus: prevApprovalStatus
+        });
+    } catch (error) {
+        console.error('Transfer to Store error:', error);
+        if (typeof showToast === 'function') showToast('Failed to transfer to Store. Please try again.', 'error');
+    }
+};
+
+/**
+ * Notify the requester that their ticket has been transferred to HR for
+ * investigation. The ticket is NOT resolved — viewing access is not granted.
+ */
+async function notifyRequesterOfHrTransfer(ticket, ctx) {
+    try {
+        if (!ticket || !ctx || !ctx.id) return;
+        if (!window.EmailService || typeof window.EmailService.sendTicketApprovedEmail !== 'function') {
+            console.warn('Approval Email: js/email.js is not loaded — notification skipped.');
+            return;
+        }
+        if (!window.EmailService.isEmailConfigured()) {
+            if (typeof showToast === 'function') showToast('Transferred to HR — approval emails are not configured yet.', 'info');
+            return;
+        }
+        const recipient = window.EmailService.resolveRecipient(ticket);
+        if (!recipient) {
+            if (typeof showToast === 'function') showToast('Transferred to HR — this ticket has no email address, so no notification was sent.', 'info');
+            return;
+        }
+        const result = await window.EmailService.sendTicketHrTransferEmail(ticket, { force: true });
+        if (typeof showToast === 'function') {
+            if (result.ok) showToast('Requester notified that the ticket is under investigation.', 'success');
+            else if (result.timeout) showToast('Transferred to HR, but the email bridge timed out.', 'error');
+            else showToast('Transferred to HR, but the email failed (' + (result.error || result.status) + ').', 'error');
+        }
+        applyApprovalFilters(false);
+    } catch (error) {
+        console.error('HR transfer email failed (the transfer itself is unaffected):', error);
+    }
+}
+
 
 // ==============================================================
 //  APPROVAL EMAIL NOTIFICATION (requester notification)
@@ -5594,7 +5697,8 @@ function renderApprovalList() {
 
             let actionBtns = '';
             if (isPendingApproval(ticket)) {
-                actionBtns = `${resendBtn}${emailBtn}<button class="action-btn approve" data-tooltip="Approve" onclick="event.stopPropagation(); window.approveResolution('${ticket.id}')"><i class="fas fa-check"></i></button>
+                actionBtns = `${resendBtn}${emailBtn}<button class="action-btn approve" data-tooltip="Transfer to HR" onclick="event.stopPropagation(); window.transferTicketToHr('${ticket.id}')"><i class="fas fa-user-shield"></i></button>
+                    <button class="action-btn approve" data-tooltip="Transfer to Store" onclick="event.stopPropagation(); window.transferTicketToStore('${ticket.id}')"><i class="fas fa-store"></i></button>
                     <button class="action-btn reject" data-tooltip="Reject" onclick="event.stopPropagation(); window.rejectTicket('${ticket.id}')"><i class="fas fa-times"></i></button>
                     <button class="action-btn edit" data-tooltip="Edit Approval Info" onclick="event.stopPropagation(); window.openEditApprovalModal('${ticket.id}')"><i class="fas fa-edit"></i></button>
                     ${hrUploadBtn}`;
@@ -7832,6 +7936,7 @@ let currentViolationId = null;
 let violationPendingFiles = [];     // New files chosen in the form dropzone
 let violationEditAttachments = [];  // Existing attachments kept while editing
 let violationListenerStarted = false;
+let previousViolations = [];
 
 function isViolationCloudinaryConfigured() {
     return VIOLATION_CLOUDINARY_CLOUD_NAME && VIOLATION_CLOUDINARY_CLOUD_NAME !== 'YOUR_VIOLATION_CLOUD_NAME'
@@ -8015,6 +8120,20 @@ function setupViolationListener() {
 
     return new Promise((resolve) => {
         const snapshotHandler = async (violations) => {
+            // Detect violations newly transferred to HR by superadmin
+            if (previousViolations.length > 0 && Array.isArray(violations)) {
+                const prevMap = new Map(previousViolations.map(v => [v.id, v]));
+                for (const v of violations) {
+                    const prev = prevMap.get(v.id);
+                    if (prev && v.hrStatus === 'transferred' && prev.hrStatus !== 'transferred') {
+                        // Newly transferred to HR — notify if on HR/superadmin side
+                        if (typeof window.notifyViolationTransferred === 'function') {
+                            window.notifyViolationTransferred(v);
+                        }
+                    }
+                }
+            }
+            previousViolations = Array.isArray(violations) ? violations.map(v => ({...v})) : [];
             allViolations = violations;
             // The violations TABLE renders immediately — this is the thing the
             // operator waits for after a refresh.

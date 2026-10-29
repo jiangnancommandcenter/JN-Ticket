@@ -520,6 +520,50 @@ const firestoreService = {
             updatedAt: firebase.firestore.FieldValue.serverTimestamp()
         });
     },
+    /** ===== TICKET HANDOFF (Superadmin Ticket Approval Workflow) ===
+
+     * Instead of a single "Approve", the superadmin now chooses where a
+     * resolved ticket goes:
+     *   - Transfer to HR    → ticketTransferTo: 'hr'   (HR only, hidden from Area Manager/RM/SM)
+     *   - Transfer to Store → ticketTransferTo: 'store' (HR + Area Manager/RM/SM, current approve flow)
+     */
+
+    /**
+     * Hand a resolved ticket to HR only. Area Manager / RM/SM must NOT see it.
+     * Used for sensitive cases (e.g. assault) where only HR investigates.
+     * No email is sent to HR — only to the requester (under investigation).
+     */
+    async transferTicketToHr(ticketId, byEmail, byName) {
+        await db.collection('tickets').doc(ticketId).update({
+            ticketTransferTo: 'hr',
+            approvalStatus: 'approved',
+            status: 'Resolved',
+            transferredAt: firebase.firestore.FieldValue.serverTimestamp(),
+            transferredBy: byEmail || null,
+            transferredByName: byName || null,
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+    },
+
+    /**
+     * Hand a resolved ticket to Store (HR + Area Manager / RM/SM can both see).
+     * This is the existing "Approve" behaviour — the ticket becomes visible to
+     * branch users with the normal 2-day viewing window.
+     */
+    async transferTicketToStore(ticketId, byEmail, byName) {
+        await db.collection('tickets').doc(ticketId).update({
+            ticketTransferTo: 'store',
+            approvalStatus: 'approved',
+            approvedAt: firebase.firestore.FieldValue.serverTimestamp(),
+            approvedBy: byEmail || null,
+            accessWindowStartsOnOpen: true,
+            transferredAt: firebase.firestore.FieldValue.serverTimestamp(),
+            transferredBy: byEmail || null,
+            transferredByName: byName || null,
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+    },
+
 
     /**
      * Stamp when an Area Manager first opens a transferred violation modal.
@@ -848,4 +892,5 @@ window.formatTrackingAccessWindow = function(ms) {
 window.firestoreService = firestoreService;
 window.db = db;
 window.auth = auth;
+
 
