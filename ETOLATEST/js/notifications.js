@@ -124,6 +124,38 @@ async function ensureNotificationPermission() {
  * the ticket row. Keeps every notification type behaving exactly like the
  * new-ticket notification.
  */
+function makeViolationClickHandler(violationId) {
+    return function (event) {
+        event.preventDefault();
+        NOTIFICATION_WINDOW.focus();
+        requestAnimationFrame(() => {
+            // Switch to Violations tab
+            const violationsTab = NOTIFICATION_WINDOW.document.querySelector('.tab-content#tabViolations');
+            if (violationsTab && !violationsTab.classList.contains('active')) {
+                NOTIFICATION_WINDOW.document.querySelectorAll('.nav-item').forEach(item => {
+                    item.classList.toggle('active', item.dataset.tab === 'violations');
+                });
+                NOTIFICATION_WINDOW.document.querySelectorAll('.tab-content').forEach(tab => {
+                    tab.classList.toggle('active', tab.id === 'tabViolations');
+                });
+                const titleEl = NOTIFICATION_WINDOW.document.getElementById('pageTitle');
+                const subEl = NOTIFICATION_WINDOW.document.getElementById('pageSubtitle');
+                if (titleEl) titleEl.textContent = 'Violations';
+                if (subEl) subEl.textContent = 'Violation Reports';
+            }
+            requestAnimationFrame(() => {
+                const row = NOTIFICATION_WINDOW.document.querySelector(`tr[data-violation-id="${CSS.escape(violationId)}"]`);
+                if (row) {
+                    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    row.classList.add('violation-row-highlight');
+                    setTimeout(() => row.classList.remove('violation-row-highlight'), 5000);
+                }
+            });
+        });
+        this.close();
+    };
+}
+
 function makeTicketClickHandler(ticketId) {
     return function (event) {
         event.preventDefault();
@@ -427,7 +459,85 @@ function notifyTicketStatusChange(prev, ticket) {
         return `Re-access requested for ${ticketLabel} (${branch}) — resend to restore viewing`;
     }
 
+    // 4. Ticket transferred to HR by superadmin
+    const prevTransferTo = prev.ticketTransferTo || '';
+    const newTransferTo = ticket.ticketTransferTo || '';
+    if (newTransferTo === 'hr' && prevTransferTo !== 'hr') {
+        playNotificationSound();
+        if (Notification.permission === 'granted') {
+            showTicketTransferredNotification(ticket);
+        }
+        return `Ticket ${ticketLabel} transferred to HR (${branch})`;
+    }
+
     return '';
+}
+
+/**
+ * Show a desktop notification when a superadmin transfers a ticket to HR.
+ * Returns the Notification object or null on failure.
+ */
+function showTicketTransferredNotification(ticket) {
+    try {
+        const ticketId = ticket.id || ticket.ticketNumber || 'unknown';
+        const branch = ticket.branch || 'Unknown';
+        const transferredBy = ticket.transferredByName || ticket.transferredBy || 'Superadmin';
+        const notification = new Notification('Ticket Transferred to HR — Jiangnan Command Center', {
+            body: `Ticket: ${ticket.ticketNumber || ticketId}
+Branch: ${branch}
+Transferred by: ${transferredBy}`,
+            icon: NOTIFICATION_ICON_URL,
+            tag: `transfer-ticket-${ticketId}`,
+            requireInteraction: true,
+            silent: true
+        });
+        notification.onclick = makeTicketClickHandler(ticketId);
+        setTimeout(() => { try { notification.close(); } catch {} }, 30000);
+        return notification;
+    } catch (e) {
+        console.error('[Desktop Notifications] Failed to show ticket transfer:', e);
+        return null;
+    }
+}
+
+/**
+ * Show a desktop notification when a superadmin transfers a violation to HR.
+ * Returns the Notification object or null on failure.
+ */
+function showViolationTransferredNotification(violation) {
+    try {
+        const violationId = violation.id || violation.violationNumber || 'unknown';
+        const store = violation.store || 'Unknown';
+        const transferredBy = violation.transferredByName || violation.transferredBy || 'Superadmin';
+        const notification = new Notification('Violation Transferred to HR — Jiangnan Command Center', {
+            body: `Report: ${violation.violationNumber || violationId}
+Store: ${store}
+Transferred by: ${transferredBy}`,
+            icon: NOTIFICATION_ICON_URL,
+            tag: `transfer-violation-${violationId}`,
+            requireInteraction: true,
+            silent: true
+        });
+        notification.onclick = makeViolationClickHandler(violationId);
+        setTimeout(() => { try { notification.close(); } catch {} }, 30000);
+        return notification;
+    } catch (e) {
+        console.error('[Desktop Notifications] Failed to show violation transfer:', e);
+        return null;
+    }
+}
+
+/**
+ * Notify that a violation was transferred to HR. Plays sound + desktop notification.
+ */
+function notifyViolationTransferred(violation) {
+    if (!violation || !violation.id) return '';
+    if (!('Notification' in window)) return '';
+    playNotificationSound();
+    if (Notification.permission === 'granted') {
+        showViolationTransferredNotification(violation);
+    }
+    return `Violation ${violation.violationNumber || violation.id} transferred to HR`;
 }
 
 function escapeHTML(str) {
@@ -663,6 +773,7 @@ window.bindNotificationBell = bindNotificationBell;
 window.requestNotificationPermissionFromGesture = requestNotificationPermissionFromGesture;
 window.notifyNewTicket = notifyNewTicket;
 window.notifyTicketStatusChange = notifyTicketStatusChange;
+window.notifyViolationTransferred = notifyViolationTransferred;
 // ⚠️ EXPORTED FOR THE CHAT, AND THE EXPORT IS LOAD-BEARING.
 // js/chat.js guards on `typeof window.playNotificationSound === 'function'`
 // to reuse this preloaded sound rather than constructing its own. Without this

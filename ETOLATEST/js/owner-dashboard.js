@@ -357,7 +357,8 @@ function isAreaManager() {
 
 /**
  * HR or superadmin — the roles that may leave a coordination remark. Mirrors
- * isHrOrSuperAdmin() in firestore.rules, which gates the emarks collection
+ * isHrOrSuperAdmin() in firestore.rules, which gates the 
+emarks collection
  * (see js/remarks.js). Used only to decide whether to DRAW the Remarks button;
  * the real gate is the rules, so a role that cannot write gets no button
  * rather than a button that fails.
@@ -606,7 +607,9 @@ function ownerScopedTickets(allTickets) {
   return raw
     .map((doc) => normalizeTicketReport(doc))
     .filter((t) => (ownerResolvedOnly ? isApprovedTicket(t) : true))
-    .filter((t) => allowedBranches.includes(String(t.branch || t.branchName || '').trim()));
+    .filter((t) => allowedBranches.includes(String(t.branch || t.branchName || '').trim()))
+    // Hide HR-transferred tickets from Area Manager/RM/SM dashboard entirely.
+    .filter((t) => !(isAreaManager() && t.ticketTransferTo === 'hr'));
 }
 
 function renderKpiCards() {
@@ -1263,7 +1266,7 @@ function activeUserDisplayName() {
  * Returns the promise so a caller can chain, and never throws: the UI reports a
  * failure through `ownerToast` and the inline error, not an unhandled rejection.
  */
-function requestOwnerAccess(ticketId, reason) {
+function requestOwnerAccess(ticketId, reason, attachment) {
   const clean = String(reason || '').trim();
   if (!ticketId) return Promise.resolve(false);
   if (clean.replace(/\s+/g, '').length < 5) {
@@ -1296,7 +1299,8 @@ function requestOwnerAccess(ticketId, reason) {
       requestedBy: requestedBy,
       requestedByEmail: requestedByEmail,
       requestedByContact: '',
-      requestedAt: when
+      requestedAt: when,
+      attachment: attachment || null
     };
     const prev = ownerReopenState(data);
     const prevCount = (prev && Number(prev.requestCount)) || 0;
@@ -1307,6 +1311,7 @@ function requestOwnerAccess(ticketId, reason) {
       requestedByEmail: requestedByEmail,
       requestedByContact: '',
       requestedAt: when,
+      attachment: attachment || null,
       // Monotonic, so the Approvals chip's ×N is the true number of asks even
       // if two requests are filed in quick succession.
       requestCount: prevCount + 1
@@ -1762,6 +1767,9 @@ window.openOwnerReport = function(reportId) {
            <label for="ownerReopenReason"><i class="fas fa-key"></i> Request to open this ticket again</label>
            <textarea id="ownerReopenReason" rows="3" maxlength="500"
                      placeholder="Why do you need this again? e.g. dispute follow-up, audit, insurance claim"></textarea>
+            <label for="ownerReopenAttachment" style="font-size:0.85rem;font-weight:600;display:block;margin:6px 0 2px;"><i class="fas fa-paperclip"></i> Police report (optional)</label>
+            <label for="ownerReopenAttachment" class="btn btn-outline btn-sm" style="display:inline-flex;align-items:center;gap:6px;padding:6px 12px;margin-bottom:6px;cursor:pointer;"><i class="fas fa-upload"></i> Choose file</label>
+            <input type="file" id="ownerReopenAttachment" accept="image/*,application/pdf" style="display:none;">
            <div class="owner-reopen-actions">
              <span class="owner-reopen-hint">A superadmin reviews every request. Nothing is reopened automatically.</span>
              <button type="submit" class="btn btn-primary btn-sm" id="ownerReopenSubmit">
@@ -1769,27 +1777,6 @@ window.openOwnerReport = function(reportId) {
              </button>
            </div>
          </form>`;
-
-    // The history of previous asks, mirroring the public Track page. Only the
-    // LATEST can still be pending; anything older was superseded.
-    const reopenHistoryHtml = reopenNotes.length
-      ? `<div class="owner-reopen-history">
-           <h4>Request history</h4>
-           ${reopenNotes.map((n, i) => {
-             const isLatest = i === reopenNotes.length - 1;
-             const fulfilled = !isLatest || String((reopen && reopen.status) || '') === 'fulfilled';
-             return `<div class="owner-reopen-item">
-               <div class="owner-reopen-item-text">Reason: ${escapeHTML(n.text || '—')}</div>
-               <div class="owner-reopen-item-meta">
-                 ${escapeHTML(n.requestedBy || 'Area Manager')}${n.requestedAt ? ' · ' + escapeHTML(formatDate(n.requestedAt)) : ''}
-               </div>
-               <div class="owner-reopen-status ${fulfilled ? 'fulfilled' : 'pending'}">
-                 ${fulfilled ? 'Fulfilled' : 'Awaiting approval'}
-               </div>
-             </div>`;
-           }).join('')}
-         </div>`
-      : '';
 
     // ===== Request additional footage (Area Manager / RM/SM only) =====
     //
@@ -1865,7 +1852,6 @@ window.openOwnerReport = function(reportId) {
         </p>
         ${expiresAt ? `<p class="owner-access-expired-when">Access closed ${escapeHTML(formatDate(expiresAt))}</p>` : ''}
         ${reopenFormHtml}
-        ${reopenHistoryHtml}
       </div>
 
       <div class="review-card">
@@ -1924,6 +1910,12 @@ window.openOwnerReport = function(reportId) {
         </div>
       </div>
     ` : `
+      <div class="data-privacy-warning" role="alert" style="margin:0 0 12px;padding:10px 12px;border:1px solid #f59e0b;background:rgba(245,158,11,0.12);border-radius:8px;color:var(--text-primary);display:flex;gap:10px;align-items:flex-start;">
+        <i class="fas fa-exclamation-triangle" style="color:#f59e0b;margin-top:2px;"></i>
+        <div>
+          <strong>Warning:</strong> Confidential information. Do not share this to anyone. Unauthorized disclosure may result in penalties or may kaparusahan sa batas under Republic Act No. 10173 (Data Privacy Act of 2012) of the Philippines.
+        </div>
+      </div>
       <!-- ===== SECTION 1: REQUESTER'S ORIGINAL REQUEST (collapsible, on top) ===== -->
       <details class="review-collapse">
         <summary>
@@ -2051,18 +2043,41 @@ function handleOwnerReopenSubmit(event) {
     btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sending...';
   }
 
-  requestOwnerAccess(ticketId, reason).then((ok) => {
-    if (btn) {
-      btn.disabled = false;
-      btn.innerHTML = originalHtml;
+  // Optional police-report attachment (uploaded before the request is filed).
+  const fileInput = $owner('ownerReopenAttachment');
+  const file = fileInput && fileInput.files && fileInput.files.length ? fileInput.files[0] : null;
+  const uploadAndSend = async () => {
+    let attachment = null;
+    if (file) {
+      if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading...'; }
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('upload_preset', 'jiangnan');
+        formData.append('folder', 'tickets/' + ticketId + '/reopen');
+        const res = await fetch('https://api.cloudinary.com/v1_1/jlux07ne/auto/upload', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (!res.ok) throw new Error((data && data.error && data.error.message) || 'upload failed');
+        attachment = { url: data.secure_url, publicId: data.public_id, fileName: data.original_filename || file.name, mimeType: file.type, bytes: data.bytes || file.size };
+      } catch (e) {
+        console.error('Police report upload failed:', e);
+        ownerToast('Could not upload the police report. Please try again.', 'error');
+        if (btn) { btn.disabled = false; btn.innerHTML = originalHtml; }
+        return false;
+      }
     }
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sending...'; }
+    const ok = await requestOwnerAccess(ticketId, reason, attachment);
+    if (btn) { btn.disabled = false; btn.innerHTML = originalHtml; }
     if (ok) {
       // Re-render from the fresh document so the pending state is real data,
       // not an optimistic guess — a request that was recorded server-side is
       // what must be shown.
       window.openOwnerReport(ticketId);
     }
-  });
+    return ok;
+  };
+  uploadAndSend();
 }
 
 /**
@@ -2205,6 +2220,10 @@ function renderOwnerTickets(allTickets) {
     if (ownerResolvedOnly) {
       tickets = tickets.filter((t) => isApprovedTicket(t));
     }
+    // Hide HR-transferred tickets from Area Manager/RM/SM dashboard entirely.
+    if (isAreaManager()) {
+      tickets = tickets.filter((t) => t.ticketTransferTo !== 'hr');
+    }
 
     // The Resolved-only scope, kept EXPLICIT rather than left implicit in the
     // approval gate above. test/chat-ticket-mentions.test.js asserts this exact
@@ -2296,6 +2315,7 @@ function renderOwnerTickets(allTickets) {
       const pending = allRaw
         .map((doc) => normalizeTicketReport(doc))
         .filter((t) => isPendingApprovalTicket(t))
+        .filter((t) => t.ticketTransferTo !== 'hr')
         .filter((t) => {
           const branch = String(t.branch || t.branchName || '').trim();
           return allowedBranches.includes(branch);

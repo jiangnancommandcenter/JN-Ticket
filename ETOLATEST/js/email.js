@@ -895,6 +895,103 @@ async function sendTicketApprovedEmail(ticket, opts) {
         };
     }
 }
+/**
+ * Build the "ticket under investigation" notification for the requester
+ * when a superadmin transfers a ticket to HR (sensitive case). No viewing
+ * access is granted — the ticket is NOT resolved.
+ */
+function buildTicketHrTransferEmail(ticket) {
+  const label = ticketEmailLabel(ticket);
+  const dashboardUrl = resolveOwnerDashboardUrl();
+  const ticketUrl = resolveOwnerTicketUrl(label);
+  const senderName = String(emailConfigValue('senderName', 'Jiangnan Command Center'));
+
+  const headline = 'Ticket ' + label + ' is Under Investigation';
+
+  const lines = [
+    headline,
+    '',
+    '   Ticket Number:  ' + label,
+    '',
+    'Your ticket request has been received and is currently under investigation.',
+    'This case is being handled privately by our HR team.',
+    '',
+    'No viewing access is required at this time. You will be notified if',
+    'further information or action is needed from your side.',
+    '',
+    'If you have any questions, please contact HR directly.',
+    '',
+    senderName
+  ];
+  const text = lines.join('\n');
+
+  const html = [
+    '<div style="font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:15px;color:#0f172a;line-height:1.6">',
+    '<p style="margin:0 0 16px">' + escapeEmailHtml(headline) + '</p>',
+    '<p style="margin:0 0 18px"><span style="display:inline-block;padding:10px 16px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc;font-size:18px;font-weight:700;letter-spacing:0.4px">',
+    escapeEmailHtml(label),
+    '</span></p>',
+    '<p style="margin:0 0 12px">Your ticket request has been received and is currently under investigation.</p>',
+    '<p style="margin:0 0 12px">This case is being handled privately by our HR team.</p>',
+    '<p style="margin:0 0 12px">No viewing access is required at this time. You will be notified if further information or action is needed from your side.</p>',
+    '<p style="margin:0 0 12px">If you have any questions, please contact HR directly.</p>',
+    '<p style="margin:20px 0 0;color:#475569">' + escapeEmailHtml(senderName) + '</p>',
+    '</div>'
+  ].join('');
+
+  return {
+    to: resolveRecipient(ticket) || '',
+    subject: 'Ticket Under Investigation \u2014 ' + label,
+    text: text,
+    html: html,
+    ticketId: String((ticket && (ticket.id || ticket.ticketNumber)) || ''),
+    ticketNumber: label,
+    portalUrl: ticketUrl,
+    dashboardUrl: dashboardUrl,
+    senderName: senderName
+  };
+}
+
+/**
+ * Send the "ticket under investigation" notification for HR-transferred tickets.
+ * NEVER throws — always resolves with a small result object.
+ */
+async function sendTicketHrTransferEmail(ticket, opts) {
+  try {
+    if (!ticket) return { ok: false, status: 'no_ticket' };
+    if (!isEmailConfigured()) return { ok: false, status: 'not_configured' };
+
+    const message = buildTicketHrTransferEmail(ticket);
+    if (!message.to || !isValidEmail(message.to)) {
+      return { ok: false, status: 'no_recipient', to: '' };
+    }
+
+    const idToken = await getEmailCallerToken();
+    if (!idToken) {
+      return { ok: false, status: 'no_auth', to: message.to, error: 'missing_firebase_token' };
+    }
+
+    const result = await postEmailToBridge({
+      secret: String(emailConfig().secret || ''),
+      idToken: idToken,
+      ticketId: message.ticketId,
+      ticketNumber: message.ticketNumber,
+      to: message.to,
+      subject: message.subject,
+      text: message.text,
+      html: message.html,
+      sentBy: (typeof auth !== 'undefined' && auth && auth.currentUser && auth.currentUser.email) || ''
+    });
+    return Object.assign({ to: message.to }, result);
+  } catch (error) {
+    return {
+      ok: false,
+      status: 'failed',
+      error: (error && error.message) ? error.message : 'unknown_error'
+    };
+  }
+}
+
 
 /**
  * Dev helper — run this once from the browser console on main.html (or from
@@ -949,11 +1046,13 @@ window.EmailService = {
     verifyOwnerDashboardLink: verifyOwnerDashboardLink,
     ticketEmailLabel: ticketEmailLabel,
     buildTicketApprovedEmail: buildTicketApprovedEmail,
+    buildTicketHrTransferEmail: buildTicketHrTransferEmail,
     buildAccessApprovedEmail: buildAccessApprovedEmail,
     shouldMentionViewingWindow: shouldMentionViewingWindow,
     shouldSkipApprovalEmail: shouldSkipApprovalEmail,
     getEmailCallerToken: getEmailCallerToken,
     sendTicketApprovedEmail: sendTicketApprovedEmail,
+    sendTicketHrTransferEmail: sendTicketHrTransferEmail,
     sendAccessApprovedEmail: sendAccessApprovedEmail
 };
 window.sendTestTicketEmail = sendTestTicketEmail;
