@@ -53,7 +53,10 @@
         <form id="registerForm" style="display:none;">
             <input id="regName" type="text" placeholder="Full Name" required autocomplete="name">
             <input id="regEmail" type="email" placeholder="Work Email" required autocomplete="email">
-            <input id="regPassword" type="password" placeholder="Password (min 6 characters)" required autocomplete="new-password">
+            <div class="pw-wrap">
+                <input id="regPassword" type="password" placeholder="Password (min 6 characters)" required autocomplete="new-password">
+                <button type="button" class="pw-toggle" id="regPwToggle" aria-label="Show password" title="Show / hide password"><i class="far fa-eye"></i></button>
+            </div>
             <div class="reg-label">Select branches you need access to:</div>
             <div id="regBranchCheckboxes" class="branch-checkbox-grid">
                 <p style="font-size:13px;color:#94a3b8;">Loading branches...</p>
@@ -232,6 +235,18 @@
                     var icon = pwToggle.querySelector('i');
                     if (icon) icon.className = show ? 'far fa-eye-slash' : 'far fa-eye';
                     pwToggle.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+                });
+            }
+
+            var regPwInput = document.getElementById('regPassword');
+            var regPwToggle = document.getElementById('regPwToggle');
+            if (regPwInput && regPwToggle) {
+                regPwToggle.addEventListener('click', function () {
+                    var show = regPwInput.type === 'password';
+                    regPwInput.type = show ? 'text' : 'password';
+                    var icon = regPwToggle.querySelector('i');
+                    if (icon) icon.className = show ? 'far fa-eye-slash' : 'far fa-eye';
+                    regPwToggle.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
                 });
             }
 

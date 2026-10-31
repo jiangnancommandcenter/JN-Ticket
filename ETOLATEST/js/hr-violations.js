@@ -57,6 +57,7 @@
     const PAGE_SIZE = 20;
 
     let allViolations = [];       // every report transferred to HR
+    let previousHrViolations = []; // for detecting newly transferred reports
     let filtered = [];
     let page = 1;
     let currentId = null;
@@ -433,7 +434,17 @@
 
         service.listenTransferredViolations(
             (violations) => {
-                allViolations = violations || [];
+                const list = violations || [];
+                if (previousHrViolations.length > 0) {
+                    const prevIds = new Set(previousHrViolations.map(v => v.id));
+                    for (const v of list) {
+                        if (!prevIds.has(v.id) && typeof window.notifyViolationTransferred === 'function') {
+                            window.notifyViolationTransferred(v);
+                        }
+                    }
+                }
+                previousHrViolations = list.map(v => ({ ...v }));
+                allViolations = list;
                 populateStoreFilter();
                 applyFilters();
                 // A report that was reverted while its modal was open must not

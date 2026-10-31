@@ -2631,6 +2631,7 @@ function renderOwnerTickets(allTickets) {
 
 let ownerTicketListenerStarted = false;
 let ownerAllTicketsCache = [];
+let previousOwnerTickets = [];
 
 /**
  * Initial load used only as a fallback when the realtime listener is unavailable.
@@ -2678,8 +2679,22 @@ function setupOwnerTicketListener() {
 
   window.firestoreService.listenTickets(
     (allTickets) => {
-      ownerAllTicketsCache = allTickets;
-      renderOwnerTickets(allTickets);
+      const list = allTickets || [];
+      if (previousOwnerTickets.length > 0) {
+        const prevMap = new Map(previousOwnerTickets.map(t => [t.id, t]));
+        for (const t of list) {
+          const prev = prevMap.get(t.id);
+          if (prev &&
+              (prev.ticketTransferTo || '') !== 'hr' &&
+              (t.ticketTransferTo || '') === 'hr' &&
+              typeof window.notifyTicketStatusChange === 'function') {
+            window.notifyTicketStatusChange(prev, t);
+          }
+        }
+      }
+      previousOwnerTickets = list.map(t => ({ ...t }));
+      ownerAllTicketsCache = list;
+      renderOwnerTickets(list);
       renderKpiCards();
       // The approval-email deep link can only be resolved once the real ticket
       // list has arrived - the branch allowlist AND the approved-only filter
