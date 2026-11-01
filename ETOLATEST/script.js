@@ -49,6 +49,22 @@ const MAX_ATTACHMENT_SIZE_MB = 100;
 const VIOLATION_CLOUDINARY_CLOUD_NAME = 'gbd9cguj';//2ND CLOUDINARY VIOLATION
 const VIOLATION_CLOUDINARY_UPLOAD_PRESET = 'jnviolation';
 
+// Generate a Cloudinary-safe public_id from a filename that guarantees
+// uniqueness even when two files share the same base name but have
+// different extensions (e.g. "0109.mp4" + "0109.png"). Cloudinary identifies
+// assets by public_id, and same-public_id uploads replace each other by
+// default — so "0109" would collide. We append a short random suffix so
+// every file gets its own asset while keeping the name readable.
+// Returns e.g. "0109-a1b2c3d4" (extension stripped, Cloudinary adds the
+// detected format automatically).
+function makeUniquePublicId(fileName) {
+    const dotIdx = String(fileName || '').lastIndexOf('.');
+    const base = dotIdx > 0 ? String(fileName).slice(0, dotIdx) : String(fileName);
+    const safeBase = base.replace(/[^A-Za-z0-9 _.\-]/g, ' ').replace(/\s+/g, ' ').trim() || 'file';
+    const suffix = Math.random().toString(36).slice(2, 10);
+    return safeBase + '-' + suffix;
+}
+
 // The report letterhead banner (URL + aspect) now lives in
 // js/violation-report.js, which owns the whole "COMMAND CENTER REPORT"
 // layout for both the command center and the HR dashboard.
@@ -6634,6 +6650,7 @@ async function cloudinaryUpload(file, ticketId, onProgress) {
             formData.append('file', file);
             formData.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
             formData.append('folder', 'tickets/' + ticketId);
+            formData.append('public_id', makeUniquePublicId(file.name));
 
             const xhr = new XMLHttpRequest();
             xhr.open('POST', `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/auto/upload`);
@@ -6674,6 +6691,7 @@ async function cloudinaryUpload(file, ticketId, onProgress) {
     formData.append('file', file);
     formData.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
     formData.append('folder', 'tickets/' + ticketId);
+    formData.append('public_id', makeUniquePublicId(file.name));
     const res = await fetch(
         `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/auto/upload`,
         { method: 'POST', body: formData }
@@ -8059,22 +8077,18 @@ async function violationCloudinaryUpload(file, folderPath, onProgress) {
     if (!isViolationCloudinaryConfigured()) {
         throw new Error('Violations Cloudinary storage is not configured.');
     }
-    // Keep the original filename WITHOUT its extension — Cloudinary appends
-    // the detected format automatically (e.g. "binalot.jpg").
-    const dotIdx = file.name.lastIndexOf('.');
-    const rawBaseName = dotIdx > 0 ? file.name.slice(0, dotIdx) : file.name;
-    const baseName = violationSanitizeSegment(rawBaseName);
+    // Keep the original filename as a readable base, but add a short random
+    // suffix so same-named files with different extensions (e.g. "0109.mp4" +
+    // "0109.png") each get their own Cloudinary asset instead of overwriting
+    // each other. Cloudinary appends the detected format automatically.
+    const uniquePublicId = makeUniquePublicId(file.name);
 
     const formData = new FormData();
     formData.append('file', file);
     formData.append('upload_preset', VIOLATION_CLOUDINARY_UPLOAD_PRESET);
     formData.append('asset_folder', folderPath);
     formData.append('folder', folderPath);
-    formData.append('public_id', baseName);
-    // NOTE: `overwrite`/`invalidate` are signed-only params — sending them with
-    // an unsigned preset makes the whole upload fail ("Overwrite parameter is
-    // not allowed..."). Same-public_id uploads already replace the asset by
-    // default, so re-generating the report still replaces the old version.
+    formData.append('public_id', uniquePublicId);
     const res = await fetch(
         'https://api.cloudinary.com/v1_1/' + VIOLATION_CLOUDINARY_CLOUD_NAME + '/auto/upload',
         { method: 'POST', body: formData }

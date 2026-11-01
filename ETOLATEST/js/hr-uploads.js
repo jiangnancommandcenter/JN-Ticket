@@ -115,6 +115,18 @@
             && UPLOAD_PRESET && UPLOAD_PRESET !== 'YOUR_UPLOAD_PRESET';
     }
 
+    // Generate a Cloudinary-safe public_id that guarantees uniqueness even when
+    // two files share the same base name but have different extensions
+    // (e.g. "0109.mp4" + "0109.png"). Same-public_id uploads replace each
+    // other by default, so we append a short random suffix.
+    function makeUniquePublicId(fileName) {
+        var dotIdx = String(fileName || '').lastIndexOf('.');
+        var base = dotIdx > 0 ? String(fileName).slice(0, dotIdx) : String(fileName);
+        var safeBase = base.replace(/[^A-Za-z0-9 _.\\-]/g, ' ').replace(/\s+/g, ' ').trim() || 'file';
+        var suffix = Math.random().toString(36).slice(2, 10);
+        return safeBase + '-' + suffix;
+    }
+
     function uploadToCloudinary(file, onProgress) {
         if (!isCloudinaryConfigured()) throw new Error('Cloudinary is not configured.');
         var formData = new FormData();
@@ -122,6 +134,9 @@
         formData.append('upload_preset', UPLOAD_PRESET);
         // Resource type: 'auto' lets Cloudinary detect image vs raw (PDF, DOC, etc.)
         formData.append('resource_type', 'auto');
+        // Unique public_id so same-named files with different extensions don't
+        // overwrite each other in Cloudinary.
+        formData.append('public_id', makeUniquePublicId(file.name));
         return new Promise(function (resolve, reject) {
             var xhr = new XMLHttpRequest();
             if (onProgress && xhr.upload) {
