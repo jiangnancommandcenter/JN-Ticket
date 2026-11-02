@@ -8196,12 +8196,12 @@ function autoRevertExpiredTransfers() {
     for (const v of allViolations) {
         if (v.managerStatus !== 'transferred') continue;
         // Expiry time when the Area Manager opened the report.
-        // Prefer managerExpiresAtMs (client-computed: open + 1 min).
-        // Fall back to managerOpenedAt + 60000 if ms stamp missing.
+        // Prefer managerExpiresAtMs (client-computed: open + 24 hours).
+        // Fall back to managerOpenedAt + 24 * 60 * 60 * 1000 if ms stamp missing.
         let expiresAt = v.managerExpiresAtMs || 0;
         if (expiresAt === 0 && v.managerOpenedAt) {
             const openedAt = v.managerOpenedAt.toDate?.()?.getTime() || 0;
-            if (openedAt > 0) expiresAt = openedAt + 60 * 1000;
+            if (openedAt > 0) expiresAt = openedAt + 24 * 60 * 60 * 1000;
         }
         if (expiresAt > 0 && now >= expiresAt) {
             firestoreService.revertViolationTransferFromAreaManager(

@@ -373,15 +373,18 @@ assert(/^https?:\/\/\S*ownerdashboard\.html\?ticket=/m.test(message.text),
     'the plain-text URL must sit on its own line so it gets auto-linkified');
 assert.strictEqual(message.ticketId, 'bnw-tix007');
 
-// Time-compressed testing window (1 minute) → the promise must NOT be shown.
-assert.strictEqual(w.TRACKING_ACCESS_WINDOW_MS, 60 * 1000,
-    'expected the Tier-2 1-minute window from firebase.js (revert to 2 days before deploying)');
+// Production window (24 hours). The approval email now advertises the viewing
+// window ("starts when you first open … stays available for 24 hours") because
+// the time-compression guard no longer suppresses it.
+assert.strictEqual(w.TRACKING_ACCESS_WINDOW_MS, 24 * 60 * 60 * 1000,
+    'expected the 24-hour production window from firebase.js');
 assert.strictEqual(w.EmailService.shouldMentionViewingWindow(
-    ticket({ approvalStatus: 'approved', accessExpiresAt: new Date(Date.now() + 30 * 1000) })), false,
-    'a 1-minute window must never be advertised in a real email');
-assert(message.text.indexOf('Viewing access') === -1);
+    ticket({ approvalStatus: 'approved', accessExpiresAt: new Date(Date.now() - 30 * 1000) })), false,
+    'an expired ticket must never mention a viewing window in a real email');
+assert(message.text.indexOf('Viewing access') > -1,
+    'the production approval email must advertise the viewing window');
 
-// Production window (2 days). ⚠️ THE SENTENCE NO LONGER CARRIES A DATE.
+// Production window (24 hours). THE SENTENCE NO LONGER CARRIES A DATE.
 // The window starts when the requester FIRST OPENS the ticket, so at the moment
 // this email is built there is no deadline to quote. Promising "available until
 // <date>" here would promise a value the system no longer computes at approval

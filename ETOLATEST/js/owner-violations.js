@@ -255,7 +255,7 @@
 
     /** True when the Area Manager's viewing window has expired.
      *  The window starts when managerExpiresAtMs is stamped (openModal) and
-     *  lasts 1 minute. After that the report disappears from this list —
+     *  lasts 24 hours. After that the report disappears from this list —
      *  exactly like an expired ticket vanishes from the tickets tab. */
     function isManagerViewingExpired(v) {
         if (v.managerStatus !== 'transferred') return false;
@@ -527,9 +527,9 @@
                 closeModal();
                 return false;
             } else {
-                // No valid expiry — start a fresh 1-minute deadline.
+                // No valid expiry — start a fresh 24-hour deadline.
                 countdownDeadlineFor = v.id;
-                countdownDeadline = now + 60 * 1000;
+                countdownDeadline = now + 24 * 60 * 60 * 1000;
                 if (v) v.managerExpiresAtMs = countdownDeadline;
                 persistCountdown();
                 injectCountdownBar();
@@ -614,9 +614,9 @@
         }
     }
 
-    /** Start the 1-minute countdown for the given report. */
+    /** Start the 24-hour countdown for the given report. */
     function startCountdownFor(violationId) {
-        countdownDeadline = Date.now() + 60 * 1000; // 1 minute from now
+        countdownDeadline = Date.now() + 24 * 60 * 60 * 1000; // 24 hours from now
 
         // No Firestore stamp — Area Manager cannot write to violations.
         // The expiry deadline lives in localStorage only. The actual revert
