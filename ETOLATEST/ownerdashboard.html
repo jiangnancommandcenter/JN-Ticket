@@ -13,6 +13,10 @@
     <meta name="theme-color" id="themeColorMeta" content="#72bf6a">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- Firebase + Google APIs: warm up connections early so the SDKs load faster -->
+    <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://firestore.googleapis.com" crossorigin>
+    <link rel="preconnect" href="https://securetoken.googleapis.com" crossorigin>
     <!-- Chart.js (same version as main.html) -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <link rel="stylesheet" href="style.css">
@@ -1765,6 +1769,9 @@
                 <button type="button" class="btn btn-sm btn-primary" id="btnHrViolationReport" title="Download the report PDF to your computer">
                     <i class="fas fa-file-pdf"></i> <span>Download Report</span>
                 </button>
+                <button type="button" class="btn btn-sm btn-success u-hidden" id="btnHrTransferToManager" style="display:none;" title="Send this report to the Area Manager so they can review it for their branches">
+                    <i class="fas fa-share-nodes" id="btnHrTransferToManagerIcon"></i> <span id="btnHrTransferToManagerLabel">Transfer to Area Manager</span>
+                </button>
                 <button class="modal-close" id="closeHrViolationModal">&times;</button>
             </div>
             <div class="modal-body">
@@ -1920,3 +1927,4 @@
     <script src="js/command-palette.js"></script>
 </body>
 </html>
+

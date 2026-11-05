@@ -6641,13 +6641,90 @@ window.removeTicketAttachment = async function(ticketId, publicId) {
     }
 };
 
+async function compressVideoBeforeUpload(file) {
+    if (!file.type.startsWith('video/')) return file;
+    if (file.size <= 5 * 1024 * 1024) return file;
+
+    try {
+        const video = document.createElement('video');
+        video.muted = true;
+        video.playsInline = true;
+        video.src = URL.createObjectURL(file);
+
+        // ⚠️ Wait for metadata so videoWidth/videoHeight are populated.
+        // Without this they are 0, canvas is 0×0, nothing gets drawn,
+        // and the recorder stops almost immediately.
+        await new Promise((resolve) => {
+            if (video.readyState >= 1) resolve();
+            else video.onloadedmetadata = resolve;
+        });
+
+        const canvas = document.createElement('canvas');
+        const scale = Math.min(1, 1280 / video.videoWidth, 720 / video.videoHeight);
+        canvas.width = Math.floor(video.videoWidth * scale);
+        canvas.height = Math.floor(video.videoHeight * scale);
+        const ctx = canvas.getContext('2d');
+
+        const stream = canvas.captureStream(30);
+        const recorder = new MediaRecorder(stream, {
+            mimeType: 'video/webm; codecs=vp9',
+            videoBitsPerSecond: 1200000
+        });
+
+        const chunks = [];
+        recorder.ondataavailable = e => chunks.push(e.data);
+
+        const duration = video.duration;
+        let finished = false;
+        const startTime = performance.now();
+
+        const draw = () => {
+            if (finished) return;
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const elapsed = (performance.now() - startTime) / 1000;
+            if (elapsed >= duration || video.ended) {
+                finished = true;
+                recorder.stop();
+            } else {
+                requestAnimationFrame(draw);
+            }
+        };
+
+        await new Promise((resolve, reject) => {
+            recorder.onstop = resolve;
+            recorder.onerror = reject;
+            recorder.start();
+            video.play().catch(() => { /* autoplay may be blocked, frames still draw */ });
+            draw();
+        });
+
+        const blob = new Blob(chunks, { type: 'video/webm' });
+        URL.revokeObjectURL(video.src);
+        video.pause();
+
+        const compressed = new File([blob], file.name, {
+            type: 'video/webm',
+            lastModified: file.lastModified
+        });
+
+        console.log('[VideoCompress] Compressed:', file.name,
+            '→', (file.size / 1024 / 1024).toFixed(2), 'MB',
+            '→', (compressed.size / 1024 / 1024).toFixed(2), 'MB');
+        return compressed.size < file.size ? compressed : file;
+    } catch (e) {
+        console.warn('[VideoCompress] Skipping compression:', e.message);
+        return file;
+    }
+}
+
 async function cloudinaryUpload(file, ticketId, onProgress) {
+    const uploadFile = await compressVideoBeforeUpload(file);
     // Use XMLHttpRequest when a progress callback is supplied so we can report
     // real upload percentage (fetch does not expose upload progress).
     if (typeof onProgress === 'function') {
         return new Promise((resolve, reject) => {
             const formData = new FormData();
-            formData.append('file', file);
+            formData.append('file', uploadFile);
             formData.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
             formData.append('folder', 'tickets/' + ticketId);
             formData.append('public_id', makeUniquePublicId(file.name));
@@ -6688,10 +6765,10 @@ async function cloudinaryUpload(file, ticketId, onProgress) {
 
     // Fallback: original fetch-based upload (no progress).
     const formData = new FormData();
-    formData.append('file', file);
+    formData.append('file', uploadFile);
     formData.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
     formData.append('folder', 'tickets/' + ticketId);
-    formData.append('public_id', makeUniquePublicId(file.name));
+    formData.append('public_id', makeUniquePublicId(uploadFile.name));
     const res = await fetch(
         `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/auto/upload`,
         { method: 'POST', body: formData }
@@ -8077,14 +8154,16 @@ async function violationCloudinaryUpload(file, folderPath, onProgress) {
     if (!isViolationCloudinaryConfigured()) {
         throw new Error('Violations Cloudinary storage is not configured.');
     }
+    const uploadFile = await compressVideoBeforeUpload(file);
+
     // Keep the original filename as a readable base, but add a short random
     // suffix so same-named files with different extensions (e.g. "0109.mp4" +
     // "0109.png") each get their own Cloudinary asset instead of overwriting
     // each other. Cloudinary appends the detected format automatically.
-    const uniquePublicId = makeUniquePublicId(file.name);
+    const uniquePublicId = makeUniquePublicId(uploadFile.name);
 
     const formData = new FormData();
-    formData.append('file', file);
+    formData.append('file', uploadFile);
     formData.append('upload_preset', VIOLATION_CLOUDINARY_UPLOAD_PRESET);
     formData.append('asset_folder', folderPath);
     formData.append('folder', folderPath);
@@ -8109,7 +8188,7 @@ async function violationCloudinaryUpload(file, folderPath, onProgress) {
         resource_type: data.resource_type,
         width: data.width || null,
         height: data.height || null,
-        bytes: data.bytes,
+        bytes: uploadFile.size,
         name: file.name,
         uploadedAt: new Date().toISOString()
     };

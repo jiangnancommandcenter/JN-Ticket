@@ -13,9 +13,11 @@
     <meta name="theme-color" id="themeColorMeta" content="#72bf6a">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
+    <!-- Firebase + Google APIs: warm up connections early so the SDKs load faster -->
+    <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://firestore.googleapis.com" crossorigin>
+    <link rel="preconnect" href="https://securetoken.googleapis.com" crossorigin>
+
     <link rel="stylesheet" href="style.css">
     <!-- Theme System: dark mode + shared components (loaded AFTER style.css) -->
     <link rel="stylesheet" href="theme.css">
@@ -1313,6 +1315,9 @@
 
         <!-- Refresh-state manager: keeps the user on the current page after F5 -->
     <script src="js/refresh-state.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
     <script src="firebase.js"></script>
     <script>
         (function() {

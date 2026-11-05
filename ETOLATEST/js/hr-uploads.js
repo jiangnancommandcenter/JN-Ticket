@@ -127,10 +127,87 @@
         return safeBase + '-' + suffix;
     }
 
-    function uploadToCloudinary(file, onProgress) {
+    async function compressVideoBeforeUpload(file) {
+        if (!file.type.startsWith('video/')) return file;
+        if (file.size <= 5 * 1024 * 1024) return file;
+
+        try {
+            var video = document.createElement('video');
+            video.muted = true;
+            video.playsInline = true;
+            video.src = URL.createObjectURL(file);
+
+            // ⚠️ Wait for metadata so videoWidth/videoHeight are populated.
+            // Without this they are 0, canvas is 0×0, nothing gets drawn,
+            // and the recorder stops almost immediately.
+            await new Promise(function (resolve) {
+                if (video.readyState >= 1) resolve();
+                else video.onloadedmetadata = resolve;
+            });
+
+            var canvas = document.createElement('canvas');
+            var scale = Math.min(1, 1280 / video.videoWidth, 720 / video.videoHeight);
+            canvas.width = Math.floor(video.videoWidth * scale);
+            canvas.height = Math.floor(video.videoHeight * scale);
+            var ctx = canvas.getContext('2d');
+
+            var stream = canvas.captureStream(30);
+            var recorder = new MediaRecorder(stream, {
+                mimeType: 'video/webm; codecs=vp9',
+                videoBitsPerSecond: 1200000
+            });
+
+            var chunks = [];
+            recorder.ondataavailable = function (e) { chunks.push(e.data); };
+
+            var duration = video.duration;
+            var finished = false;
+            var startTime = performance.now();
+
+            var draw = function () {
+                if (finished) return;
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                var elapsed = (performance.now() - startTime) / 1000;
+                if (elapsed >= duration || video.ended) {
+                    finished = true;
+                    recorder.stop();
+                } else {
+                    requestAnimationFrame(draw);
+                }
+            };
+
+            await new Promise(function (resolve, reject) {
+                recorder.onstop = resolve;
+                recorder.onerror = reject;
+                recorder.start();
+                video.play().catch(function () { /* autoplay may be blocked */ });
+                draw();
+            });
+
+            var blob = new Blob(chunks, { type: 'video/webm' });
+            URL.revokeObjectURL(video.src);
+            video.pause();
+
+            var compressed = new File([blob], file.name, {
+                type: 'video/webm',
+                lastModified: file.lastModified
+            });
+
+            console.log('[VideoCompress] Compressed:', file.name,
+                '→', (file.size / 1024 / 1024).toFixed(2), 'MB',
+                '→', (compressed.size / 1024 / 1024).toFixed(2), 'MB');
+            return compressed.size < file.size ? compressed : file;
+        } catch (e) {
+            console.warn('[VideoCompress] Skipping compression:', e.message);
+            return file;
+        }
+    }
+
+    async function uploadToCloudinary(file, onProgress) {
         if (!isCloudinaryConfigured()) throw new Error('Cloudinary is not configured.');
+        var uploadFile = await compressVideoBeforeUpload(file);
         var formData = new FormData();
-        formData.append('file', file);
+        formData.append('file', uploadFile);
         formData.append('upload_preset', UPLOAD_PRESET);
         // Resource type: 'auto' lets Cloudinary detect image vs raw (PDF, DOC, etc.)
         formData.append('resource_type', 'auto');
