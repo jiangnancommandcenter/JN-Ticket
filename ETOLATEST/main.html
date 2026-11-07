@@ -1862,6 +1862,16 @@
             </div>
             <div class="modal-body">
                 <p class="confirm-modal-message" id="confirmModalMessage">Are you sure?</p>
+                <!-- Type-to-confirm section for ticket deletion (hidden by default) -->
+                <div id="confirmTypingSection" class="u-hidden" style="margin-top:16px;padding:12px;background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:var(--radius-md);">
+                    <p style="margin:0 0 10px;font-size:0.85rem;color:var(--text-secondary);">Type the ticket number below to confirm deletion:</p>
+                    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;">
+                        <span id="confirmTicketNumber" style="font-family:monospace;font-weight:600;letter-spacing:0.5px;background:var(--bg-primary);padding:6px 10px;border:1px solid var(--border-color);border-radius:4px;flex:1;"></span>
+                        <button type="button" id="copyTicketNumberBtn" class="btn btn-sm" style="padding:6px 10px;font-size:0.8rem;"><i class="fas fa-copy"></i> Copy</button>
+                    </div>
+                    <input type="text" id="confirmTypingInput" maxlength="40" autocomplete="off" spellcheck="false" style="width:100%;padding:10px 12px;background:var(--bg-input);border:1px solid var(--border-color);border-radius:var(--radius-md);color:var(--text-primary);font-family:inherit;font-size:0.9rem;" placeholder="Type ticket number here...">
+                    <p id="confirmTypingError" class="u-hidden" style="margin:6px 0 0;color:var(--color-danger);font-size:0.8rem;"><i class="fas fa-exclamation-circle"></i> Ticket number doesn't match.</p>
+                </div>
                 <div class="form-actions" style="margin-top:24px;">
                     <button type="button" class="btn btn-secondary" id="cancelConfirmBtn">Cancel</button>
                     <button type="button" class="btn btn-primary" id="acceptConfirmBtn"><i class="fas fa-check"></i> Confirm</button>

@@ -693,6 +693,8 @@ let currentRejectTicketId = null;
 let currentApprovalTicketId = null;
 let approvalPage = 1;
 let filteredApprovalTickets = [];
+let approvalPendingFiles = [];
+let editApprovalPendingFiles = [];
 
 // Add Status Modal
 const addModal = $('#addModal');
@@ -885,7 +887,8 @@ function showConfirmDialog(options = {}) {
         icon = 'fa-question-circle',
         reason = '',
         reasonLabel = 'Reason',
-        reasonMeta = ''
+        reasonMeta = '',
+        confirmByTyping = null
     } = options;
 
     return new Promise((resolve) => {
@@ -898,6 +901,13 @@ function showConfirmDialog(options = {}) {
         const cancelBtn = document.getElementById('cancelConfirmBtn');
         const iconEl = document.getElementById('confirmModalIcon');
 
+        // Type-to-confirm elements (ticket deletion only)
+        const typingSection = document.getElementById('confirmTypingSection');
+        const typingInput = document.getElementById('confirmTypingInput');
+        const typingError = document.getElementById('confirmTypingError');
+        const ticketNumberEl = document.getElementById('confirmTicketNumber');
+        const copyTicketBtn = document.getElementById('copyTicketNumberBtn');
+
         if (titleEl) titleEl.textContent = title;
         if (messageEl) {
             messageEl.innerHTML = message;
@@ -909,6 +919,46 @@ function showConfirmDialog(options = {}) {
             iconEl.className = 'fas ' + icon + ' confirm-modal-icon';
             iconEl.style.color = danger ? 'var(--color-danger)' : 'var(--color-warning)';
         }
+
+        // ---- Type-to-confirm setup ----
+        const isTypingConfirm = confirmByTyping !== null;
+        if (typingSection) {
+            if (isTypingConfirm) {
+                typingSection.classList.remove('u-hidden');
+                if (ticketNumberEl) ticketNumberEl.textContent = confirmByTyping;
+                if (typingInput) typingInput.value = '';
+                if (typingError) typingError.classList.add('u-hidden');
+                if (acceptBtn) acceptBtn.disabled = true;
+
+                // Copy ticket number button
+                if (copyTicketBtn) {
+                    copyTicketBtn.onclick = async function () {
+                        try {
+                            await navigator.clipboard.writeText(String(confirmByTyping));
+                            var orig = copyTicketBtn.innerHTML;
+                            copyTicketBtn.innerHTML = '<i class="fas fa-check"></i> Copied!';
+                            setTimeout(function () { copyTicketBtn.innerHTML = orig; }, 1500);
+                        } catch (e) {
+                            // Clipboard unavailable — user can still type manually
+                        }
+                    };
+                }
+
+                // Validate input on every keystroke
+                if (typingInput) {
+                    typingInput.oninput = function () {
+                        var match = String(typingInput.value || '').trim() === String(confirmByTyping);
+                        if (acceptBtn) acceptBtn.disabled = !match;
+                        if (typingError) typingError.classList.toggle('u-hidden', match);
+                    };
+                    typingInput.focus();
+                }
+            } else {
+                typingSection.classList.add('u-hidden');
+                if (acceptBtn) acceptBtn.disabled = false;
+            }
+        }
+
         if (acceptBtn) {
             acceptBtn.className = 'btn ' + (danger ? 'btn-danger' : 'btn-primary');
             acceptBtn.innerHTML = '<i class="fas ' + (danger ? 'fa-trash-alt' : 'fa-check') + '"></i> ' + confirmText;
@@ -4687,7 +4737,11 @@ window.openApprovalDetails = function(id) {
 
     renderApprovalAttachments(ticket);
     if (approvalUploadStatus) approvalUploadStatus.textContent = '';
-    if (approvalAttachmentInput) approvalAttachmentInput.value = '';
+    if (approvalAttachmentInput) {
+        approvalAttachmentInput.value = '';
+        approvalPendingFiles = [];
+        renderUploadFileList(approvalAttachmentInput.closest('.upload-widget'), []);
+    }
 
     // Footer actions only appear for tickets still awaiting final approval,
     // or for approved tickets whose window lapsed AND that somebody actually
@@ -4836,6 +4890,8 @@ if (!isCloudinaryConfigured()) {
 
             if (approvalUploadStatus) approvalUploadStatus.textContent = `Uploaded ${uploaded.length} file(s).`;
             if (input) input.value = '';
+            approvalPendingFiles = [];
+            renderUploadFileList(widget, []);
             setTimeout(() => { if (approvalUploadStatus) approvalUploadStatus.textContent = ''; }, 4000);
         } catch (error) {
             console.error('Approval attachment upload error:', error);
@@ -4860,7 +4916,11 @@ window.openEditApprovalModal = function(id) {
 
     const resolution = ticket.resolution || {};
     if (editApprovalNotes) editApprovalNotes.value = resolution.notes || ticket.resolutionNotes || '';
-    if (editApprovalAttachmentInput) editApprovalAttachmentInput.value = '';
+    if (editApprovalAttachmentInput) {
+        editApprovalAttachmentInput.value = '';
+        editApprovalPendingFiles = [];
+        renderUploadFileList(editApprovalAttachmentInput.closest('.upload-widget'), []);
+    }
     if (editApprovalUploadStatus) editApprovalUploadStatus.textContent = '';
     if (editApprovalError) editApprovalError.style.display = 'none';
 
@@ -4955,6 +5015,8 @@ const input = editApprovalAttachmentInput;
 
             if (editApprovalUploadStatus) editApprovalUploadStatus.textContent = `Uploaded ${uploaded.length} file(s).`;
             if (input) input.value = '';
+            editApprovalPendingFiles = [];
+            renderUploadFileList(widget, []);
             setTimeout(() => { if (editApprovalUploadStatus) editApprovalUploadStatus.textContent = ''; }, 4000);
         } catch (error) {
             console.error('Edit approval attachment upload error:', error);
@@ -6303,10 +6365,11 @@ window.reopenTicket = async function(id) {
 window.deleteTicket = async function(id) {
     const confirmed = await showConfirmDialog({
         title: 'Delete Ticket',
-        message: 'Are you sure you want to delete this ticket?',
+        message: 'Type the ticket number below to confirm permanent deletion.',
         confirmText: 'Delete',
         danger: true,
-        icon: 'fa-trash-alt'
+        icon: 'fa-trash-alt',
+        confirmByTyping: id
     });
     if (!confirmed) return;
     try {
@@ -6641,90 +6704,13 @@ window.removeTicketAttachment = async function(ticketId, publicId) {
     }
 };
 
-async function compressVideoBeforeUpload(file) {
-    if (!file.type.startsWith('video/')) return file;
-    if (file.size <= 5 * 1024 * 1024) return file;
-
-    try {
-        const video = document.createElement('video');
-        video.muted = true;
-        video.playsInline = true;
-        video.src = URL.createObjectURL(file);
-
-        // ⚠️ Wait for metadata so videoWidth/videoHeight are populated.
-        // Without this they are 0, canvas is 0×0, nothing gets drawn,
-        // and the recorder stops almost immediately.
-        await new Promise((resolve) => {
-            if (video.readyState >= 1) resolve();
-            else video.onloadedmetadata = resolve;
-        });
-
-        const canvas = document.createElement('canvas');
-        const scale = Math.min(1, 1280 / video.videoWidth, 720 / video.videoHeight);
-        canvas.width = Math.floor(video.videoWidth * scale);
-        canvas.height = Math.floor(video.videoHeight * scale);
-        const ctx = canvas.getContext('2d');
-
-        const stream = canvas.captureStream(30);
-        const recorder = new MediaRecorder(stream, {
-            mimeType: 'video/webm; codecs=vp9',
-            videoBitsPerSecond: 1200000
-        });
-
-        const chunks = [];
-        recorder.ondataavailable = e => chunks.push(e.data);
-
-        const duration = video.duration;
-        let finished = false;
-        const startTime = performance.now();
-
-        const draw = () => {
-            if (finished) return;
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            const elapsed = (performance.now() - startTime) / 1000;
-            if (elapsed >= duration || video.ended) {
-                finished = true;
-                recorder.stop();
-            } else {
-                requestAnimationFrame(draw);
-            }
-        };
-
-        await new Promise((resolve, reject) => {
-            recorder.onstop = resolve;
-            recorder.onerror = reject;
-            recorder.start();
-            video.play().catch(() => { /* autoplay may be blocked, frames still draw */ });
-            draw();
-        });
-
-        const blob = new Blob(chunks, { type: 'video/webm' });
-        URL.revokeObjectURL(video.src);
-        video.pause();
-
-        const compressed = new File([blob], file.name, {
-            type: 'video/webm',
-            lastModified: file.lastModified
-        });
-
-        console.log('[VideoCompress] Compressed:', file.name,
-            '→', (file.size / 1024 / 1024).toFixed(2), 'MB',
-            '→', (compressed.size / 1024 / 1024).toFixed(2), 'MB');
-        return compressed.size < file.size ? compressed : file;
-    } catch (e) {
-        console.warn('[VideoCompress] Skipping compression:', e.message);
-        return file;
-    }
-}
-
 async function cloudinaryUpload(file, ticketId, onProgress) {
-    const uploadFile = await compressVideoBeforeUpload(file);
     // Use XMLHttpRequest when a progress callback is supplied so we can report
     // real upload percentage (fetch does not expose upload progress).
     if (typeof onProgress === 'function') {
         return new Promise((resolve, reject) => {
             const formData = new FormData();
-            formData.append('file', uploadFile);
+            formData.append('file', file);
             formData.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
             formData.append('folder', 'tickets/' + ticketId);
             formData.append('public_id', makeUniquePublicId(file.name));
@@ -6765,10 +6751,10 @@ async function cloudinaryUpload(file, ticketId, onProgress) {
 
     // Fallback: original fetch-based upload (no progress).
     const formData = new FormData();
-    formData.append('file', uploadFile);
+    formData.append('file', file);
     formData.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
     formData.append('folder', 'tickets/' + ticketId);
-    formData.append('public_id', makeUniquePublicId(uploadFile.name));
+    formData.append('public_id', makeUniquePublicId(file.name));
     const res = await fetch(
         `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/auto/upload`,
         { method: 'POST', body: formData }
@@ -6846,6 +6832,47 @@ function validateUploadFiles(files) {
         if (!sizeOk) return { ok: false, message: `"${file.name}" exceeds ${MAX_ATTACHMENT_SIZE_MB}MB.` };
     }
     return { ok: true, message: '' };
+}
+
+/**
+ * Stage files for an approval dropzone, accumulating across multiple
+ * drag-drops / picker selections instead of replacing the previous set.
+ * Newly added files are appended (deduped by name+size), the widget's
+ * <input type="file"> is synced to the full pending array via DataTransfer so
+ * the Upload button uploads everything staged, and the file list is rendered
+ * with remove buttons. Removing a file deletes it from the pending array and
+ * re-syncs the input.
+ * @param {Array} pending   the pending-file array this widget owns
+ * @param {HTMLElement} widget  root `.upload-widget` element
+ * @param {HTMLInputElement} input  the widget's <input type="file">
+ * @param {FileList} files  newly selected/dropped files
+ */
+function addPendingFiles(pending, widget, input, files) {
+    const validation = validateUploadFiles(files);
+    if (!validation.ok) {
+        const statusEl = widget.querySelector('.attachment-upload-status');
+        if (statusEl) { statusEl.textContent = validation.message; statusEl.classList.add('error'); }
+        return;
+    }
+    const incoming = Array.from(files || []);
+    incoming.forEach(f => {
+        if (!pending.some(x => x.name === f.name && x.size === f.size)) {
+            pending.push(f);
+        }
+    });
+    // Sync the hidden input so the Upload button uploads everything staged.
+    const dt = new DataTransfer();
+    pending.forEach(f => dt.items.add(f));
+    input.files = dt.files;
+    renderUploadFileList(widget, pending, (name) => {
+        pending.splice(pending.findIndex(f => f.name === name), 1);
+        const dt2 = new DataTransfer();
+        pending.forEach(f => dt2.items.add(f));
+        input.files = dt2.files;
+        renderUploadFileList(widget, pending);
+        updateUploadWidgetButton(widget);
+    });
+    updateUploadWidgetButton(widget);
 }
 
 /**
@@ -7014,6 +7041,40 @@ function bindUploadDropzone(widget) {
             });
             updateUploadWidgetButton(widget);
         }
+    });
+}
+
+/**
+ * Wire up an approval dropzone so files accumulate across multiple
+ * drag-drops / picker selections instead of replacing the previous set.
+ * @param {HTMLElement} widget  root `.upload-widget` element
+ */
+function bindApprovalDropzone(widget) {
+    const dropzone = widget.querySelector('.upload-dropzone');
+    const input = widget.querySelector('input[type="file"]');
+    if (!dropzone || !input) return;
+
+    const isEdit = input.id === 'editApprovalAttachmentInput';
+    const pending = isEdit ? editApprovalPendingFiles : approvalPendingFiles;
+
+    dropzone.addEventListener('click', () => input.click());
+
+    dropzone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        dropzone.classList.add('dragover');
+    });
+    dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+    dropzone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dropzone.classList.remove('dragover');
+        if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+            addPendingFiles(pending, widget, input, e.dataTransfer.files);
+        }
+    });
+
+    input.addEventListener('change', () => {
+        if (!input.files) return;
+        addPendingFiles(pending, widget, input, input.files);
     });
 }
 
@@ -7194,6 +7255,13 @@ function initAllUploadWidgets() {
         // submit to the dedicated Violations Cloudinary account) — skip it
         // here to avoid double-binding its dropzone events.
         if (widget.querySelector('#violationAttachmentInput')) return;
+        // Approval dropzones accumulate files across multiple picks instead of
+        // replacing the previous selection — wire them separately.
+        if (widget.querySelector('#approvalAttachmentInput') || widget.querySelector('#editApprovalAttachmentInput')) {
+            bindApprovalDropzone(widget);
+            updateUploadWidgetButton(widget);
+            return;
+        }
         bindUploadDropzone(widget);
         updateUploadWidgetButton(widget);
     });
@@ -8154,16 +8222,15 @@ async function violationCloudinaryUpload(file, folderPath, onProgress) {
     if (!isViolationCloudinaryConfigured()) {
         throw new Error('Violations Cloudinary storage is not configured.');
     }
-    const uploadFile = await compressVideoBeforeUpload(file);
 
     // Keep the original filename as a readable base, but add a short random
     // suffix so same-named files with different extensions (e.g. "0109.mp4" +
     // "0109.png") each get their own Cloudinary asset instead of overwriting
     // each other. Cloudinary appends the detected format automatically.
-    const uniquePublicId = makeUniquePublicId(uploadFile.name);
+    const uniquePublicId = makeUniquePublicId(file.name);
 
     const formData = new FormData();
-    formData.append('file', uploadFile);
+    formData.append('file', file);
     formData.append('upload_preset', VIOLATION_CLOUDINARY_UPLOAD_PRESET);
     formData.append('asset_folder', folderPath);
     formData.append('folder', folderPath);
@@ -8188,7 +8255,7 @@ async function violationCloudinaryUpload(file, folderPath, onProgress) {
         resource_type: data.resource_type,
         width: data.width || null,
         height: data.height || null,
-        bytes: uploadFile.size,
+        bytes: file.size,
         name: file.name,
         uploadedAt: new Date().toISOString()
     };
@@ -10225,7 +10292,8 @@ function bindViolationEvents() {
     if (closeViolationFormModalBtn) closeViolationFormModalBtn.addEventListener('click', closeViolationFormModal);
     if (cancelBtn) cancelBtn.addEventListener('click', closeViolationFormModal);
     if (violationModal) violationModal.addEventListener('click', (e) => { if (e.target === violationModal) closeViolationModal(); });
-    if (violationFormModal) violationFormModal.addEventListener('click', (e) => { if (e.target === violationFormModal) closeViolationFormModal(); });
+    // violationFormModal: backdrop click intentionally does NOT close — only the X button
+    // (closeViolationFormModalBtn) and Cancel button close it, plus auto-close on submit.
     if (violationForm) violationForm.addEventListener('submit', saveViolationForm);
     if (violationSearch) violationSearch.addEventListener('input', debounce(filterViolations));
     if (violationStoreFilter) violationStoreFilter.addEventListener('change', filterViolations);

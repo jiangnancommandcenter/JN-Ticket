@@ -509,102 +509,13 @@ function renderGrid() {
         return safeBase + '-' + suffix;
     }
 
-    function compressVideoBeforeUpload(file) {
-        // Non-videos and small videos return immediately (synchronously) so
-        // the upload XHR fires on the same call stack — no microtask delay.
-        if (!file.type.startsWith('video/')) return file;
-        if (file.size <= 5 * 1024 * 1024) return file;
-
-        // Videos larger than 5 MB: compress asynchronously.
-        return (async function () {
-            try {
-                var video = document.createElement('video');
-                video.muted = true;
-                video.playsInline = true;
-                video.src = URL.createObjectURL(file);
-
-                // ⚠️ Wait for metadata so videoWidth/videoHeight are populated.
-                // Without this they are 0, canvas is 0×0, nothing gets drawn,
-                // and the recorder stops almost immediately.
-                await new Promise(function (resolve) {
-                    if (video.readyState >= 1) resolve();
-                    else video.onloadedmetadata = resolve;
-                });
-
-                var canvas = document.createElement('canvas');
-                var scale = Math.min(1, 1280 / video.videoWidth, 720 / video.videoHeight);
-                canvas.width = Math.floor(video.videoWidth * scale);
-                canvas.height = Math.floor(video.videoHeight * scale);
-                var ctx = canvas.getContext('2d');
-
-                var stream = canvas.captureStream(30);
-                var recorder = new MediaRecorder(stream, {
-                    mimeType: 'video/webm; codecs=vp9',
-                    videoBitsPerSecond: 1200000
-                });
-
-                var chunks = [];
-                recorder.ondataavailable = function (e) { chunks.push(e.data); };
-
-                var duration = video.duration;
-                var finished = false;
-                var startTime = performance.now();
-
-                var draw = function () {
-                    if (finished) return;
-                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                    var elapsed = (performance.now() - startTime) / 1000;
-                    if (elapsed >= duration || video.ended) {
-                        finished = true;
-                        recorder.stop();
-                    } else {
-                        requestAnimationFrame(draw);
-                    }
-                };
-
-                await new Promise(function (resolve, reject) {
-                    recorder.onstop = resolve;
-                    recorder.onerror = reject;
-                    recorder.start();
-                    video.play().catch(function () { /* autoplay may be blocked */ });
-                    draw();
-                });
-
-                var blob = new Blob(chunks, { type: 'video/webm' });
-                URL.revokeObjectURL(video.src);
-                video.pause();
-
-                var compressed = new File([blob], file.name, {
-                    type: 'video/webm',
-                    lastModified: file.lastModified
-                });
-
-                console.log('[VideoCompress] Compressed:', file.name,
-                    '→', (file.size / 1024 / 1024).toFixed(2), 'MB',
-                    '→', (compressed.size / 1024 / 1024).toFixed(2), 'MB');
-                return compressed.size < file.size ? compressed : file;
-            } catch (e) {
-                console.warn('[VideoCompress] Skipping compression:', e.message);
-                return file;
-            }
-        })();
-    }
-
     function uploadToCloudinary(file, done) {
-        var uploadFile = compressVideoBeforeUpload(file);
-
-        // If compression returned a Promise (video), wait for it before uploading.
-        if (uploadFile && typeof uploadFile.then === 'function') {
-            uploadFile.then(function (resolvedFile) {
-                doUpload(resolvedFile);
-            });
-        } else {
-            doUpload(uploadFile);
-        }
+        doUpload(file);
 
         function doUpload(f) {
             var data = new FormData();
             data.append('file', f);
+            data.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
             // Unique public_id so same-named files with different extensions don't
         // overwrite each other in Cloudinary.
         data.append('public_id', makeUniquePublicId(f.name));
@@ -640,7 +551,7 @@ function renderGrid() {
                     name: file.name,
                     resource_type: payload.resource_type || '',
                     format: payload.format || '',
-                    mimeType: payload.resource_type === 'video' ? 'video/webm' : (f.type || 'application/octet-stream'),
+                    mimeType: f.type || 'application/octet-stream',
                     bytes: f.size,
                     uploadedAt: new Date().toISOString()
                 });
