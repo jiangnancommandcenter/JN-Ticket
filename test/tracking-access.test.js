@@ -74,7 +74,7 @@ assert.strictEqual(fmt(60000), '1 minute');
 assert.strictEqual(fmt(5 * 60000), '5 minutes');
 assert.strictEqual(fmt(3600000), '1 hour');
 assert.strictEqual(fmt(2 * DAY), '2 days');
-assert.strictEqual(fmt(WIN), WIN === 60000 ? '1 minute' : '2 days'); // current mode
+assert.strictEqual(fmt(WIN), WIN === 60000 ? '1 minute' : '24 hours'); // current mode
 
 // 8. script.js view-model helper (isApprovedTicket + getTrackingExpiryInfo)
 const scriptSrc = fs.readFileSync(path.join(ROOT, 'script.js'), 'utf8');

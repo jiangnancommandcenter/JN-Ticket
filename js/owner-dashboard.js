@@ -422,6 +422,24 @@ function syncNewTicketButton() {
   ownerNewTicketBtn.title = show ? 'Submit an incident ticket' : '';
 }
 
+/** Wire the header chat trigger (#cmdPaletteBtn) click on mobile only.
+ * Visibility is controlled by the mobile media query in ownerdashboard.html
+ * (#cmdPaletteBtn[hidden] { display: inline-flex } at <=899px). Desktop keeps
+ * the floating chat launcher and never shows this button. Wiring is
+ * duplicate-guarded so a re-role in another tab never stacks handlers. */
+function syncChatTrigger(enabled) {
+  const btn = document.getElementById('cmdPaletteBtn');
+  if (!btn) return;
+  if (enabled && !btn.dataset.chatWired) {
+    btn.dataset.chatWired = '1';
+    btn.addEventListener('click', function () {
+      if (window.ChatService && typeof window.ChatService.open === 'function') {
+        window.ChatService.open();
+      }
+    });
+  }
+}
+
 // Open the full-screen submission modal. Guarded by the same isAreaManager()
 // check as the button's visibility: `hidden` is a CSS/AT concern, not a
 // security boundary, and a caller with a reference to the element can always
@@ -510,7 +528,8 @@ function setActiveUser(permissions, role = 'viewer') {
   // canChat() rejects 'owner' (the stored value), operators and anything unknown.
   if (window.ChatService && typeof window.ChatService.init === 'function') {
     try {
-      window.ChatService.init({ surface: 'owner', role: normalizedRole });
+      const chatEnabled = window.ChatService.init({ surface: 'owner', role: normalizedRole });
+      syncChatTrigger(chatEnabled);
     } catch (e) {
       console.warn('Chat init failed:', e);
     }
@@ -777,7 +796,17 @@ async function loadBranches() {
       throw new Error('firestoreService.getBranches is not available');
     }
 
-    const branches = await window.firestoreService.getBranches();
+    // Cache-first: instant paint on repeat visits (branches change infrequently),
+    // then fall back to the server if the cache is empty or missing.
+    let branches;
+    try {
+        branches = await window.firestoreService.getBranches({ source: 'cache' });
+    } catch (e) {
+        branches = null; // no cache yet — load from server below
+    }
+    if (!branches || !branches.length) {
+        branches = await window.firestoreService.getBranches();
+    }
     ownerAllBranches = branches
       .map((b) => b.branchName || b.id || '')
       .filter(Boolean)
@@ -2165,8 +2194,8 @@ function renderOwnerTickets(allTickets) {
   // usable date are always KEPT — safer than hiding a real ticket with a
   // missing timestamp.
   const OWNER_TICKET_PERIODS = { daily: 1, weekly: 7, monthly: 'month', all: 0 };
-  const periodValue = (ownerTicketPeriodFilter && ownerTicketPeriodFilter.value) || 'daily';
-  const selectedPeriod = OWNER_TICKET_PERIODS[periodValue] !== undefined ? periodValue : 'daily';
+  const periodValue = (ownerTicketPeriodFilter && ownerTicketPeriodFilter.value) || 'all';
+  const selectedPeriod = OWNER_TICKET_PERIODS[periodValue] !== undefined ? periodValue : 'all';
   let periodStart = null;
   if (selectedPeriod !== 'all') {
     periodStart = new Date();
@@ -2631,6 +2660,7 @@ function renderOwnerTickets(allTickets) {
 
 let ownerTicketListenerStarted = false;
 let ownerAllTicketsCache = [];
+let previousOwnerTickets = [];
 
 /**
  * Initial load used only as a fallback when the realtime listener is unavailable.
@@ -2678,8 +2708,22 @@ function setupOwnerTicketListener() {
 
   window.firestoreService.listenTickets(
     (allTickets) => {
-      ownerAllTicketsCache = allTickets;
-      renderOwnerTickets(allTickets);
+      const list = allTickets || [];
+      if (previousOwnerTickets.length > 0) {
+        const prevMap = new Map(previousOwnerTickets.map(t => [t.id, t]));
+        for (const t of list) {
+          const prev = prevMap.get(t.id);
+          if (prev &&
+              (prev.ticketTransferTo || '') !== 'hr' &&
+              (t.ticketTransferTo || '') === 'hr' &&
+              typeof window.notifyTicketStatusChange === 'function') {
+            window.notifyTicketStatusChange(prev, t);
+          }
+        }
+      }
+      previousOwnerTickets = list.map(t => ({ ...t }));
+      ownerAllTicketsCache = list;
+      renderOwnerTickets(list);
       renderKpiCards();
       // The approval-email deep link can only be resolved once the real ticket
       // list has arrived - the branch allowlist AND the approved-only filter

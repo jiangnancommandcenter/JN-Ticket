@@ -497,10 +497,28 @@ function renderGrid() {
      * `xhr.upload.onprogress`. fetch has no equivalent, so the progress bar
      * could only ever jump 0→100 and would lie about a slow 90MB video.
      */
+    // Generate a Cloudinary-safe public_id that guarantees uniqueness even when
+    // two files share the same base name but have different extensions
+    // (e.g. "0109.mp4" + "0109.png"). Same-public_id uploads replace each
+    // other by default, so we append a short random suffix.
+    function makeUniquePublicId(fileName) {
+        var dotIdx = String(fileName || '').lastIndexOf('.');
+        var base = dotIdx > 0 ? String(fileName).slice(0, dotIdx) : String(fileName);
+        var safeBase = base.replace(/[^A-Za-z0-9 _.\\-]/g, ' ').replace(/\s+/g, ' ').trim() || 'file';
+        var suffix = Math.random().toString(36).slice(2, 10);
+        return safeBase + '-' + suffix;
+    }
+
     function uploadToCloudinary(file, done) {
-        var data = new FormData();
-        data.append('file', file);
-        data.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
+        doUpload(file);
+
+        function doUpload(f) {
+            var data = new FormData();
+            data.append('file', f);
+            data.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
+            // Unique public_id so same-named files with different extensions don't
+        // overwrite each other in Cloudinary.
+        data.append('public_id', makeUniquePublicId(f.name));
         var xhr = new XMLHttpRequest();
         xhr.open('POST', 'https://api.cloudinary.com/v1_1/' + CLOUDINARY_CLOUD_NAME + '/auto/upload');
         xhr.upload.onprogress = function (e) {
@@ -527,14 +545,14 @@ function renderGrid() {
                 done(true, {
                     url: payload.secure_url,
                     publicId: payload.public_id,
-                    fileName: file.name,
+                    fileName: f.name,
                     secure_url: payload.secure_url,
                     public_id: payload.public_id,
                     name: file.name,
                     resource_type: payload.resource_type || '',
                     format: payload.format || '',
-                    mimeType: payload.resource_type === 'video' ? 'video/mp4' : (file.type || 'application/octet-stream'),
-                    bytes: file.size,
+                    mimeType: f.type || 'application/octet-stream',
+                    bytes: f.size,
                     uploadedAt: new Date().toISOString()
                 });
             } catch (err) {
@@ -544,6 +562,7 @@ function renderGrid() {
         };
         xhr.onerror = function () { done(false, null); };
         xhr.send(data);
+        }
     }
 
     function resetForm(clearIdentity) {

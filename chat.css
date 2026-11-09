@@ -385,6 +385,11 @@ body.chat-ticket-open .modal-overlay {
     text-overflow: ellipsis;
 }
 
+/* Unread conversation: bolder name so it stands out in the branch list. */
+.chat-row.has-unread .chat-row-name {
+    font-weight: 700;
+}
+
 .chat-row-time {
     flex: 0 0 auto;
     font-size: 0.68rem;
@@ -724,6 +729,15 @@ body.chat-ticket-open .modal-overlay {
 .chat-msg-grouped .chat-msg-bubble {
     border-top-left-radius: 6px;
     border-top-right-radius: 6px;
+}
+
+/* ---- Unread message indicator (Messenger-style bold) ---- */
+/* Messages from someone else that arrived after this user last opened the
+   chat render with a heavier bubble so unread items stand out at a glance.
+   Cleared once the chat is opened (updateUnreadFrom bails while active). */
+.chat-msg--unread .chat-msg-bubble {
+    font-weight: 700;
+    color: var(--text-primary, #111827);
 }
 
 /* ---- Read receipts: the ✓ Sent / ✓✓ Seen ticks ----

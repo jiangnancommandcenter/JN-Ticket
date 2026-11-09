@@ -585,7 +585,7 @@ const firestoreService = {
         if (existingMs > now) {
             return new Date(existingMs);
         }
-        const expiresAt = new Date(now + 60 * 1000); // +1 minute
+        const expiresAt = new Date(now + 8 * 60 * 60 * 1000); // +8 hours
         await ref.update({
             managerOpenedAt: firebase.firestore.FieldValue.serverTimestamp(),
             managerExpiresAt: firebase.firestore.FieldValue.serverTimestamp(),
@@ -707,13 +707,9 @@ window.getUserProfile = async function(email) {
 //  which starts a fresh 2-day window. Nothing is ever deleted — this
 //  only gates viewing; operators/owners/superadmins keep full access.
 // ==============================================================
-//  ⚠️⚠️ TIER-2 TIME-COMPRESSION (TESTING ONLY) ⚠️⚠️
-//  The window below is temporarily 1 MINUTE so the full
-//  approve → expire → resend flow can be observed live without waiting
-//  2 days or hand-editing Firestore.
-//  >>> REVERT TO `2 * 24 * 60 * 60 * 1000` BEFORE DEPLOYING. <<<
-//  (npm test prints a loud warning while this is active.)
-window.TRACKING_ACCESS_WINDOW_MS = 60 * 1000; // TESTING — revert to 2 * 24 * 60 * 60 * 1000
+//  Ticket tracking access window — how long a manager/store can view an
+//  approved ticket before it expires. Set to 24 hours for production.
+window.TRACKING_ACCESS_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /** Coerce Firestore Timestamps / Date / ISO strings into a real Date (or null). */
 window.toTrackingDate = function(value) {
@@ -892,5 +888,6 @@ window.formatTrackingAccessWindow = function(ms) {
 window.firestoreService = firestoreService;
 window.db = db;
 window.auth = auth;
+
 
 
