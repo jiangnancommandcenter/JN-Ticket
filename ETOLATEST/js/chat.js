@@ -826,8 +826,8 @@
                         '</button>' +
                         '<span class="chat-history-status" id="chatHistoryStatus" role="status" aria-live="polite"></span>' +
                     '</div>' +
-                    '<div class="chat-log" id="chatLog" role="log" aria-live="polite" aria-relevant="additions">' +
-                        '<p class="chat-empty">No messages yet. Start the conversation.</p>' +
+                                        '<div class="chat-log" id="chatLog" role="log" aria-live="polite" aria-relevant="additions">' +
+                        '<p class="chat-empty">Select a conversation to start chatting.</p>' +
                     '</div>' +
                 '</div>' +
                 '<div class="chat-typing-bar" id="chatTypingBar" role="status" aria-live="polite" hidden>' +
@@ -1524,7 +1524,7 @@
     function scrollLogToBottom() {
         if (!els.log) return;
         programmaticScroll = true;
-        els.log.scrollTop = els.log.scrollHeight;
+        els.log.scrollTop = 0;
         // Cleared on the next tick, by which time the browser has dispatched
         // the scroll event our assignment caused.
         setTimeout(function () { programmaticScroll = false; }, 0);
@@ -2308,66 +2308,102 @@
      * opening the app would sound once for the newest message of every
      * conversation — the exact "noisy" failure this feature exists to avoid.
      */
-    function watchRoomForNewMessages(roomId) {
-        if (!roomId || roomMessageUnsubs[roomId]) return;
-        if (typeof db === 'undefined' || !db || typeof db.collection !== 'function') return;
-        try {
-            roomMessageUnsubs[roomId] = db.collection('chats')
-                .doc(roomId)
-                .collection('messages')
-                .orderBy('sentAt', 'desc')
-                .limit(1)
-                .onSnapshot(function (snapshot) {
-                    if (!snapshot || !snapshot.docs || !snapshot.docs.length) return;
-                    const doc = snapshot.docs[0];
-                    const data = doc.data() || {};
-                    const id = doc.id;
 
-                    if (!announcedMessageIds[roomId]) {
-                        // First snapshot for this room: seed, stay silent.
-                        announcedMessageIds[roomId] = id;
-                        const ids = readAnnouncedIds();
-                        ids[roomId] = id;
-                        writeAnnouncedIds(ids);
-                        return;
-                    }
-                    if (announcedMessageIds[roomId] === id) return;  // nothing new
+function watchRoomForNewMessages(roomId) {
+    if (!roomId || roomMessageUnsubs[roomId]) return;
 
-                    // Record BEFORE sounding, so a throw here cannot cause a
-                    // repeat on the next snapshot.
+    if (
+        typeof db === 'undefined' ||
+        !db ||
+        typeof db.collection !== 'function'
+    ) {
+        return;
+    }
+
+    try {
+        const unsubscribe = db.collection('chats')
+            .doc(roomId)
+            .collection('messages')
+            .orderBy('sentAt', 'desc')
+            .limit(1)
+            .onSnapshot(function (snapshot) {
+                if (!snapshot || !snapshot.docs || !snapshot.docs.length) {
+                    return;
+                }
+
+                const doc = snapshot.docs[0];
+                const data = doc.data() || {};
+                const id = doc.id;
+
+                const msg = Object.assign({}, data, {
+                    id: id,
+                    roomId: roomId
+                });
+
+                // Always synchronize the sidebar preview first.
+                syncSummaryFromMessage(roomId, msg);
+
+                // First snapshot establishes the baseline.
+                // It must not trigger an old-message notification.
+                if (!announcedMessageIds[roomId]) {
                     announcedMessageIds[roomId] = id;
+
                     const ids = readAnnouncedIds();
                     ids[roomId] = id;
                     writeAnnouncedIds(ids);
 
-                    const me = String(currentUserEmail || '').toLowerCase();
-                    const sender = String(data.senderEmail || '').toLowerCase();
-                    // My own message is never news, and the OPEN conversation is
-                    // already announced by the thread listener — announcing here
-                    // too would make one message sound twice.
-                    if (!sender || sender === me) return;
-                    if (roomId === activeRoomId) return;
+                    return;
+                }
 
-                    const msg = Object.assign({ id: id, roomId: roomId }, data);
-                    if (mentionsMe(msg)) announceMention(msg);
-                    else playIncomingSound();
-                }, function (error) {
-                    // ⚠️ ONE ROOM FAILING MUST NOT TAKE THE OTHERS DOWN. A
-                    // denied read (rules older than the messages rule) drops
-                    // this watcher only; the conversation list and the
-                    // summary-based announcement still work. The handle is
-                    // released because a dead listener is never retried by the
-                    // SDK, and holding it would block every future attempt.
-                    try { roomMessageUnsubs[roomId](); } catch (e) { /* ignore */ }
-                    delete roomMessageUnsubs[roomId];
-                    if (isPermissionError(error)) {
-                        console.warn('[Chat] Cannot watch messages in ' + roomId +
-                            ' (' + (error && error.code) + '); falling back to the ' +
-                            'room-summary sound for that conversation.');
+                if (announcedMessageIds[roomId] === id) return;
+
+                announcedMessageIds[roomId] = id;
+
+                const ids = readAnnouncedIds();
+                ids[roomId] = id;
+                writeAnnouncedIds(ids);
+
+                const me = String(currentUserEmail || '').toLowerCase();
+                const sender = String(data.senderEmail || '').toLowerCase();
+
+                if (!sender || sender === me) return;
+                if (roomId === activeRoomId) return;
+
+                if (mentionsMe(msg)) {
+                    announceMention(msg);
+                } else {
+                    playIncomingSound();
+                }
+
+            }, function (error) {
+                console.warn(
+                    '[Chat] Latest message watcher failed:',
+                    roomId,
+                    error && error.message
+                );
+
+                try {
+                    if (roomMessageUnsubs[roomId]) {
+                        roomMessageUnsubs[roomId]();
                     }
-                });
-        } catch (e) { /* a watcher that cannot even be built is simply absent */ }
+                } catch (e) {
+                    /* ignore */
+                }
+
+                delete roomMessageUnsubs[roomId];
+            });
+
+        roomMessageUnsubs[roomId] = unsubscribe;
+
+    } catch (error) {
+        console.warn(
+            '[Chat] Could not start message watcher:',
+            roomId,
+            error && error.message
+        );
     }
+}
+
 
     /**
      * Keep one watcher per conversation, in step with the list.
@@ -2377,19 +2413,37 @@
      * writes messages, so it can announce, unlike its summary which is frozen
      * at 0 by design.
      */
-    function syncRoomMessageWatchers() {
-        const wanted = {};
-        Object.keys(conversationSummaries || {}).forEach(function (roomId) {
-            if (conversationSummaries[roomId]) wanted[roomId] = true;
-        });
-        Object.keys(roomMessageUnsubs).forEach(function (roomId) {
-            if (!wanted[roomId]) {
-                try { roomMessageUnsubs[roomId](); } catch (e) { /* ignore */ }
-                delete roomMessageUnsubs[roomId];
-            }
-        });
-        Object.keys(wanted).forEach(watchRoomForNewMessages);
+   
+function syncRoomMessageWatchers() {
+    const wanted = {};
+
+    Object.keys(conversationSummaries || {}).forEach(function (roomId) {
+        if (conversationSummaries[roomId]) {
+            wanted[roomId] = true;
+        }
+    });
+
+    // Keep All HR watched only while the user is in the authorized group room.
+    if (inGroupRoom()) {
+        wanted[LEGACY_ROOM_ID] = true;
     }
+
+    Object.keys(roomMessageUnsubs).forEach(function (roomId) {
+        if (!wanted[roomId]) {
+            try {
+                roomMessageUnsubs[roomId]();
+            } catch (e) {
+                /* ignore */
+            }
+
+            delete roomMessageUnsubs[roomId];
+        }
+    });
+
+    Object.keys(wanted).forEach(function (roomId) {
+        watchRoomForNewMessages(roomId);
+    });
+}
 
 
     function collectConversationRows() {
@@ -2444,18 +2498,9 @@
             });
         });
 
-        // Newest first. A never-started row has lastMessageAt 0, so it sinks
-        // below anything with real history — the expected order.
-        rows.sort(function (a, b) {
-            if (b.lastMessageAt !== a.lastMessageAt) return b.lastMessageAt - a.lastMessageAt;
-            return a.name.localeCompare(b.name);
-        });
-
-        // The GROUP chat is pinned LAST and is ALWAYS shown — for every HR and
-        // superadmin, whether or not the room document has been read yet. It
-        // is a channel everybody is already in, so it must never depend on a
-        // summary arriving (and it can never contribute to the unread badge:
-        // it is one pinned row, not a conversation that goes quiet).
+        // The GROUP chat — for every HR and superadmin. It must never depend on
+        // a summary arriving, and it can never contribute to the unread badge:
+        // it is one pinned row, not a conversation that goes quiet.
         // ⚠️ NOT SHOWN TO AN AREA MANAGER. They pass canChat() and hold 1:1
         // threads, but the rules deny them this room (isLegacyArchive is still
         // HR + superadmin), so offering the row would be a guaranteed
@@ -2469,7 +2514,7 @@
                 name: GROUP_ROOM_NAME,
                 lastMessage: (group && group.lastMessage) || '',
                 lastMessageAt: (group && group.lastMessageAtMs) || 0,
-                unread: 0,
+                unread: unreadFor(group),
                 isArchive: true,
                 started: true
             });
@@ -2494,12 +2539,22 @@
                     name: (group && group.title) || branchGroupName(roomId),
                     lastMessage: (group && group.lastMessage) || '',
                     lastMessageAt: (group && group.lastMessageAtMs) || 0,
-                    unread: 0,
+                    unread: unreadFor(group),
                     isArchive: true,
                     started: true
                 });
             });
         }
+
+        // Unread conversations FIRST (new message waiting), then newest activity
+        // first. A never-started row has lastMessageAt 0, so it sinks below
+        // anything with real history — the expected order. Like iMessage /
+        // Messenger, the conversation with the latest message bubbles to the top.
+        rows.sort(function (a, b) {
+            if (a.unread !== b.unread) return b.unread - a.unread;
+            if (b.lastMessageAt !== a.lastMessageAt) return b.lastMessageAt - a.lastMessageAt;
+            return a.name.localeCompare(b.name);
+        });
 
         const q = String(conversationFilter || '').trim().toLowerCase();
         if (!q) return rows;
@@ -2554,7 +2609,7 @@
             const unreadAttr = row.unread > 0
                 ? '<span class="chat-row-unread">' + (row.unread > 99 ? '99+' : row.unread) + '</span>'
                 : '';
-            return '<button type="button" class="chat-row' + (isActive ? ' is-active' : '') + '"' +
+            return '<button type="button" class="chat-row' + (isActive ? ' is-active' : '') + (row.unread > 0 ? ' has-unread' : '') + '"' +
                 ' data-room-id="' + escapeHTML(row.roomId) + '"' +
                 ' aria-current="' + (isActive ? 'true' : 'false') + '">' +
                 '<span class="chat-avatar ' + avatarRoleFor(row.peerEmail) + '" aria-hidden="true">' +
@@ -2587,93 +2642,155 @@
      * For a 1:1 list of colleagues that is a handful of rows, so it costs
      * nothing and keeps the app on the free plan.
      */
-    function startConversationListListener() {
-        if (conversationListUnsub) return;
-        if (typeof db === 'undefined' || !db || !currentUserEmail) return;
-        try {
-            conversationListUnsub = db.collection('chats')
-                .where('members', 'array-contains', currentUserEmail)
-                .limit(CONVERSATION_LIST_LIMIT)
-                .onSnapshot(function (snapshot) {
-                    const next = {};
-                    snapshot.forEach(function (doc) {
-                        const data = doc.data() || {};
-                        const roomId = doc.id;
-                        next[roomId] = {
-                            roomId: roomId,
-                            lastMessage: data.lastMessage || '',
-                            lastMessageAtMs: (toDate(data.lastMessageAt) || new Date(0)).getTime(),
-                            lastSenderEmail: data.lastSenderEmail || '',
-                            isArchive: roomId === LEGACY_ROOM_ID,
-                            // The peer is derived from the ID, never read from
-                            // the doc's `members`, so a stale or hand-edited
-                            // document cannot make the list show the wrong
-                            // person (or another person's thread).
-                            peerEmail: roomId === LEGACY_ROOM_ID ? null : peerFromRoomId(roomId)
-                        };
-                        // Branch rooms: carry `title`/`members` into the
-                        // summary too. The row name, the open-header title and
-                        // the @mention picker all read them — and this query
-                        // path REPLACES the whole map, so without this they
-                        // would only survive on the denied-query fallback
-                        // (applyRoomSummaryToList copies them as well).
-                        if (isBranchRoom(roomId)) {
-                            next[roomId].title = data.title || '';
-                            if (Array.isArray(data.members)) {
-                                next[roomId].members = data.members.slice();
-                            }
+        
+function startConversationListListener() {
+    if (conversationListUnsub) return;
+    if (typeof db === 'undefined' || !db || !currentUserEmail) return;
+
+    if (inGroupRoom()) {
+        subscribeRoomForList(LEGACY_ROOM_ID);
+    }
+
+    try {
+        conversationListUnsub = db.collection('chats')
+            .where('members', 'array-contains', currentUserEmail)
+            .limit(CONVERSATION_LIST_LIMIT)
+            .onSnapshot(function (snapshot) {
+                const next = {};
+
+                snapshot.forEach(function (doc) {
+                    const data = doc.data() || {};
+                    const roomId = doc.id;
+                    const existing = conversationSummaries[roomId];
+
+                    const incoming = {
+                        roomId: roomId,
+                        lastMessage: String(data.lastMessage || '').trim(),
+                        lastMessageAtMs: (toDate(data.lastMessageAt) || new Date(0)).getTime(),
+                        lastSenderEmail: data.lastSenderEmail || '',
+                        isArchive: roomId === LEGACY_ROOM_ID,
+                        peerEmail: roomId === LEGACY_ROOM_ID
+                            ? null
+                            : peerFromRoomId(roomId)
+                    };
+
+                    if (isBranchRoom(roomId)) {
+                        incoming.title = data.title || '';
+                        if (Array.isArray(data.members)) {
+                            incoming.members = data.members.slice();
                         }
-                    });
-                    conversationSummaries = next;
-                    conversationListReady = true;
-                    renderConversationList();
-                    updateLauncherBadgeFromList();
-                    // ⚠️ THE SOUND LIVES HERE, NOT IN THE PER-ROOM LISTENER.
-                    // The thread listener only exists for the conversation the
-                    // user has OPEN (startListener is called from
-                    // selectConversation), so a message in any other
-                    // conversation had no listener at all and could not be
-                    // announced — the alert only appeared after you clicked the
-                    // row. This listener already spans every room, so
-                    // announcing from it covers all of them with no extra read
-                    // and no rules change.
-                    announceNewConversations(next);
-                    // ⚠️ AND THE PER-ROOM MESSAGE WATCHERS, which are the
-                    // authoritative signal: the room SUMMARY above only moves
-                    // when the sender's preview write is accepted, and it is not
-                    // always (the group chat never writes one at all). The
-                    // message document always is.
-                    syncRoomMessageWatchers();
-                }, function (error) {
-                    conversationListReady = true;
-                    renderConversationList();
-                    if (isPermissionError(error)) {
-                        // ⚠️ THE QUERY IS DENIED; THE ROOM DOCUMENTS ARE NOT. A
-                        // query is authorised as ONE rules evaluation over the
-                        // whole collection, and the membership rule resolves
-                        // every room with exists()/get(), which cannot be
-                        // proven that way. Each room document is still
-                        // individually readable, so the list is rebuilt from
-                        // one listener per room instead of being left empty.
-                        // (Without this, selectConversation() finds no summary
-                        // for ANY room, so no conversation would ever open its
-                        // history — the sidebar is not the only casualty.)
-                        conversationListDenied = true;
-                        console.warn('[Chat] The `chats` list query is denied by the deployed rules, ' +
-                            'so the conversation list is being rebuilt from per-room document reads. ' +
-                            'Deploying the rules (firebase deploy --only firestore:rules) ' +
-                            'restores the single-query path.');
-                        startPerRoomConversationListeners();
+                    }
+
+                    next[roomId] = mergeConversationSummary(existing, incoming);
+                });
+
+                // Preserve individually subscribed rooms, including All HR.
+                Object.keys(conversationRoomUnsubs).forEach(function (rid) {
+                    if (!conversationSummaries[rid]) return;
+
+                    if (!next[rid]) {
+                        next[rid] = conversationSummaries[rid];
                     } else {
-                        console.warn('[Chat] Conversation list unavailable:', error && error.message);
+                        next[rid] = mergeConversationSummary(
+                            conversationSummaries[rid],
+                            next[rid]
+                        );
                     }
                 });
-        } catch (error) {
-            conversationListReady = true;
-            renderConversationList();
-            console.warn('[Chat] Conversation list unavailable:', error && error.message);
-        }
+
+                conversationSummaries = next;
+                conversationListReady = true;
+
+                renderConversationList();
+                updateLauncherBadgeFromList();
+
+                if (
+                    activeRoomId &&
+                    conversationSummaries[activeRoomId] &&
+                    !messagesUnsub
+                ) {
+                    if (els.log) {
+                        els.log.innerHTML =
+                            '<p class="chat-empty">Loading messages&hellip;</p>';
+                    }
+
+                    startListener();
+                    startTypingListener();
+                }
+
+                announceNewConversations(conversationSummaries);
+                syncRoomMessageWatchers();
+
+            }, function (error) {
+                conversationListReady = true;
+                renderConversationList();
+
+                if (isPermissionError(error)) {
+                    conversationListDenied = true;
+
+                    console.warn(
+                        '[Chat] Conversation list query denied. ' +
+                        'Using individual room listeners.'
+                    );
+
+                    startPerRoomConversationListeners();
+                } else {
+                    console.warn(
+                        '[Chat] Conversation list unavailable:',
+                        error && error.message
+                    );
+                }
+            });
+
+    } catch (error) {
+        conversationListReady = true;
+        renderConversationList();
+
+        console.warn(
+            '[Chat] Conversation list unavailable:',
+            error && error.message
+        );
     }
+}
+
+
+function mergeConversationSummary(existing, incoming) {
+    if (!existing) return incoming;
+    if (!incoming) return existing;
+
+    const existingMessage = String(existing.lastMessage || '').trim();
+    const incomingMessage = String(incoming.lastMessage || '').trim();
+
+    const existingTime = Number(existing.lastMessageAtMs || 0);
+    const incomingTime = Number(incoming.lastMessageAtMs || 0);
+
+    let useIncoming = false;
+
+    if (incomingMessage && !existingMessage) {
+        useIncoming = true;
+    } else if (!incomingMessage && existingMessage) {
+        useIncoming = false;
+    } else if (incomingMessage && existingMessage) {
+        useIncoming = incomingTime > existingTime;
+    }
+
+    const latest = useIncoming ? incoming : existing;
+    const metadata = Object.assign({}, existing, incoming);
+
+    return Object.assign(metadata, {
+        roomId: incoming.roomId || existing.roomId,
+        lastMessage: latest.lastMessage || '',
+        lastMessageAtMs: latest.lastMessageAtMs || 0,
+        lastSenderEmail: latest.lastSenderEmail || '',
+        isArchive: incoming.isArchive !== undefined
+            ? incoming.isArchive
+            : existing.isArchive,
+        peerEmail: incoming.peerEmail !== undefined
+            ? incoming.peerEmail
+            : existing.peerEmail
+    });
+}
+
 
     function stopConversationListListener() {
         if (conversationListUnsub) {
@@ -2764,63 +2881,68 @@
      * each room reports for itself, and a room that reports as gone is
      * dropped again. `data === null` means "no such document".
      */
-    function applyRoomSummaryToList(roomId, data) {
-        if (!roomId) return;
-        if (!data) {
-            if (!conversationSummaries[roomId]) return;
-            delete conversationSummaries[roomId];
-            conversationListReady = true;
-            renderConversationList();
-            updateLauncherBadgeFromList();
-            return;
-        }
-        const summary = {
-            roomId: roomId,
-            lastMessage: data.lastMessage || '',
-            lastMessageAtMs: (toDate(data.lastMessageAt) || new Date(0)).getTime(),
-            lastSenderEmail: data.lastSenderEmail || '',
-            isArchive: roomId === LEGACY_ROOM_ID,
-            // The peer is derived from the ID, never read from the document's
-            // `members`, so a stale or hand-edited room can never make the
-            // list show the wrong person.
-            peerEmail: roomId === LEGACY_ROOM_ID ? null : peerFromRoomId(roomId)
-        };
-        // Branch rooms carry their display `title` (the store name) and full
-        // `members` into the summary: the row name, the open header and the
-        // @mention picker all read them. The list-query path does the same in
-        // startConversationListListener(); this is the per-room fallback path.
-        if (isBranchRoom(roomId)) {
-            summary.title = data.title || '';
-            if (Array.isArray(data.members)) summary.members = data.members.slice();
-        }
-        conversationSummaries[roomId] = summary;
-        // The room reported, so it exists: remember it, or a conversation
-        // whose other side later leaves the directory and the roster would
-        // vanish from this list with no way to rediscover it.
-        rememberRoom(roomId);
+    
+function applyRoomSummaryToList(roomId, data) {
+    if (!roomId) return;
+
+    if (!data) {
+        if (!conversationSummaries[roomId]) return;
+
+        delete conversationSummaries[roomId];
+
         conversationListReady = true;
         renderConversationList();
         updateLauncherBadgeFromList();
-        // ⚠️ THE FALLBACK PATH MUST ANNOUNCE TOO. This runs when the list
-        // QUERY is denied by the deployed rules, so the sidebar is rebuilt
-        // from per-room document reads. The summary announcement has to happen
-        // here as well, or a denied query silently costs the user every alert —
-        // and the message watchers must be kept in step, or the fallback has no
-        // sound at all.
-        announceNewConversations(conversationSummaries);
         syncRoomMessageWatchers();
 
-        // ⚠️ A ROOM CAN BE OPENED BEFORE THIS REPORT ARRIVES. The user clicks
-        // the row, selectConversation() finds no summary — so it renders the
-        // empty state and does not subscribe — and only then does the room
-        // document report that it exists. Attach the thread now, or a
-        // conversation with history opens blank until the page is reloaded.
-        if (roomId === activeRoomId && !messagesUnsub) {
-            if (els.log) els.log.innerHTML = '<p class="chat-empty">Loading messages&hellip;</p>';
-            startListener();
-            startTypingListener();
+        return;
+    }
+
+    const existing = conversationSummaries[roomId];
+
+    const incoming = {
+        roomId: roomId,
+        lastMessage: String(data.lastMessage || '').trim(),
+        lastMessageAtMs: (toDate(data.lastMessageAt) || new Date(0)).getTime(),
+        lastSenderEmail: data.lastSenderEmail || '',
+        isArchive: roomId === LEGACY_ROOM_ID,
+        peerEmail: roomId === LEGACY_ROOM_ID
+            ? null
+            : peerFromRoomId(roomId)
+    };
+
+    if (isBranchRoom(roomId)) {
+        incoming.title = data.title || '';
+
+        if (Array.isArray(data.members)) {
+            incoming.members = data.members.slice();
         }
     }
+
+    conversationSummaries[roomId] =
+        mergeConversationSummary(existing, incoming);
+
+    rememberRoom(roomId);
+
+    conversationListReady = true;
+
+    renderConversationList();
+    updateLauncherBadgeFromList();
+
+    announceNewConversations(conversationSummaries);
+    syncRoomMessageWatchers();
+
+    if (roomId === activeRoomId && !messagesUnsub) {
+        if (els.log) {
+            els.log.innerHTML =
+                '<p class="chat-empty">Loading messages&hellip;</p>';
+        }
+
+        startListener();
+        startTypingListener();
+    }
+}
+
 
     /**
      * Listen to ONE room document for the sidebar.
@@ -2833,72 +2955,73 @@
      * the "tap to start" row stands, and scheduleDeniedRoomRetry() picks the
      * room up as soon as it really exists.
      */
-    function subscribeRoomForList(roomId) {
-        if (!roomId || conversationRoomUnsubs[roomId]) return;
-        if (typeof db === 'undefined' || !db || typeof db.collection !== 'function') return;
-        try {
-            conversationRoomUnsubs[roomId] = db.collection('chats').doc(roomId).onSnapshot(
-                function (docSnap) {
-                    // It reported, so it is readable: stop treating it as
-                    // missing and stop re-attempting it.
-                    delete conversationRoomsDenied[roomId];
-                    applyRoomSummaryToList(
-                        roomId,
-                        docSnap && docSnap.exists ? (docSnap.data() || null) : null
-                    );
-                },
-                function (error) {
-                    // A failed listener is dead — the SDK will not retry it — so
-                    // drop the handle or it would block every future attempt
-                    // for this room.
-                    delete conversationRoomUnsubs[roomId];
-                    if (isPermissionError(error)) {
-                        // ⚠️ FORGET A ROOM THAT CAN NEVER BE FOUND AGAIN. Once
-                        // the people sources have loaded at least once, a room
-                        // whose other side is in NEITHER the directory NOR the
-                        // account roster cannot be rediscovered — and if its read
-                        // is refused too, it is gone for good (an account
-                        // re-roled away from the chat, or the room deleted).
-                        // Remembering it would mean re-reading it every minute
-                        // for the rest of the session for nothing. `peopleSettled`
-                        // is what makes this safe: a refusal that arrives before
-                        // the directory has loaded is never acted on.
-                        const peer = roomId === LEGACY_ROOM_ID
-                            ? ''
-                            : String(peerFromRoomId(roomId) || '').toLowerCase();
-                        // ⚠️ A STORE ROOM HAS NO PEER (peerFromRoomId() is null
-                        // for `branch-` ids), so the rule below can never fire
-                        // for it — yet a refused STORE-room read means the room
-                        // was DELETED (phantom cleanup: the store lost its Area
-                        // Manager / RM-SM) or this account is no longer in its
-                        // `members` (re-roled away). The LIST QUERY is the
-                        // authority: if membership ever returns,
-                        // `chats where members array-contains me` puts the row
-                        // back. Without this branch the denial lands in the retry
-                        // set below and this device re-reads a dead room every
-                        // DENIED_ROOM_RETRY_MS for the rest of the session.
-                        if (peopleSettled && isBranchRoom(roomId)) {
-                            forgetRoom(roomId);
-                        } else if (peopleSettled && peer && startableEmails().indexOf(peer) === -1) {
-                            // Gone for good. It must leave BOTH the remembered
-                            // list and the retry set — re-adding it to the retry
-                            // set would keep re-reading it every minute for the
-                            // rest of the session, which is the leak this rule
-                            // exists to prevent.
-                            forgetRoom(roomId);
-                        } else {
-                            conversationRoomsDenied[roomId] = true;
-                        }
-                        applyRoomSummaryToList(roomId, null);
-                    }
-                    scheduleDeniedRoomRetry();
-                }
-            );
-        } catch (error) {
-            // One unreadable room must never take the whole list down.
-            delete conversationRoomUnsubs[roomId];
-        }
+    
+function subscribeRoomForList(roomId) {
+    if (!roomId || conversationRoomUnsubs[roomId]) return;
+
+    if (
+        typeof db === 'undefined' ||
+        !db ||
+        typeof db.collection !== 'function'
+    ) {
+        return;
     }
+
+    try {
+        conversationRoomUnsubs[roomId] = db.collection('chats')
+            .doc(roomId)
+            .onSnapshot(function (docSnap) {
+                delete conversationRoomsDenied[roomId];
+
+                applyRoomSummaryToList(
+                    roomId,
+                    docSnap && docSnap.exists
+                        ? (docSnap.data() || null)
+                        : null
+                );
+
+            }, function (error) {
+                delete conversationRoomUnsubs[roomId];
+
+                if (isPermissionError(error)) {
+                    const peer = roomId === LEGACY_ROOM_ID
+                        ? ''
+                        : String(peerFromRoomId(roomId) || '').toLowerCase();
+
+                    if (
+                        peopleSettled &&
+                        isBranchRoom(roomId)
+                    ) {
+                        forgetRoom(roomId);
+
+                    } else if (
+                        peopleSettled &&
+                        peer &&
+                        startableEmails().indexOf(peer) === -1
+                    ) {
+                        forgetRoom(roomId);
+
+                    } else {
+                        conversationRoomsDenied[roomId] = true;
+                    }
+
+                    applyRoomSummaryToList(roomId, null);
+                }
+
+                scheduleDeniedRoomRetry();
+            });
+
+    } catch (error) {
+        delete conversationRoomUnsubs[roomId];
+
+        console.warn(
+            '[Chat] Could not subscribe to room:',
+            roomId,
+            error && error.message
+        );
+    }
+}
+
 
     /**
      * Rebuild the conversation list from per-room document listeners.
@@ -4747,6 +4870,12 @@
                 : renderMessageBody(msg.text, msg.mentions);
             const mentioned = unsent ? false : mentionsMe(msg);
 
+            // Unread = from someone else and newer than this user's last-seen
+            // stamp. Mirrors updateUnreadFrom() so the bold state matches the
+            // badge / "New messages" divider exactly.
+            const sentAtDate = toDate(msg.sentAt);
+            const unread = !mine && sentAtDate && sentAtDate.getTime() > getLastSeen();
+
             // Ticks only on MY messages: a single grey ✓ once the message
             // is stored (Firestore accepted the write), turning blue ✓✓
             // once everybody else has read past it. The sender's own
@@ -4759,7 +4888,8 @@
 
             return '<div class="chat-msg ' + (mine ? 'chat-msg-mine' : 'chat-msg-theirs') +
                 (mentioned ? ' chat-msg-mentions-me' : '') +
-                (grouped ? ' chat-msg-grouped' : '') + '" data-msg-id="' +
+                (grouped ? ' chat-msg-grouped' : '') +
+                (unread ? ' chat-msg--unread' : '') + '" data-msg-id="' +
                     escapeHTML(String(msg.id || '')) + '">' +
                 // The avatar sits in its OWN column beside the message, so the
                 // name/time header below it collapses to one short line and no
@@ -5616,32 +5746,43 @@
      * The guard is what keeps a stale server document from overwriting a newer
      * local one: an older timestamp is ignored, never applied.
      */
-    function syncSummaryFromMessage(roomId, msg) {
-        if (!roomId || !msg) return;
-        const at = (toDate(msg.sentAt) || new Date(0)).getTime();
-        const current = conversationSummaries[roomId];
-        if (current && Number(current.lastMessageAtMs || 0) >= at) return;
-        const summary = {
-            roomId: roomId,
-            lastMessage: String(msg.text || '').slice(0, 140),
-            lastMessageAtMs: at,
-            lastSenderEmail: msg.senderEmail || '',
-            isArchive: roomId === LEGACY_ROOM_ID,
-            peerEmail: roomId === LEGACY_ROOM_ID ? null : peerFromRoomId(roomId)
-        };
-        // A branch room's identity lives in `title`/`members`. This function
-        // REBUILDS the summary object, so carry them forward — otherwise the
-        // first message sent in a branch room would rename the row to
-        // "branch-x — branch chat" and empty the @mention picker until the
-        // next room snapshot.
-        if (current && isBranchRoom(roomId)) {
-            if (current.title) summary.title = current.title;
-            if (Array.isArray(current.members)) summary.members = current.members;
-        }
-        conversationSummaries[roomId] = summary;
-        renderConversationList();
-        updateLauncherBadgeFromList();
+    
+function syncSummaryFromMessage(roomId, msg) {
+    if (!roomId || !msg) return;
+
+    const messageText = String(msg.text || '').trim();
+
+    // Do not replace a valid preview with an empty message.
+    if (!messageText) return;
+
+    const at = (toDate(msg.sentAt) || new Date(0)).getTime();
+    const current = conversationSummaries[roomId];
+
+    const incoming = {
+        roomId: roomId,
+        lastMessage: messageText.slice(0, 140),
+        lastMessageAtMs: at,
+        lastSenderEmail: msg.senderEmail || '',
+        isArchive: roomId === LEGACY_ROOM_ID,
+        peerEmail: roomId === LEGACY_ROOM_ID
+            ? null
+            : peerFromRoomId(roomId)
+    };
+
+    if (current && isBranchRoom(roomId)) {
+        incoming.title = current.title || '';
+        incoming.members = Array.isArray(current.members)
+            ? current.members.slice()
+            : [];
     }
+
+    conversationSummaries[roomId] =
+        mergeConversationSummary(current, incoming);
+
+    renderConversationList();
+    updateLauncherBadgeFromList();
+}
+
 
     /**
      * Everyone this device knows about, for the group room's `members` list.
