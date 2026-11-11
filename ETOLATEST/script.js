@@ -9388,6 +9388,10 @@ function openViolationFormModal(id) {
         if (violationLocationInput) violationLocationInput.value = v.location || '';
         if (violationDetailsInput) violationDetailsInput.value = v.details || '';
         violationEditAttachments = Array.isArray(v.attachments) ? v.attachments.slice() : [];
+        // Show the existing evidence files in the edit form's file list, each
+        // with a remove (x) button, so the superadmin can see what is on file
+        // and drop individual attachments before saving.
+        renderViolationEditFileList();
     } else {
         currentViolationId = null;
         if (violationFormTitle) violationFormTitle.textContent = 'Report Violation';
@@ -9407,6 +9411,42 @@ function closeViolationFormModal() {
 function removeViolationEditAttachment(publicId) {
     violationEditAttachments = violationEditAttachments.filter(a => (a.public_id || '') !== publicId);
     renderViolationAttachments(violationAttachmentsGrid, violationEditAttachments, true);
+    renderViolationEditFileList();
+}
+
+/** Render the existing (pre-uploaded) attachments of the violation being edited
+ * into the form's file list, each with a remove (x) button on top. */
+function renderViolationEditFileList() {
+    const widget = violationUploadWidget;
+    if (!widget) return;
+    const listEl = widget.querySelector('.upload-file-list');
+    if (!listEl) return;
+    const arr = violationEditAttachments.map((att, i) => {
+        const n = normalizeAttachment(att);
+        return { name: (n && n.name) || 'Attachment', size: (n && n.bytes) || 0 };
+    });
+    if (arr.length === 0) { listEl.innerHTML = ''; return; }
+    listEl.innerHTML = arr.map((f, i) => `
+        <div class="upload-file-item" data-index="${i}">
+            <i class="fas fa-file-alt"></i>
+            <span class="upload-file-name" title="${escapeHTML(f.name)}">${escapeHTML(f.name)}</span>
+            <span class="upload-file-size">${formatFileSize(f.size)}</span>
+            <button type="button" class="upload-file-remove" data-index="${i}" title="Remove">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+    `).join('');
+    listEl.querySelectorAll('.upload-file-remove').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const index = parseInt(btn.dataset.index, 10);
+            if (!Number.isNaN(index)) {
+                violationEditAttachments.splice(index, 1);
+                renderViolationEditFileList();
+            }
+        });
+    });
 }
 
 function showViolationFormWarning(message) {

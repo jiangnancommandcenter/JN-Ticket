@@ -4133,12 +4133,6 @@ function subscribeRoomForList(roomId) {
      */
     function toggleReaction(messageId, emojiKey) {
         if (!currentUserEmail || !messageId) return Promise.resolve(false);
-        // A reaction is a per-room membership write, so it cannot exist in the
-        // GROUP chat. Say so plainly instead of letting the write be refused.
-        if (isGroupRoom()) {
-            showToast('Reactions are only available in 1:1 conversations.', 'info');
-            return Promise.resolve(false);
-        }
         const reactions = reactionsRef();
         // No conversation open, so there is nothing to react within.
         if (!reactions) return Promise.resolve(false);

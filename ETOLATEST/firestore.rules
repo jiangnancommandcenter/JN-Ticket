@@ -789,8 +789,12 @@ allow read: if canReadChat(chatId)
       match /reactions/{reactionId} {
         allow read: if canReadChat(chatId);
 
-        // A person may only ever react AS THEMSELVES.
-        allow create: if isChatMember(chatId)
+        // A person may only ever react AS THEMSELVES. In the 1:1 rooms that
+        // pass `isChatMember`, plus the All HR group chat (`isLegacyArchive`,
+        // role-gated HR/superadmin, no `members` array). Branch group rooms
+        // already pass `isChatMember` through their seeded `members` list, so
+        // they are covered by the membership half alone.
+        allow create: if (isChatMember(chatId) || isLegacyArchive(chatId))
           && request.resource.data.keys().hasOnly(['messageId', 'emoji', 'email'])
           && request.resource.data.email == selfEmail()
           && request.resource.data.messageId is string
@@ -802,13 +806,13 @@ allow read: if canReadChat(chatId)
         //  an update of the `emoji` field only. The rule below permits exactly
         //  that and nothing else: `messageId` and `email` are frozen, so a
         //  reaction can never be repointed at another message or person.)
-        allow update: if isChatMember(chatId)
+        allow update: if (isChatMember(chatId) || isLegacyArchive(chatId))
           && resource.data.email == selfEmail()
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['emoji'])
           && request.resource.data.keys().hasOnly(['messageId', 'emoji', 'email']);
 
         // You may only remove your OWN reaction.
-        allow delete: if isChatMember(chatId)
+        allow delete: if (isChatMember(chatId) || isLegacyArchive(chatId))
           && resource.data.email == selfEmail();
       }
     }
