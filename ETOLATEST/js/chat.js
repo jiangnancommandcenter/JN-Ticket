@@ -1524,7 +1524,7 @@
     function scrollLogToBottom() {
         if (!els.log) return;
         programmaticScroll = true;
-        els.log.scrollTop = 0;
+        els.log.scrollTop = els.log.scrollHeight;
         // Cleared on the next tick, by which time the browser has dispatched
         // the scroll event our assignment caused.
         setTimeout(function () { programmaticScroll = false; }, 0);
