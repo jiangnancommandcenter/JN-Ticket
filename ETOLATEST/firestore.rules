@@ -219,7 +219,38 @@ service cloud.firestore {
     function isChatMember(chatId) {
       return isChatRole() &&
         exists(/databases/$(database)/documents/chats/$(chatId)) &&
-        selfEmail() in chatRoom(chatId).data.members;
+        selfEmail() in chatRoom(chatId).data.members &&
+        (!isBranchRoom(chatId) || hasCurrentBranchAccess(chatId));
+    }
+
+    // ⚠️ BRANCH ROOMS FOLLOW THE CALLER'S *CURRENT* ROLE + BRANCHES, not just
+    // the room's `members` array. `members` is a SNAPSHOT written by the
+    // superadmin's client (script.js ensureBranchGroupChats / the backfill
+    // sweep), so it can lag behind a role or branch change — e.g. a role edited
+    // in the Firebase console, or HR re-saved as an Area Manager. Without this,
+    // a stale entry kept that person reading and posting in a branch they no
+    // longer belong to. Messages are NEVER deleted; access is simply refused
+    // until the user is (re)assigned.
+    //
+    //   superadmin, hr   -> every branch room (company-wide by spec)
+    //   owner, rmsm      -> only rooms whose `title` (the branch name) is in
+    //                       their own users/<email>.branches right now
+    //
+    // `title.lower()` is the second chance for a branch name stored in a
+    // different case. Only used through isChatMember(), i.e. on DOCUMENT
+    // reads/writes whose chatId is known — never on the conversation LIST
+    // query, which Firestore could not prove against a title condition (that
+    // clause stays membership-only, below; the client filters it — js/chat.js
+    // canAccessBranchRoom()).
+    function myBranches() {
+      return get(/databases/$(database)/documents/users/$(selfEmail())).data.get('branches', []);
+    }
+    function hasCurrentBranchAccess(chatId) {
+      let role = myRole();
+      let title = chatRoom(chatId).data.get('title', '');
+      return role in ['superadmin', 'hr']
+        || (role in ['owner', 'rmsm']
+            && (title in myBranches() || title.lower() in myBranches()));
     }
 
     // The LEGACY room, which is now the ALL HR GROUP CHAT. It predates

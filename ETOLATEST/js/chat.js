@@ -378,6 +378,12 @@
     var draftHeartbeatTimer = null;
     var currentRole = null;
     var currentUserEmail = null;
+    // The signed-in account's OWN users/<email> doc, live: { role, branches }.
+    // null until the first snapshot. Drives isBranchRoomAllowed() — see
+    // startSelfAccessListener().
+    var selfAccess = null;
+    var selfAccessSignature = null;
+    var selfAccessUnsub = null;
     var els = {};
 
     // Last presence snapshot, kept so the periodic sweep can re-evaluate
@@ -631,6 +637,42 @@
       });
     }
 
+    /**
+     * ⚠️ MAY THIS PERSON SEE / OPEN THIS BRANCH ROOM *RIGHT NOW*?
+     *
+     * Decided from the person's CURRENT role and CURRENT branch assignment —
+     * never from the room's `members` array, a remembered room, or chat
+     * history. `members` is a snapshot the superadmin's client reseeds, so it
+     * can lag a role/branch change; this gate (and the matching
+     * hasCurrentBranchAccess() in firestore.rules) is what stops a stale entry
+     * from keeping someone in a branch they were moved out of.
+     *
+     *   not a branch room     -> true (1:1 and the All HR room have own gates)
+     *   superadmin, hr        -> true (company-wide by spec)
+     *   owner, rmsm           -> the room's branch is in `branches`, matched by
+     *                            name (case-insensitive) OR by slug, so a title
+     *                            that has not arrived yet still resolves
+     *   `branches` null       -> false: the profile has not loaded, fail CLOSED
+     *   anything else         -> false
+     *
+     * PURE (no module state) — test/chat-branch-access-sync.test.js runs it.
+     */
+    function canAccessBranchRoom(roomId, title, role, branches) {
+      var id = String(roomId || '');
+      if (id.indexOf('branch-') !== 0) return true;
+      var r = normalizeRole(role);
+      if (r === 'superadmin' || r === 'hr') return true;
+      if (r !== 'owner' && r !== 'rmsm') return false;
+      if (!Array.isArray(branches)) return false;
+      var name = String(title || '').trim().toLowerCase();
+      return branches.some(function (b) {
+          var raw = String(b || '').trim();
+          if (!raw) return false;
+          if (name && raw.toLowerCase() === name) return true;
+          return branchKey(raw) === id;
+      });
+    }
+
     function branchGroupMembers(branch, users, approvedEmail) {
       var key = String(branch || '').trim().toLowerCase();
       var seen = {};
@@ -699,6 +741,8 @@
         branchGroupName: branchGroupName,
         branchGroupMembers: branchGroupMembers,
         branchHasStoreTeam: branchHasStoreTeam,
+        // The CURRENT-access gate for branch rooms (role + assigned branches).
+        canAccessBranchRoom: canAccessBranchRoom,
         // Retire my own message into an "Unsent message" tombstone. Exposed so
         // the confirm modal (window.confirmUnsendMessage) can call it; the
         // author-only/one-way guarantee lives in firestore.rules, re-checked
@@ -1860,6 +1904,53 @@
     }
 
     /**
+     * ⚠️ THE SUPER ADMIN INDICATOR FOR STORE ROLES — keep the directory ROLE true.
+     *
+     * HR knows a Super Admin's role from its roster (`users where role ==
+     * 'superadmin'`), which paints that row blue with the gold rank ring. An
+     * Area Manager / RM/SM has NO roster (no personal-chat peer, and the rules
+     * deliberately let store roles read no account docs), so for them the role
+     * comes ONLY from the self-published directory
+     * (chats/owner-superadmin/profiles, readable by every chat role). A Super
+     * Admin's entry was written only when they saved a chat profile by hand —
+     * usually never, or with `role: ''` — so the store side resolved the role
+     * to '' and drew the grey "unknown" avatar.
+     *
+     * So on every mount a Super Admin stamps `role: 'superadmin'` onto their own
+     * directory entry (only when it is missing or wrong), and an account whose
+     * entry still SAYS superadmin but is no longer one (re-roled, e.g. in the
+     * Firebase console) corrects it — so an ex-Super Admin never stays blue.
+     * Nobody else's entry is touched, and no other role publishes one here, so
+     * no other list changes.
+     *
+     * No rules change: `{ email, role }` merged onto the doc stays inside the
+     * deployed profiles allowlist (email, role, displayName, title) and the
+     * `email == selfEmail()` check. Best-effort: a refused write only leaves
+     * the old grey, never breaks chat.
+     */
+    function syncMyDirectoryRole() {
+        if (!currentUserEmail) return;
+        if (typeof db === 'undefined' || !db || typeof db.collection !== 'function') return;
+        const mine = normalizeRole(currentRole);
+        let ref;
+        try {
+            ref = myDirectoryRef();
+        } catch (e) { return; }
+        if (!ref || typeof ref.get !== 'function' || typeof ref.set !== 'function') return;
+        ref.get().then(function (snap) {
+            const existing = (snap && snap.exists && typeof snap.data === 'function' && snap.data()) || {};
+            const listed = normalizeRole(existing.role);
+            const needed = mine === 'superadmin'
+                ? listed !== 'superadmin'               // publish / fix my superadmin badge
+                : listed === 'superadmin';              // drop a stale superadmin badge
+            if (!needed) return;
+            return ref.set({ email: currentUserEmail, role: mine || '' }, { merge: true });
+        }).catch(function (error) {
+            console.warn('[Chat] Directory role not synced:', error && error.message);
+        });
+    }
+
+    /**
      * The roles this person may START a thread with — the exact set the pairing
      * rule (isStartable) accepts, derived from CHAT_ALLOWED_ROLES rather than
      * written out again, so adding a chat role cannot leave the roster behind.
@@ -2465,7 +2556,17 @@ function syncRoomMessageWatchers() {
             // it (the remembered-rooms invariant): unknown stays visible, a
             // known-forbidden role is hidden.
             const peerEntry = startableEntryFor(peer);
-            if (peerEntry && normalizeRole(peerEntry.role) && !isStartable(peerEntry)) return;
+            // ⚠️ EXCEPT an EXISTING thread between a store role (Area Manager /
+            // RM/SM) and a Super Admin. Before syncMyDirectoryRole() published
+            // the Super Admin's role, the store side never KNEW that peer's
+            // role, so this row stayed visible as a grey "unknown" — knowing the
+            // role now must colour it blue, not make it vanish. Only an EXISTING
+            // conversation is kept: never-started rows still come solely from
+            // isStartable() below, so no new Super Admin row is offered.
+            const myRole = normalizeRole(currentRole);
+            const keepSuperadminThread = (myRole === 'owner' || myRole === 'rmsm')
+                && peerEntry && normalizeRole(peerEntry.role) === 'superadmin';
+            if (!keepSuperadminThread && peerEntry && normalizeRole(peerEntry.role) && !isStartable(peerEntry)) return;
             seen[peer] = true;
             rows.push({
                 roomId: roomId,
@@ -2529,7 +2630,9 @@ function syncRoomMessageWatchers() {
         // allowlist never do.
         if (inGroupStyleRoom()) {
             const branchRooms = Object.keys(conversationSummaries).filter(function (id) {
-                return isBranchRoom(id);
+                // CURRENT role + branches decide, not the summary's presence.
+                const s = conversationSummaries[id];
+                return isBranchRoom(id) && isBranchRoomAllowed(id, s && s.title);
             });
             branchRooms.forEach(function (roomId) {
                 const group = conversationSummaries[roomId];
@@ -2661,6 +2764,12 @@ function startConversationListListener() {
                 snapshot.forEach(function (doc) {
                     const data = doc.data() || {};
                     const roomId = doc.id;
+                    // ⚠️ Membership alone is not access: a stale `members` entry
+                    // must not list a branch the account is no longer assigned to.
+                    if (isBranchRoomDenied(roomId, data.title)) {
+                        forgetRoom(roomId);
+                        return;
+                    }
                     const existing = conversationSummaries[roomId];
 
                     const incoming = {
@@ -2687,6 +2796,8 @@ function startConversationListListener() {
                 // Preserve individually subscribed rooms, including All HR.
                 Object.keys(conversationRoomUnsubs).forEach(function (rid) {
                     if (!conversationSummaries[rid]) return;
+                    // A preserved branch room must still pass CURRENT access.
+                    if (isBranchRoomDenied(rid, conversationSummaries[rid].title)) return;
 
                     if (!next[rid]) {
                         next[rid] = conversationSummaries[rid];
@@ -2884,6 +2995,13 @@ function mergeConversationSummary(existing, incoming) {
     
 function applyRoomSummaryToList(roomId, data) {
     if (!roomId) return;
+
+    // A branch room the account may no longer use is treated as GONE (and
+    // forgotten), whatever the per-room listener could still read.
+    if (data && isBranchRoomDenied(roomId, data.title)) {
+        forgetRoom(roomId);
+        data = null;
+    }
 
     if (!data) {
         if (!conversationSummaries[roomId]) return;
@@ -3207,6 +3325,158 @@ function subscribeRoomForList(roomId) {
     }
 
 
+    // ==============================================================
+    //  CURRENT ACCESS (role + assigned branches), LIVE
+    //
+    //  The chat list must follow the account's CURRENT role and branches —
+    //  not the room's `members` snapshot, remembered rooms, or history. The
+    //  signed-in user's own users/<email> doc is watched (a self-read the rules
+    //  always allow). On first load it becomes the baseline and every branch
+    //  room the account may no longer use is pruned. On any LATER change to the
+    //  role, or to the branches of a branch-scoped role, the whole page is
+    //  RELOADED (per spec), so every role gate on the page — tabs, dashboards,
+    //  redirects, this chat — re-applies from the fresh profile.
+    //
+    //  Messages are never deleted: an old branch chat just stops being listed
+    //  or openable; firestore.rules (hasCurrentBranchAccess) refuses its
+    //  content server-side as well.
+    // ==============================================================
+
+    /** The access gate with this module's live state filled in. */
+    function isBranchRoomAllowed(roomId, title) {
+        if (!roomId || !isBranchRoom(roomId)) return true;
+        var role = selfAccess ? selfAccess.role : normalizeRole(currentRole);
+        var branches = selfAccess ? selfAccess.branches : null;
+        return canAccessBranchRoom(roomId, title, role, branches);
+    }
+
+    /**
+     * DEFINITELY not allowed — used where a room would be DROPPED and
+     * forgotten. While a branch-scoped role's own profile has not arrived yet
+     * the answer is unknown, not "no": the room is kept (hidden from the list
+     * and unopenable by isBranchRoomAllowed) and decided by
+     * pruneDisallowedRooms() once the profile lands. Dropping it here instead
+     * would lose an allowed room until the next list snapshot.
+     */
+    function isBranchRoomDenied(roomId, title) {
+        if (!roomId || !isBranchRoom(roomId)) return false;
+        var role = selfAccess ? selfAccess.role : normalizeRole(currentRole);
+        if (!selfAccess && (role === 'owner' || role === 'rmsm')) return false;
+        return !isBranchRoomAllowed(roomId, title);
+    }
+
+    /**
+     * What a reload is for: the role, plus the branches ONLY for a
+     * branch-scoped role. A superadmin/HR sees every branch regardless, so
+     * editing their own branch ticks must not reload their page (it would also
+     * cut short the superadmin's own save + member sweep in script.js).
+     */
+    function accessSignature(access) {
+        if (!access) return '';
+        var scoped = access.role === 'owner' || access.role === 'rmsm';
+        return access.role + '|' + (scoped ? access.branches.slice().sort().join('\n') : '*');
+    }
+
+    /** Close the open conversation and drop back to the list. */
+    function leaveActiveRoom() {
+        if (!activeRoomId) return;
+        withdrawPresence();
+        stopListener();
+        stopTypingListener();
+        stopReadReceiptListener();
+        stopReactionsListener();
+        activeRoomId = null;
+        activePeerEmail = null;
+        if (els.overlay) els.overlay.classList.remove('chat-showing-thread');
+        if (els.log) els.log.innerHTML = '';
+        applyActiveRoomToHeader();
+    }
+
+    /**
+     * Remove every branch room this account may no longer use from the list,
+     * the remembered rooms and the per-room listeners — and close it if open.
+     */
+    function pruneDisallowedRooms() {
+        var changed = false;
+        var drop = function (roomId) {
+            if (conversationRoomUnsubs[roomId]) {
+                try { conversationRoomUnsubs[roomId](); } catch (e) { /* ignore */ }
+                delete conversationRoomUnsubs[roomId];
+            }
+            delete conversationRoomsDenied[roomId];
+            if (conversationSummaries[roomId]) {
+                delete conversationSummaries[roomId];
+                changed = true;
+            }
+            forgetRoom(roomId);
+            if (roomId === activeRoomId) leaveActiveRoom();
+        };
+        Object.keys(conversationSummaries).forEach(function (roomId) {
+            var s = conversationSummaries[roomId];
+            if (isBranchRoomDenied(roomId, s && s.title)) drop(roomId);
+        });
+        Object.keys(knownRooms).forEach(function (roomId) {
+            if (conversationSummaries[roomId]) return;   // judged above, with its title
+            if (isBranchRoomDenied(roomId, '')) drop(roomId);
+        });
+        if (activeRoomId && isBranchRoom(activeRoomId)) {
+            var a = conversationSummaries[activeRoomId];
+            if (!isBranchRoomAllowed(activeRoomId, a && a.title)) leaveActiveRoom();
+        }
+        if (changed) {
+            renderConversationList();
+            updateLauncherBadgeFromList();
+            syncRoomMessageWatchers();
+        }
+    }
+
+    function startSelfAccessListener() {
+        if (selfAccessUnsub) return;
+        if (typeof db === 'undefined' || !db || typeof db.collection !== 'function' || !currentUserEmail) return;
+        try {
+            selfAccessUnsub = db.collection('users').doc(String(currentUserEmail).toLowerCase())
+                .onSnapshot(function (snap) {
+                    var data = (snap && snap.exists && snap.data()) || {};
+                    var next = {
+                        role: normalizeRole(data.role),
+                        branches: (Array.isArray(data.branches) ? data.branches : [])
+                            .map(function (b) { return String(b || '').trim(); })
+                            .filter(Boolean)
+                    };
+                    var sig = accessSignature(next);
+                    if (selfAccessSignature !== null && sig !== selfAccessSignature) {
+                        // Role or branch access changed while the page is open:
+                        // reload so the WHOLE page follows the new permissions.
+                        selfAccessSignature = sig;
+                        console.log('[Chat] Role/branch access changed — reloading to apply it.');
+                        if (typeof location !== 'undefined' && location && typeof location.reload === 'function') {
+                            location.reload();
+                            return;
+                        }
+                    }
+                    selfAccessSignature = sig;
+                    selfAccess = next;
+                    pruneDisallowedRooms();
+                    renderConversationList();
+                }, function (error) {
+                    // A self-read is always allowed; a failure here is offline
+                    // or a missing doc. Keep the fail-closed default (null).
+                    console.warn('[Chat] Could not watch own access:', error && error.message);
+                });
+        } catch (error) {
+            console.warn('[Chat] Could not watch own access:', error && error.message);
+        }
+    }
+
+    function stopSelfAccessListener() {
+        if (selfAccessUnsub) {
+            try { selfAccessUnsub(); } catch (e) { /* ignore */ }
+            selfAccessUnsub = null;
+        }
+        selfAccess = null;
+        selfAccessSignature = null;
+    }
+
     /**
      * Open a conversation.
      *
@@ -3219,6 +3489,18 @@ function subscribeRoomForList(roomId) {
      */
     function selectConversation(roomId) {
         if (!roomId) return;
+        // ⚠️ CURRENT ACCESS, NOT AN OLD LINK. A remembered room id, a cached row
+        // or a deep link must not reopen a branch chat the account was moved
+        // out of (or whose access has not loaded yet).
+        if (isBranchRoom(roomId)) {
+            var target = conversationSummaries[roomId];
+            if (!isBranchRoomAllowed(roomId, target && target.title)) {
+                showToast(selfAccess || normalizeRole(currentRole) === 'superadmin' || normalizeRole(currentRole) === 'hr'
+                    ? 'You no longer have access to this branch chat.'
+                    : 'Still loading your branch access — try again in a moment.', 'info');
+                return;
+            }
+        }
         if (roomId === activeRoomId) {
             if (els.overlay) els.overlay.classList.add('chat-showing-thread');
             return;
@@ -5803,6 +6085,13 @@ function syncSummaryFromMessage(roomId, msg) {
 
     /** Everything that must happen once a message is safely stored. */
     function finishSentMessage(text, me) {
+        // HR / superadmin mentioning a violation in a branch chat hands it to
+        // the Area Manager automatically. Fire-and-forget: the message is
+        // already saved, and a failed transfer must never look like a failed
+        // send. The room id is captured HERE, before anything below can change
+        // the active room. See autoTransferMentionedViolations().
+        autoTransferMentionedViolations(text, activeRoomId);
+
         // The room document EXISTS — it was committed first, as its own awaited
         // write, because the message rule resolves membership by reading it.
         // So the subscriptions deliberately skipped for a never-started
@@ -7538,6 +7827,87 @@ async function openTicketFromRef(ref) {
     }
 
     // ==============================================================
+    //  AUTO-TRANSFER ON MENTION (HR / superadmin, BRANCH CHATS ONLY)
+    //
+    //  When HR or a superadmin mentions a violation in a branch chat, the
+    //  report is handed to the Area Manager automatically, so the manager's
+    //  chip opens even if nobody remembered the manual "Transfer to Area
+    //  Manager" button (which stays exactly as it was).
+    //
+    //  ⚠️ THIS NEVER STARTS THE 8-HOUR TIMER. It only sets managerStatus via
+    //  transferViolationToAreaManager(), which also CLEARS any old open/expiry
+    //  stamps. The window starts where it always has: when the Area Manager
+    //  actually opens the modal (OwnerViolations.openModal ->
+    //  markViolationOpenedForAreaManager), whether from the chip or the tab.
+    //
+    //  ⚠️ NO DUPLICATE TIMERS. A report already transferred with a window still
+    //  running (or not yet opened) is left untouched. Only a report that was
+    //  never transferred, was reverted, or whose window has lapsed is
+    //  (re-)transferred, giving a fresh window on the next open.
+    //
+    //  No rules change: HR may write exactly these manager* fields on reports
+    //  transferred to HR (firestore.rules), and a mentionable report is always
+    //  one with hrStatus == 'transferred' (isMentionableViolation).
+    // ==============================================================
+    var autoTransferInFlight = new Set();
+
+    async function autoTransferMentionedViolations(text, roomId) {
+        try {
+            if (!canMentionViolations()) return;
+            if (!roomId || !isBranchRoom(roomId)) return;
+            var refs = extractViolationRefs(text);
+            if (!refs.length) return;
+            if (typeof db === 'undefined' || !db || typeof db.collection !== 'function') return;
+            var service = (typeof window !== 'undefined') ? window.firestoreService : null;
+            if (!service || typeof service.transferViolationToAreaManager !== 'function') return;
+
+            // The branch the message was SENT in. Captured now because the user
+            // may switch rooms while the lookups below are in flight, and the
+            // branch scope must be judged against the room of the mention.
+            var sentBranch = activeRoomId === roomId ? activeRoomBranch() : '';
+
+            var me = (typeof auth !== 'undefined' && auth && auth.currentUser) || {};
+            var byEmail = me.email || currentUserEmail || null;
+            var byName = me.displayName || null;
+
+            for (var i = 0; i < refs.length; i++) {
+                var violation = await resolveViolationRef(refs[i]);
+                if (!violation || !violation.id) continue;
+                var id = String(violation.id);
+                var label = violation.violationNumber || refs[i].toUpperCase();
+
+                if (sentBranch) {
+                    var own = String(violation.branchName || violation.branch || violation.store || '').trim().toLowerCase();
+                    if (own !== sentBranch) continue;
+                }
+                if (autoTransferInFlight.has(id)) continue;
+                autoTransferInFlight.add(id);
+                try {
+                    // Fresh read: decide on the server's state, not a cache that
+                    // may predate a revert or another user's transfer.
+                    var snap = await db.collection('violations').doc(id).get();
+                    if (!snap.exists) continue;
+                    var data = snap.data() || {};
+                    var transferred = String(data.managerStatus || '').trim().toLowerCase() === 'transferred';
+                    var expiresMs = Number(data.managerExpiresAtMs) || 0;
+                    if (transferred && (expiresMs === 0 || expiresMs > Date.now())) {
+                        continue;   // already accessible — leave the timer alone
+                    }
+                    await service.transferViolationToAreaManager(id, byEmail, byName);
+                    showToast(label + ' was shared with the Area Manager.', 'success');
+                } catch (e) {
+                    console.warn('[Chat] Auto-transfer of ' + label + ' to the Area Manager failed:', e);
+                    showToast('Could not share ' + label + ' with the Area Manager automatically — use the Transfer button.', 'info');
+                } finally {
+                    autoTransferInFlight.delete(id);
+                }
+            }
+        } catch (e) {
+            console.warn('[Chat] Auto-transfer on mention failed:', e);
+        }
+    }
+
+    // ==============================================================
     //  HANDING THE SCREEN TO THE VIOLATION MODAL
     //
     //  The suspend/restore machinery above is already generic — it takes the
@@ -8485,6 +8855,7 @@ async function openTicketFromRef(ref) {
         // or a re-init would leave two subscriptions writing the same state.
         stopDirectoryListener();
         stopConversationListListener();
+        stopSelfAccessListener();
         // ...and so is the account roster: it is a live listener now, and a
         // stale one would keep rebuilding the list for whoever signs in next.
         if (rosterUnsub) {
@@ -8616,12 +8987,19 @@ async function openTicketFromRef(ref) {
         // arriving in a conversation the user has not opened yet must still
         // raise the sidebar badge and the launcher badge.
         startDirectoryListener();
+        // Keep this account's directory ROLE true, so Area Managers / RM-SM
+        // (who have no roster) can show a Super Admin's blue indicator.
+        syncMyDirectoryRole();
         // The account roster (both chat roles) is the SECOND source of people:
         // the directory is self-published, so without it a never-messaged HR
         // who has never opened the chat — or a superadmin who never has —
         // could not be discovered at all. It is live, so a newly registered
         // account appears without a reload.
         loadHrRoster();
+        // The account's own role + branches, live — the source of truth for
+        // which branch rooms may be listed/opened (isBranchRoomAllowed), and
+        // the trigger for a reload when an admin changes them.
+        startSelfAccessListener();
         startConversationListListener();
         // The per-room listeners are started by selectConversation() once a
         // row is picked; there is no room to subscribe to before that.
