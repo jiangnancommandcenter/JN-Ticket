@@ -620,6 +620,7 @@ const approvalDetailsStatus = $('#approvalDetailsStatus');
 const approvalModalFooter = $('#approvalModalFooter');
 const btnTransferToHr = $('#btnTransferToHr');
 const btnTransferToStore = $('#btnTransferToStore');
+const btnRevertTicketTransfer = $('#btnRevertTicketTransfer');
 const btnRejectApproval = $('#btnRejectApproval');
 // 2-Day tracking access: superadmin-only "Approve Request & Resend", shown on
 // an expired approved ticket ONLY when somebody has asked to reopen it.
@@ -1109,7 +1110,14 @@ auth.onAuthStateChanged(async (user) => {
         // data (branch status) still shows. This idempotently re-runs the ticket
         // loader now that we are authenticated. It no-ops on desktop where the
         // initial load already succeeded.
-        if (isInitialTicketLoad || allTickets.length === 0) {
+        // ⚡ PERF: only re-read when the live listener was actually rejected.
+        // A healthy listener already delivers the full list (and keeps it live),
+        // so the old unconditional full download here was a duplicate read.
+        // A rejected listener is restarted (not replaced by a one-off read) so
+        // the list also stays live afterwards.
+        if (ticketListenerFailed) {
+            await setupTicketListener();
+        } else if (!ticketListenerActive && (isInitialTicketLoad || allTickets.length === 0)) {
             await loadTicketsDirect();
         }
 
@@ -1366,8 +1374,12 @@ async function initApp() {
         const violationsReady = setupViolationListener();
         // Auto-revert runs on its own 5-second timer, independent of snapshots.
         startAutoRevertTimer();
-        setupTicketListener();
-        const ticketsReady = loadTicketsDirect();
+        // ⚡ PERF: the live listener is now the ONLY initial ticket read. It used
+        // to be paired with loadTicketsDirect(), a second full server download
+        // of the whole tickets collection on every page load. The listener
+        // resumes from the offline cache and only fetches changes, so
+        // `ticketsReady` resolves from its first usable snapshot instead.
+        const ticketsReady = setupTicketListener();
 
         // ===== Instant branch paint from cache, then reconcile from server =====
         await paintBranchesFromCache();
@@ -1521,37 +1533,72 @@ async function loadBranchData() {
             branches = await firestoreService.getBranches();
         }
 
-        // ⚠️ PARALLEL, not one-at-a-time. This used to be a `for` loop with an
-        // `await` on every getBranchLogs() + setBranch() — i.e. 2×(branch count)
-        // SERIALIZED network round-trips before initApp() could move on to
-        // anything else. With many branches that alone delayed the violations
-        // table (registered afterwards) by seconds on refresh. The per-branch
-        // work is independent, so it all runs concurrently.
-        await Promise.all(branches.map(async (branch) => {
-            const logs = await firestoreService.getBranchLogs(branch.branchName);
-            if (logs.length > 0) {
-                const latest = logs[0];
-                const updateData = {
-                    currentStatus: latest.status,
-                    lastUpdated: latest.dateTime,
-                    remarks: latest.remarks || branch.remarks || ''
-                };
-                if (latest.status === 'Offline') {
-                    updateData.currentDowntimeStart = latest.dateTime;
-                } else {
-                    updateData.currentDowntimeStart = null;
-                }
-                await firestoreService.setBranch(branch.branchName, updateData);
-                branch.currentStatus = latest.status;
-                branch.lastUpdated = latest.dateTime;
-                branch.currentDowntimeStart = updateData.currentDowntimeStart;
-                branch.remarks = updateData.remarks;
-            }
-        }));
+        await syncBranchStatusesFromLogs();
     } catch (error) {
         console.error('Error loading branch data:', error);
         console.log('Failed to load branch data.');
     }
+}
+
+/**
+ * Derive each branch's current status from its newest status log and persist
+ * it onto the branch document.
+ *
+ * ⚡ PERF: this used to call getBranchLogs() once PER BRANCH — re-downloading
+ * every status log a second time (allLogs already holds the whole collection,
+ * sorted newest-first, in the same document order), plus an unconditional
+ * setBranch() write per branch on every page load. It now reads the newest log
+ * per branch from allLogs in memory (identical result, zero extra reads) and
+ * only writes a branch document when its stored status actually differs.
+ */
+async function syncBranchStatusesFromLogs() {
+    const latestByBranch = new Map();
+    for (const log of allLogs) {
+        if (log && log.branchName && !latestByBranch.has(log.branchName)) {
+            latestByBranch.set(log.branchName, log);
+        }
+    }
+    const tsMillis = (v) => (v && typeof v.toMillis === 'function') ? v.toMillis()
+        : (v && typeof v.toDate === 'function') ? v.toDate().getTime() : (v == null ? null : v);
+
+    await Promise.all(branches.map(async (branch) => {
+        const latest = latestByBranch.get(branch.branchName);
+        if (!latest) return;
+        const updateData = {
+            currentStatus: latest.status,
+            lastUpdated: latest.dateTime,
+            remarks: latest.remarks || branch.remarks || '',
+            currentDowntimeStart: latest.status === 'Offline' ? latest.dateTime : null
+        };
+        const unchanged = branch.currentStatus === updateData.currentStatus
+            && tsMillis(branch.lastUpdated) === tsMillis(updateData.lastUpdated)
+            && (branch.remarks || '') === updateData.remarks
+            && tsMillis(branch.currentDowntimeStart == null ? null : branch.currentDowntimeStart)
+                === tsMillis(updateData.currentDowntimeStart);
+        if (!unchanged) {
+            await firestoreService.setBranch(branch.branchName, updateData);
+        }
+        branch.currentStatus = updateData.currentStatus;
+        branch.lastUpdated = updateData.lastUpdated;
+        branch.currentDowntimeStart = updateData.currentDowntimeStart;
+        branch.remarks = updateData.remarks;
+    }));
+}
+
+/**
+ * After a successful status-log edit/delete: keep allLogs newest-first (an edit
+ * can move a log in time), re-derive branch statuses, and repaint — the same
+ * end state the old full loadBranchData() reload produced, without the reads.
+ */
+function refreshBranchStatusesLocally() {
+    const t = (l) => l?.dateTime?.toDate?.()?.getTime() || 0;
+    allLogs.sort((a, b) => t(b) - t(a));
+    return syncBranchStatusesFromLogs()
+        .catch((e) => console.error('Branch status sync error:', e))
+        .then(() => {
+            renderDashboard();
+            renderBranchesTable();
+        });
 }
 
 async function loadSuperadminUsers() {
@@ -2690,6 +2737,7 @@ function renderDashboard() {
     renderCharts();
     renderDashHero();
     updateOfflineBadge();
+    if (typeof window.renderVmsWall === 'function') window.renderVmsWall();
 }
 
 /** Hero clock + contextual subtitle (pure render, no timers). */
@@ -3110,8 +3158,8 @@ function renderStatusChart() {
     if (statusChart) { statusChart.data.datasets[0].data = [online, offline]; statusChart.update(); return; }
     statusChart = new Chart(ctx, {
         type: 'doughnut',
-        data: { labels: ['Online', 'Offline'], datasets: [{ data: [online, offline], backgroundColor: ['#22c55e', '#ef4444'], borderColor: ['#FFFFFF', '#FFFFFF'], borderWidth: 3, hoverOffset: 8 }] },
-        options: { responsive: true, maintainAspectRatio: false, cutout: '65%', plugins: { legend: { position: 'bottom', labels: { color: '#64748B', padding: 14, font: { family: 'Inter', size: 12 } } } } }
+        data: { labels: ['Online', 'Offline'], datasets: [{ data: [online, offline], backgroundColor: ['#2fd27a', '#ff4b40'], borderColor: ['rgba(0,0,0,0)', 'rgba(0,0,0,0)'], borderWidth: 2, hoverOffset: 4 }] },
+        options: { responsive: true, maintainAspectRatio: false, cutout: '72%', plugins: { legend: { position: 'bottom', labels: { color: '#64748B', padding: 14, font: { family: 'JetBrains Mono', size: 12 } } } } }
     });
 }
 
@@ -3183,8 +3231,8 @@ async function renderTrendChart() {
     if (trendChart) { trendChart.data.labels = labels; trendChart.data.datasets[0].data = dd; trendChart.update(); return; }
     trendChart = new Chart(ctx, {
         type: 'line',
-        data: { labels, datasets: [{ label: 'Downtime (min)', data: dd, borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', fill: true, tension: 0.3, pointBackgroundColor: '#ef4444', pointRadius: 3, borderWidth: 2 }] },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#64748B', font: { family: 'Inter', size: 11 } } } }, scales: { x: { grid: { color: 'rgba(148,163,184,0.25)' }, ticks: { color: '#64748B', font: { family: 'Inter', size: 10 }, maxRotation: 0, autoSkip: true, maxTicksLimit: window.innerWidth <= 640 ? 7 : undefined }, title: { display: true, text: 'Day', color: '#64748B' } }, y: { grid: { color: 'rgba(148,163,184,0.25)' }, ticks: { color: '#64748B', font: { family: 'Inter', size: 10 } }, title: { display: true, text: 'Minutes', color: '#64748B' }, beginAtZero: true } } }
+        data: { labels, datasets: [{ label: 'Downtime (min)', data: dd, borderColor: '#ff4b40', backgroundColor: 'rgba(255,75,64,0.10)', fill: true, tension: 0, pointBackgroundColor: '#ff4b40', pointRadius: 2, pointStyle: 'rect', borderWidth: 1.5 }] },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#64748B', font: { family: 'JetBrains Mono', size: 11 } } } }, scales: { x: { grid: { color: 'rgba(102,120,138,0.22)' }, ticks: { color: '#64748B', font: { family: 'JetBrains Mono', size: 10 }, maxRotation: 0, autoSkip: true, maxTicksLimit: window.innerWidth <= 640 ? 7 : undefined }, title: { display: true, text: 'Day', color: '#64748B' } }, y: { grid: { color: 'rgba(102,120,138,0.22)' }, ticks: { color: '#64748B', font: { family: 'JetBrains Mono', size: 10 } }, title: { display: true, text: 'Minutes', color: '#64748B' }, beginAtZero: true } } }
     });
 }
 
@@ -3524,10 +3572,9 @@ if (editHistoryForm) {
                 dateTime: dateTime.toISOString(),
                 remarks
             });
-            loadBranchData().then(() => {
-                renderDashboard();
-                renderBranchesTable();
-            });
+            // ⚡ PERF: re-derive branch status from the patched in-memory logs
+            // instead of re-downloading every branch + every status log.
+            refreshBranchStatusesLocally();
         } catch (error) {
             console.error('Edit history error:', error);
             console.log('Failed to update record on server.');
@@ -3560,10 +3607,8 @@ window.deleteHistoryLog = async function(logId) {
 
     try {
         await firestoreService.deleteStatusLog(logId);
-        loadBranchData().then(() => {
-            renderDashboard();
-            renderBranchesTable();
-        });
+        // ⚡ PERF: same as edit — no full reload after a successful delete.
+        refreshBranchStatusesLocally();
     } catch (error) {
         console.error('Delete history error:', error);
         console.log('Failed to delete record on server.');
@@ -3948,35 +3993,67 @@ async function loadViewHistory(branchName) {
 //  TICKET SYSTEM - REAL-TIME LISTENER
 // ==============================================================
 
+// ⚡ PERF state for the single ticket read path (see setupTicketListener).
+let ticketListenerActive = false;   // a listener is subscribed and has not errored
+let ticketListenerFailed = false;   // the last listener was rejected (e.g. pre-auth)
+let ticketDesktopNotificationsInit = false;
+let unsubscribeTickets = null;
+
+/**
+ * Live ticket listener — the ONLY initial ticket read on page load.
+ *
+ * Returns a promise that resolves once the list is usable: the first snapshot
+ * that came from the server, a non-empty snapshot from the offline cache (instant
+ * paint), an error, or a 10s safety timeout (offline first visit) — so initApp()
+ * never hangs waiting on it.
+ *
+ * Initial-sync rule (replaces the old duplicate getTickets() race): every
+ * snapshot up to and including the FIRST SERVER snapshot replaces the list
+ * wholesale and raises NO "new ticket" / status notifications — exactly what
+ * the old direct read achieved by pre-filling allTickets. `includeMetadataChanges`
+ * lets us see the cache→server transition even when nothing changed.
+ */
 function setupTicketListener() {
-    let isFirstSnapshot = true;
+    let initialSyncDone = false;
+    let resolveReady;
+    const ready = new Promise((resolve) => { resolveReady = resolve; });
+    const markReady = () => { if (resolveReady) { resolveReady(); resolveReady = null; } };
+    setTimeout(markReady, 10000);
 
     // ===== Real Desktop Notifications (like YouTube/Slack) =====
-    if (typeof window.initDesktopNotifications === 'function') {
+    if (!ticketDesktopNotificationsInit && typeof window.initDesktopNotifications === 'function') {
+        ticketDesktopNotificationsInit = true;
         window.initDesktopNotifications();
     }
 
-    firestoreService.listenTickets((tickets, changes) => {
-        if (isFirstSnapshot) {
-            if (tickets.length > 0) {
-                allTickets = tickets;
-                filterTickets();
-                updateTicketDashboard();
-                updatePendingBadge();
-                updateApprovalsBadge();
-                // ===== Live approval queue: render from initial snapshot =====
-                applyApprovalFilters(false);
-            } else if (allTickets.length > 0) {
-                filterTickets();
-                updateTicketDashboard();
-                updatePendingBadge();
-                updateApprovalsBadge();
-                applyApprovalFilters(false);
+    if (typeof unsubscribeTickets === 'function') {
+        try { unsubscribeTickets(); } catch (e) { /* ignore */ }
+    }
+    ticketListenerActive = true;
+    ticketListenerFailed = false;
+
+    unsubscribeTickets = firestoreService.listenTickets((tickets, changes, metadata) => {
+        if (!initialSyncDone) {
+            const fromCache = !!(metadata && metadata.fromCache);
+            // An empty CACHE snapshot means "nothing cached yet", not "no tickets":
+            // keep whatever is shown and wait for the server.
+            if (fromCache && tickets.length === 0) return;
+            allTickets = tickets;
+            filterTickets();
+            updateTicketDashboard();
+            updatePendingBadge();
+            updateApprovalsBadge();
+            // ===== Live approval queue: render from initial snapshot =====
+            applyApprovalFilters(false);
+            if (!fromCache) {
+                initialSyncDone = true;
+                isInitialTicketLoad = false;
+                if (dashboardDataReady) renderDashboard();
             }
-            isFirstSnapshot = false;
+            markReady();
             return;
         }
-        
+
         const changeArray = changes || [];
         if (changeArray.length === 0) return;
         
@@ -4033,7 +4110,12 @@ function setupTicketListener() {
         }
     }, (error) => {
         console.error('Ticket listener error:', error);
-    });
+        ticketListenerActive = false;
+        ticketListenerFailed = true;
+        markReady();
+    }, { includeMetadataChanges: true });
+
+    return ready;
 }
 
 // ==============================================================
@@ -4139,13 +4221,15 @@ function filterTickets() {
     const selectedBranch = ticketBranchFilter ? ticketBranchFilter.value : 'all';
 
     filteredTickets = allTickets.filter(ticket => {
-        const searchable = [
+        // ⚡ PERF: the haystack (3 locale date formats per ticket) is only built
+        // when there IS a keyword — this runs over every ticket on every live
+        // snapshot, and with an empty search box it was pure overhead.
+        const keywordMatch = !keyword || [
             ticket.ticketNumber, ticket.branch, ticket.name, ticket.incident, ticket.description,
             // Date Created, in the formats users type ("Oct 10, 2026", "10/10/2026",
             // "2026-10-10"), matching this dashboard's formatDateTime column.
             ...dateSearchTokens(ticket.createdAt)
-        ].filter(Boolean).join(' ').toLowerCase();
-        const keywordMatch = !keyword || searchable.includes(keyword);
+        ].filter(Boolean).join(' ').toLowerCase().includes(keyword);
         const statusMatch = selectedStatus === 'all' || getDisplayStatus(ticket) === selectedStatus;
         const priorityMatch = selectedPriority === 'all' || (ticket.priority || 'Low') === selectedPriority;
         const branchMatch = selectedBranch === 'all' || ticket.branch === selectedBranch;
@@ -4560,6 +4644,21 @@ function mergeOperatorFootage(ticket, uploaded, removedIds) {
  * `addedKeys` is returned so the caller can mark the clips that arrived in
  * response to a footage request — see resolvedAdditionalFootage.
  */
+/**
+ * The clips that get the "NEW" badge: those added in the LATEST footage round
+ * (`latestAdditionalFootage`). `resolvedAdditionalFootage` is cumulative across
+ * rounds, so badging from it marked every clip from every round as new. Tickets
+ * resolved before `latestAdditionalFootage` existed fall back to it unchanged.
+ */
+function footageAddedList(ticket) {
+    // An EMPTY array is meaningful ("this round added nothing", e.g. a
+    // notes-only resubmit) — writers store [] rather than deleting the field
+    // during a footage cycle, so it never falls back to the cumulative list.
+    if (ticket && Array.isArray(ticket.latestAdditionalFootage)) return ticket.latestAdditionalFootage;
+    if (ticket && Array.isArray(ticket.resolvedAdditionalFootage)) return ticket.resolvedAdditionalFootage;
+    return [];
+}
+
 function splitApprovalAttachments(ticket) {
     const all = getApprovalAllAttachments(ticket);
     const footage = getApprovalOperatorFootage(ticket);
@@ -4573,8 +4672,7 @@ function splitApprovalAttachments(ticket) {
     // The clips added in response to a footage request. Deliberately read
     // straight off the ticket, NOT off `footage`: this is a SUBSET, and it is
     // the only thing that distinguishes an added clip from an original one.
-    const addedKeys = keySet((ticket && Array.isArray(ticket.resolvedAdditionalFootage))
-        ? ticket.resolvedAdditionalFootage : []);
+    const addedKeys = keySet(footageAddedList(ticket));
 
     if (requester && requester.length > 0) {
         const keys = keySet(requester);
@@ -4775,8 +4873,17 @@ window.openApprovalDetails = function(id) {
     // incremented accessResentCount) to a ticket that was closed on purpose.
     const showApproveActions = isPendingApproval(ticket) && currentUserIsSuperAdmin();
     const showResendAction = expiryInfo.expired && reopenPending && currentUserIsSuperAdmin();
-    const showFooter = showApproveActions || showResendAction;
+    // Undo a mistaken Transfer to Store / HR. Only tickets that went through
+    // the HR/Store handoff carry ticketTransferTo, so legacy approvals get none.
+    const showRevertAction = currentUserIsSuperAdmin() && isApprovedTicket(ticket)
+        && (ticket.ticketTransferTo === 'store' || ticket.ticketTransferTo === 'hr');
+    const showFooter = showApproveActions || showResendAction || showRevertAction;
     if (approvalModalFooter) approvalModalFooter.style.display = showFooter ? 'flex' : 'none';
+    if (btnRevertTicketTransfer) {
+        // Real display value — the button ships with .u-hidden (see btnResendAccess).
+        btnRevertTicketTransfer.style.display = showRevertAction ? 'inline-flex' : 'none';
+        btnRevertTicketTransfer.onclick = () => window.revertTicketTransfer(id);
+    }
     if (btnTransferToHr) {
         btnTransferToHr.style.display = showApproveActions ? '' : 'none';
         btnTransferToHr.onclick = () => window.transferTicketToHr(id);
@@ -4884,6 +4991,12 @@ if (!isCloudinaryConfigured()) {
                 ? mergeOperatorFootage(
                     { resolvedAdditionalFootage: data.resolvedAdditionalFootage }, uploaded)
                 : null;
+            // The superadmin's clip belongs to the CURRENT round as well, so it
+            // joins the "NEW" set alongside the operator's (see footageAddedKeys).
+            const mergedLatest = mergedAdditional
+                ? mergeOperatorFootage(
+                    { resolvedAdditionalFootage: data.latestAdditionalFootage || [] }, uploaded)
+                : null;
             await db.collection('tickets').doc(id).update({
                 attachments: merged,
                 resolutionAttachmentUrl: attachmentUrl(merged[0]),
@@ -4891,6 +5004,7 @@ if (!isCloudinaryConfigured()) {
                 // never had one keeps NO resolvedAdditionalFootage field at all —
                 // the same shape the operator's Resolve produces.
                 ...(mergedAdditional ? { resolvedAdditionalFootage: mergedAdditional } : {}),
+                ...(mergedLatest ? { latestAdditionalFootage: mergedLatest } : {}),
                 resolution: {
                     ...oldResolution,
                     attachments: mergedRes,
@@ -5013,10 +5127,16 @@ const input = editApprovalAttachmentInput;
                 ? mergeOperatorFootage(
                     { resolvedAdditionalFootage: data.resolvedAdditionalFootage }, uploaded)
                 : null;
+            // Current round, same as the approval-modal upload above.
+            const mergedLatest = mergedAdditional
+                ? mergeOperatorFootage(
+                    { resolvedAdditionalFootage: data.latestAdditionalFootage || [] }, uploaded)
+                : null;
             await db.collection('tickets').doc(id).update({
                 attachments: merged,
                 resolutionAttachmentUrl: attachmentUrl(merged[0]),
                 ...(mergedAdditional ? { resolvedAdditionalFootage: mergedAdditional } : {}),
+                ...(mergedLatest ? { latestAdditionalFootage: mergedLatest } : {}),
                 resolution: {
                     ...oldResolution,
                     attachments: mergedRes,
@@ -5101,6 +5221,65 @@ if (saveApprovalInfoBtn) {
     });
 }
 
+// ===== Open footage request (answered by the next approval) =====
+
+/** Milliseconds from a Firestore Timestamp / Date / ISO string, or 0. */
+function footageTimeMs(value) {
+    if (!value) return 0;
+    if (typeof value.toMillis === 'function') return value.toMillis();
+    if (typeof value.toDate === 'function') return value.toDate().getTime();
+    const t = new Date(value).getTime();
+    return Number.isFinite(t) ? t : 0;
+}
+
+/** The newest footage_request note, or null. */
+function latestFootageNote(ticket) {
+    const notes = (ticket && Array.isArray(ticket.comments) ? ticket.comments : [])
+        .filter(c => c && c.type === 'footage_request');
+    return notes.length ? notes[notes.length - 1] : null;
+}
+
+/**
+ * True when a footage request is still waiting for its answer, i.e. the
+ * approval about to happen is that answer. Uses the `footageRequest` marker;
+ * a ticket requested before the marker existed falls back to "the latest
+ * footage note is newer than the last approval" (a request is only ever filed
+ * on an approved ticket, so the next approval is its answer).
+ */
+function isOpenFootageRequest(ticket) {
+    if (!ticket) return false;
+    const marker = ticket.footageRequest;
+    if (marker && typeof marker === 'object') return marker.status === 'pending';
+    const note = latestFootageNote(ticket);
+    if (!note) return false;
+    return footageTimeMs(note.requestedAt) > footageTimeMs(ticket.approvedAt);
+}
+
+/** Who asked for the footage, as an email (may be ''). */
+function footageRequesterEmail(ticket) {
+    const marker = (ticket && ticket.footageRequest) || {};
+    const fromMarker = String(marker.requestedByEmail || '').trim().toLowerCase();
+    if (fromMarker) return fromMarker;
+    const note = latestFootageNote(ticket) || {};
+    const fromNote = String(note.requestedByEmail || note.requestedBy || '').trim().toLowerCase();
+    return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(fromNote) ? fromNote : '';
+}
+
+/** Firestore update fields that close the open request. */
+function footageAnsweredUpdate(ticket) {
+    const update = {
+        'footageRequest.status': 'answered',
+        'footageRequest.answeredAt': firebase.firestore.FieldValue.serverTimestamp()
+    };
+    if (!(ticket && ticket.footageRequest && typeof ticket.footageRequest === 'object')) {
+        const note = latestFootageNote(ticket) || {};
+        update['footageRequest.requestedBy'] = note.requestedBy || '';
+        update['footageRequest.requestedByEmail'] = footageRequesterEmail(ticket);
+        if (note.requestedAt) update['footageRequest.requestedAt'] = note.requestedAt;
+    }
+    return update;
+}
+
 window.approveResolution = async function(id) {
     const confirmed = await showConfirmDialog({
         title: 'Approve Resolution',
@@ -5146,6 +5325,9 @@ window.approveResolution = async function(id) {
     // already-approved ticket cannot silently hand out extra time.
     const needsFreshWindow = typeof hasFootageRequestComment === 'function'
         && hasFootageRequestComment(approvedTicket);
+    // Is THIS approval the answer to an open footage request? Then the
+    // manager who asked is told (owner-dashboard listener + email).
+    const footageAnswered = isOpenFootageRequest(approvedTicket);
 
     try {
         await firestoreService.updateTicket(id, {
@@ -5162,7 +5344,11 @@ window.approveResolution = async function(id) {
                 accessOpenedAt: firebase.firestore.FieldValue.delete(),
                 accessOpenedBy: firebase.firestore.FieldValue.delete(),
                 accessExpiresAt: firebase.firestore.FieldValue.delete()
-            } : {})
+            } : {}),
+            // Close the open request. Dot paths so the requester fields written
+            // with the request are kept; for an in-flight ticket that predates
+            // the marker, they are filled from the latest footage note.
+            ...(footageAnswered ? footageAnsweredUpdate(approvedTicket) : {})
         });
         // Keep the in-memory copy in sync (listener is only a backup): mirror
         // the re-arm so badge/filter/expiry checks see the fresh state at once.
@@ -5191,7 +5377,9 @@ window.approveResolution = async function(id) {
             // there is no date to promise. The email says so in words instead
             // (see buildTicketApprovedEmail in js/email.js).
             approvedBy: approvedByEmail,
-            prevApprovalStatus: prevApprovalStatus
+            prevApprovalStatus: prevApprovalStatus,
+            footageAnswered: footageAnswered,
+            footageRequesterEmail: footageAnswered ? footageRequesterEmail(approvedTicket) : ''
         });
 
     } catch (error) {
@@ -5244,8 +5432,33 @@ window.transferTicketToStore = async function(id) {
     const prevApprovalStatus = approvedTicket ? (approvedTicket.approvalStatus || 'pending_approval') : '';
     const approvedByEmail = (auth.currentUser && auth.currentUser.email) || 'unknown';
     const accessStartsOnOpen = true;
+    // ⚠️ THIS is the button that approves a resolution (approveResolution has
+    // no button), so a footage request is answered HERE. Two extra writes when
+    // it is:
+    //   - close the open request (footageRequest.status → 'answered'), which
+    //     triggers the manager's in-app notice and the footage email;
+    //   - re-arm the viewing window, exactly as approveResolution does: the
+    //     manager's old accessOpenedAt survives the footage cycle, so without
+    //     clearing it the ticket comes back already expired.
+    const footageAnswered = isOpenFootageRequest(approvedTicket);
+    const storeExtraFields = footageAnswered ? Object.assign({
+        accessOpenedAt: firebase.firestore.FieldValue.delete(),
+        accessOpenedBy: firebase.firestore.FieldValue.delete(),
+        accessExpiresAt: firebase.firestore.FieldValue.delete()
+    }, footageAnsweredUpdate(approvedTicket)) : null;
     try {
-        await firestoreService.transferTicketToStore(id, approvedByEmail, (auth.currentUser && auth.currentUser.displayName) || approvedByEmail);
+        await firestoreService.transferTicketToStore(id, approvedByEmail,
+            (auth.currentUser && auth.currentUser.displayName) || approvedByEmail, storeExtraFields);
+        if (footageAnswered) {
+            // Mirror the re-arm in memory, same as approveResolution.
+            const syncIdx = allTickets.findIndex(t => t && t.id === id);
+            if (syncIdx > -1) {
+                delete allTickets[syncIdx].accessOpenedAt;
+                delete allTickets[syncIdx].accessOpenedBy;
+                delete allTickets[syncIdx].accessExpiresAt;
+                allTickets[syncIdx].accessWindowStartsOnOpen = true;
+            }
+        }
         if (approvalDetailsModal) approvalDetailsModal.classList.remove('active');
         currentApprovalTicketId = null;
         updateApprovalsBadge();
@@ -5253,16 +5466,88 @@ window.transferTicketToStore = async function(id) {
         if (typeof showToast === 'function') showToast('Ticket transferred to Store. HR and Area Manager/RM/SM can now view it.', 'success');
 
         // ===== Email the requester (normal approval email) =====
+        // On a footage answer it goes to the manager who asked, with the
+        // footage line (see notifyRequesterOfApproval).
         await notifyRequesterOfApproval(approvedTicket, {
             id: id,
             approvedBy: approvedByEmail,
-            prevApprovalStatus: prevApprovalStatus
+            prevApprovalStatus: prevApprovalStatus,
+            footageAnswered: footageAnswered,
+            footageRequesterEmail: footageAnswered ? footageRequesterEmail(approvedTicket) : ''
         });
     } catch (error) {
         console.error('Transfer to Store error:', error);
         if (typeof showToast === 'function') showToast('Failed to transfer to Store. Please try again.', 'error');
     }
 };
+
+/**
+ * Undo a mistaken Transfer to Store / Transfer to HR: the ticket returns to
+ * Pending Approval (and off the Area Manager/RM/SM dashboard) so the
+ * superadmin can choose again. A reverted STORE transfer emails the requester
+ * a correction; a reverted HR transfer is silent.
+ */
+window.revertTicketTransfer = async function(id) {
+    if (!currentUserIsSuperAdmin()) return;
+    const ticket = allTickets.find(t => t.id === id) || null;
+    if (!ticket) return;
+    const from = ticket.ticketTransferTo === 'hr' ? 'hr' : 'store';
+    const label = ticket.ticketNumber || id;
+    const confirmed = await showConfirmDialog({
+        title: 'Revert Transfer',
+        message: 'Revert the transfer of ticket <strong>' + escapeHTML(label) + '</strong> to '
+            + (from === 'hr' ? 'HR' : 'Store') + '? It will go back to <strong>Pending Approval</strong>'
+            + (from === 'store' ? ' and be removed from the Area Manager/RM/SM dashboard. The requester will be emailed a correction.' : '.'),
+        confirmText: 'Revert Transfer',
+        danger: true,
+        icon: 'fa-undo'
+    });
+    if (!confirmed) return;
+    const me = auth.currentUser || {};
+    const byEmail = me.email || 'unknown';
+    try {
+        if (btnRevertTicketTransfer) btnRevertTicketTransfer.disabled = true;
+        await firestoreService.revertTicketTransfer(id, byEmail, me.displayName || byEmail, from);
+        if (approvalDetailsModal) approvalDetailsModal.classList.remove('active');
+        currentApprovalTicketId = null;
+        updateApprovalsBadge();
+        applyApprovalFilters(false);
+        if (typeof showToast === 'function') showToast('Transfer reverted. Ticket ' + label + ' is back to Pending Approval.', 'success');
+        if (from === 'store') await notifyRequesterOfTransferRevert(ticket);
+    } catch (error) {
+        console.error('Revert transfer error:', error);
+        if (typeof showToast === 'function') showToast('Failed to revert transfer. Please try again.', 'error');
+    } finally {
+        if (btnRevertTicketTransfer) btnRevertTicketTransfer.disabled = false;
+    }
+};
+
+/** Best-effort correction email after reverting a Store transfer. Never throws. */
+async function notifyRequesterOfTransferRevert(ticket) {
+    try {
+        if (!ticket) return;
+        if (!window.EmailService || typeof window.EmailService.sendTicketTransferRevertEmail !== 'function') {
+            console.warn('Revert Email: js/email.js is not loaded — notification skipped.');
+            return;
+        }
+        if (!window.EmailService.isEmailConfigured()) {
+            if (typeof showToast === 'function') showToast('Transfer reverted — emails are not configured, so no correction was sent.', 'info');
+            return;
+        }
+        if (!window.EmailService.resolveRecipient(ticket)) {
+            if (typeof showToast === 'function') showToast('Transfer reverted — this ticket has no email address, so no correction was sent.', 'info');
+            return;
+        }
+        const result = await window.EmailService.sendTicketTransferRevertEmail(ticket);
+        if (typeof showToast === 'function') {
+            if (result.ok) showToast('Requester notified that the earlier notice was a mistake.', 'success');
+            else if (result.timeout) showToast('Transfer reverted, but the email bridge timed out.', 'error');
+            else showToast('Transfer reverted, but the correction email failed (' + (result.error || result.status) + ').', 'error');
+        }
+    } catch (error) {
+        console.error('Revert correction email failed (the revert itself is unaffected):', error);
+    }
+}
 
 /**
  * Notify the requester that their ticket has been transferred to HR for
@@ -5384,7 +5669,23 @@ async function notifyRequesterOfApproval(ticket, ctx) {
             delete snapshot.accessExpiresAt;
         }
 
-        const recipient = window.EmailService.resolveRecipient(snapshot);
+        // A footage answer goes to the manager who ASKED for the footage, who
+        // is often not the original filer. The email bridge allows that address
+        // because it is stored on the ticket as footageRequest.requestedByEmail
+        // (see docs/apps-script/RCMS-Ticket-Notifier.gs ticketRecipients).
+        const emailOpts = ctx.footageAnswered
+            ? { footageAnswered: true, recipient: ctx.footageRequesterEmail || '' }
+            : {};
+        if (ctx.footageAnswered) {
+            snapshot.footageRequest = Object.assign({}, snapshot.footageRequest || {}, {
+                status: 'answered',
+                requestedByEmail: ctx.footageRequesterEmail || ''
+            });
+        }
+        const recipient = (emailOpts.recipient && window.EmailService.isValidEmail
+                && window.EmailService.isValidEmail(emailOpts.recipient))
+            ? emailOpts.recipient
+            : window.EmailService.resolveRecipient(snapshot);
         if (!recipient) {
             await recordApprovalEmail(ctx.id, { status: 'skipped_no_recipient', to: '' });
             if (typeof showToast === 'function') {
@@ -5394,7 +5695,8 @@ async function notifyRequesterOfApproval(ticket, ctx) {
             return;
         }
 
-        const result = await window.EmailService.sendTicketApprovedEmail(snapshot);
+        const result = await window.EmailService.sendTicketApprovedEmail(snapshot,
+            Object.assign({}, emailOpts, { recipient: recipient }));
         await recordApprovalEmail(ctx.id, {
             status: result.ok ? 'dispatched' : (result.status || 'failed'),
             to: recipient,
@@ -5944,6 +6246,13 @@ window.startTicket = async function(id) {
 window.resolveTicket = function(id) {
     const ticket = allTickets.find(t => t.id === id);
     if (!ticket) return;
+    // A ticket sent back by an "additional footage" request is an EDIT of the
+    // previous resolution, not a new one: the operator needs the old notes and
+    // the old pictures/videos/files in front of them. The Revise & Resubmit
+    // modal already is that form, so hand over to it (in footage mode).
+    if (isFootageReworkTicket(ticket)) {
+        return window.reviseTicket(id);
+    }
 currentResolveTicketId = id;
     // Map the resolve widget to this ticket id so auto-uploads go to the right folder
     const resolveWidget = document.getElementById('resolveDropzone') ? document.getElementById('resolveDropzone').closest('.upload-widget') : null;
@@ -5955,8 +6264,6 @@ currentResolveTicketId = id;
     if (resolveModalTitle) resolveModalTitle.textContent = `Resolve Ticket: ${ticket.ticketNumber || id}`;
     if (resolutionNotesEl) resolutionNotesEl.value = '';
     if (resolveAttachmentInput) resolveAttachmentInput.value = '';
-    // Show any existing ticket attachments so the operator keeps prior evidence in view
-    renderAttachmentsIntoGrid(document.getElementById('resolveAttachmentsGrid'), ticket);
     if (resolveModal) resolveModal.classList.add('active');
 };
 
@@ -6072,6 +6379,11 @@ try {
                 resolvedAdditionalFootage: hasFootageRequest && attachmentList.length > 0
                     ? additionalFootage
                     : firebase.firestore.FieldValue.delete(),
+                // THIS round's clips only — drives the "NEW" badge (see
+                // footageAddedKeys). Same condition as the cumulative field.
+                latestAdditionalFootage: hasFootageRequest
+                    ? attachmentList.slice()
+                    : firebase.firestore.FieldValue.delete(),
                 // Clear any previous rejection data when resubmitting a For Revision ticket
                 rejectionReason: firebase.firestore.FieldValue.delete(),
                 rejection: firebase.firestore.FieldValue.delete(),
@@ -6123,9 +6435,31 @@ try {
 //  attachments, and resubmit for approval.
 // ==============================================================
 
+/**
+ * True for a ticket the operator is re-working because an Area Manager /
+ * RM/SM (or the Track page) asked for additional footage. Both halves are
+ * needed: the note alone stays on the ticket forever, so without the status
+ * check a ticket in a LATER, unrelated cycle would still match.
+ */
+function isFootageReworkTicket(ticket) {
+    return !!ticket
+        && String(ticket.status || '') === 'Insufficient Footage'
+        && hasFootageRequestComment(ticket);
+}
+
+// Set by reviseTicket() each time the modal opens, read by its submit handler.
+let revisionFootageMode = false;
+
+const REVISION_INTRO_REJECTED = 'This resolution was sent back for revision. Review the reason below, update the '
+    + 'resolution notes, and resubmit for <strong>Superadmin approval</strong>.';
+const REVISION_INTRO_FOOTAGE = 'Additional footage was requested for this ticket. Review the request below, edit your '
+    + 'resolution notes, remove or add files as needed, and resubmit for <strong>Superadmin approval</strong>.';
+
 window.reviseTicket = function(id) {
     const ticket = allTickets.find(t => t.id === id);
     if (!ticket) return;
+
+    revisionFootageMode = isFootageReworkTicket(ticket);
 
 currentResolveTicketId = id;
 
@@ -6141,11 +6475,34 @@ currentResolveTicketId = id;
         resetUploadProgress(revisionWidget);
     }
 
-    if (revisionModalTitle) revisionModalTitle.textContent = `Revise & Resubmit: ${ticket.ticketNumber || id}`;
+    if (revisionModalTitle) {
+        revisionModalTitle.textContent = `${revisionFootageMode ? 'Update Resolution' : 'Revise & Resubmit'}: ${ticket.ticketNumber || id}`;
+    }
+    // The intro and the reason-box label are swapped per mode and ALWAYS set,
+    // so a footage-mode open can never leave its wording behind for the next
+    // For Revision ticket.
+    const revisionIntroText = document.getElementById('revisionIntroText');
+    if (revisionIntroText) {
+        revisionIntroText.innerHTML = revisionFootageMode ? REVISION_INTRO_FOOTAGE : REVISION_INTRO_REJECTED;
+    }
+    const revisionReasonLabel = document.getElementById('revisionReasonLabel');
+    if (revisionReasonLabel) {
+        revisionReasonLabel.textContent = revisionFootageMode ? 'Additional Footage Requested' : 'Rejection Reason';
+    }
 
-    // Show the superadmin's rejection reason so the operator knows what to fix
-    const rejection = ticket.rejection || {};
-    const reason = rejection.reason || ticket.rejectionReason || 'No rejection reason provided.';
+    let reason;
+    if (revisionFootageMode) {
+        // The manager's own words — the LATEST request is the one being answered.
+        const requests = (Array.isArray(ticket.comments) ? ticket.comments : [])
+            .filter(c => c && c.type === 'footage_request');
+        const latest = requests[requests.length - 1] || {};
+        reason = String(latest.text || '').trim() || 'No details provided.';
+        if (latest.requestedBy) reason += ` — ${latest.requestedBy}`;
+    } else {
+        // Show the superadmin's rejection reason so the operator knows what to fix
+        const rejection = ticket.rejection || {};
+        reason = rejection.reason || ticket.rejectionReason || 'No rejection reason provided.';
+    }
     if (revisionRejectionReason) {
         revisionRejectionReason.textContent = reason;
     }
@@ -6257,12 +6614,38 @@ try {
 
             // 3) Mark Resolved + pending superadmin approval (re-enter the queue)
             const operatorFootage = mergeOperatorFootage(ticket, attachmentList, removedIds);
+            // FOOTAGE MODE ONLY: keep the Track page's "Resolved Additional
+            // Footage" marker, which the plain Resolve handler used to write for
+            // these tickets. Cumulative and removal-aware (previous rounds -
+            // removed + this round), so a notes-only resubmit keeps earlier
+            // marked clips; an empty result clears the field rather than
+            // storing []. A For Revision resubmit does not touch the field.
+            let additionalFootageField = {};
+            if (revisionFootageMode) {
+                const prevAdditional = Array.isArray(ticket && ticket.resolvedAdditionalFootage)
+                    ? ticket.resolvedAdditionalFootage : [];
+                const additional = mergeOperatorFootage(
+                    { resolvedAdditionalFootage: prevAdditional }, attachmentList, removedIds);
+                // THIS round only (drives the "NEW" badge): previous rounds'
+                // clips are deliberately not carried over, so a notes-only
+                // resubmit marks nothing as new.
+                const latest = attachmentList.filter(a => !(a && removedIds.has(a.public_id)));
+                additionalFootageField = {
+                    resolvedAdditionalFootage: additional.length
+                        ? additional
+                        : firebase.firestore.FieldValue.delete(),
+                    // [] (not delete) so "nothing new this round" is recorded
+                    // and the badge does not fall back to the cumulative list.
+                    latestAdditionalFootage: latest
+                };
+            }
             const updateData = {
                 status: 'Resolved',
                 approvalStatus: 'pending_approval',
                 resolutionNotes: notes,
                 resolutionAttachmentUrl: attachmentUrl(mergedAtt[0]),
                 attachments: mergedAtt,
+                ...additionalFootageField,
                 // Clear the previous rejection data since the resolution was revised
                 rejectionReason: firebase.firestore.FieldValue.delete(),
                 rejection: firebase.firestore.FieldValue.delete(),
@@ -6490,52 +6873,6 @@ function getAttachmentIcon(resourceType, format) { return attachmentHelpers().ge
 function getAttachmentColor(format) { return attachmentHelpers().getAttachmentColor(format); }
 
 /**
- * Render a ticket's existing attachments into a given grid element, using the
- * same thumbnail/icon layout as the Ticket Details modal. Shared by the
- * Resolve and Revise modals so previously-uploaded evidence stays visible.
- * @param {HTMLElement} grid  the `.attachments-grid` container to fill
- * @param {object} ticket     the ticket object holding `attachments`
- */
-function renderAttachmentsIntoGrid(grid, ticket) {
-    if (!grid) return;
-    const attachments = (ticket && Array.isArray(ticket.attachments)) ? ticket.attachments : [];
-    if (attachments.length === 0) {
-        grid.innerHTML = '<p style="color:var(--text-muted);font-size:0.85rem;">No existing attachments.</p>';
-        return;
-    }
-    grid.innerHTML = attachments.map((att, index) => {
-        const norm = normalizeAttachment(att);   // both writers' shapes
-        const url = norm ? norm.url : '';
-        const name = (norm && norm.name) || ('Attachment ' + (index + 1));
-        const sizeText = (norm && norm.bytes) ? formatFileSize(norm.bytes) : '';
-        const isImage = !!(norm && norm.resourceType === 'image');
-        const isVideo = !!(norm && norm.resourceType === 'video');
-        const icon = norm ? getAttachmentIcon(norm.resourceType, norm.format) : 'fa-file';
-        const color = norm ? getAttachmentColor(norm.format) : '#64748b';
-        const isBroken = !url;
-
-        // One shared tile builder, so this grid matches every other grid.
-        // See buildAttachmentPreview() for what used to differ here.
-        const preview = buildAttachmentPreview(norm, index);
-
-        // No URL -> a div, never an empty anchor. See renderTicketAttachments().
-        const body = isBroken
-            ? `<div class="attachment-preview" title="Link unavailable">${preview}</div>`
-            : `<a href="${url}" target="_blank" rel="noopener noreferrer" class="attachment-preview" title="${escapeHTML(name)}">${preview}</a>`;
-
-        return `
-            <div class="attachment-item" data-public-id="${escapeHTML(norm ? norm.publicId : '')}">
-                ${body}
-                <div class="attachment-meta">
-                    <span class="attachment-name" title="${escapeHTML(name)}">${escapeHTML(name)}</span>
-                    ${sizeText ? `<span class="attachment-size">${escapeHTML(sizeText)}</span>` : ''}
-                </div>
-            </div>
-        `;
-    }).join('');
-}
-
-/**
  * Whether a ticket is allowed to display attachments in the Ticket Details modal.
  * Attachments are shown only for fully resolved tickets and for-revision tickets.
  */
@@ -6549,14 +6886,22 @@ let removedRevisionAttachmentIds = new Set();
 /**
  * Render the existing attachments in the Revise & Resubmit modal with a remove
  * (×) button so the operator can delete prior evidence before resubmitting.
- * Deleted files are tracked in `removedRevisionAttachmentIds` (and removed from
- * Cloudinary) and excluded from the merged attachment list on submit.
+ * Deleted files are tracked in `removedRevisionAttachmentIds` and excluded from
+ * the merged attachment list on submit. They are removed from the TICKET only —
+ * the file itself stays in Cloudinary (an unsigned client cannot delete it).
  * @param {HTMLElement} grid    the `#revisionAttachmentsGrid` container
  * @param {object} ticket       the ticket holding `attachments`
  */
 function renderRevisionAttachments(grid, ticket) {
     if (!grid) return;
-    const attachments = (ticket && Array.isArray(ticket.attachments)) ? ticket.attachments : [];
+    // OPERATOR FILES ONLY. `ticket.attachments` also carries what the requester
+    // attached when filing the ticket; those are not part of the resolution the
+    // operator is revising, so they are neither shown nor removable here. They
+    // stay on the ticket untouched (the submit handler only drops ids recorded
+    // in removedRevisionAttachmentIds, which can now only be operator files).
+    // splitApprovalAttachments() is the shared requester/operator split, with
+    // `requesterAttachments` as the authoritative requester list.
+    const attachments = splitApprovalAttachments(ticket).operator;
     const deletedSet = new Set(removedRevisionAttachmentIds || []);
     const visible = attachments.filter(a => !deletedSet.has(a.public_id));
     if (visible.length === 0) {
@@ -8304,19 +8649,36 @@ async function violationCloudinaryUpload(file, folderPath, onProgress) {
     formData.append('asset_folder', folderPath);
     formData.append('folder', folderPath);
     formData.append('public_id', uniquePublicId);
-    const res = await fetch(
-        'https://api.cloudinary.com/v1_1/' + VIOLATION_CLOUDINARY_CLOUD_NAME + '/auto/upload',
-        { method: 'POST', body: formData }
-    );
-    if (!res.ok) {
-        let errMsg = 'Upload failed (HTTP ' + res.status + ').';
-        try {
-            const err = await res.json();
-            if (err && err.error && err.error.message) errMsg = err.error.message;
-        } catch (e) { /* ignore parse error */ }
-        throw new Error(errMsg);
-    }
-    const data = await res.json();
+
+    // ⚠️ XHR, NOT fetch: fetch cannot report UPLOAD progress, so a large video
+    // (tens of MB) showed a bar that never moved for the whole upload and
+    // looked frozen. XHR's upload.onprogress feeds the real byte count to the
+    // caller's onProgress (0-100).
+    const data = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', 'https://api.cloudinary.com/v1_1/' + VIOLATION_CLOUDINARY_CLOUD_NAME + '/auto/upload');
+        if (xhr.upload && typeof onProgress === 'function') {
+            xhr.upload.onprogress = (e) => {
+                if (e.lengthComputable && e.total > 0) {
+                    try { onProgress(Math.round((e.loaded / e.total) * 100)); } catch (err) { /* UI only */ }
+                }
+            };
+        }
+        xhr.onload = () => {
+            let body = null;
+            try { body = JSON.parse(xhr.responseText); } catch (e) { /* not JSON */ }
+            if (xhr.status >= 200 && xhr.status < 300 && body) {
+                resolve(body);
+                return;
+            }
+            const msg = (body && body.error && body.error.message)
+                || ('Upload failed (HTTP ' + xhr.status + ').');
+            reject(new Error(msg));
+        };
+        xhr.onerror = () => reject(new Error('Upload failed — check your internet connection and try again.'));
+        xhr.onabort = () => reject(new Error('Upload was cancelled.'));
+        xhr.send(formData);
+    });
     return {
         public_id: data.public_id,
         secure_url: data.secure_url,
@@ -9637,15 +9999,59 @@ async function saveViolationForm(e) {
             });
             const widget = violationUploadWidget;
             for (let i = 0; i < files.length; i++) {
-                const att = await violationCloudinaryUpload(files[i], folderPath, (pct) => {
+                // ⚠️ VIDEOS ABOVE 15 MB ARE COMPRESSED FIRST (js/video-compressor.js)
+                // to save Violations Cloudinary storage (25 GB total). Same
+                // resolution, H.264 MP4, medium quality. Anything else — and any
+                // video the browser cannot compress — uploads exactly as before:
+                // compress() always resolves with a file to upload, never throws.
+                //
+                // Progress: a compressed file's slice of the bar is split 50/50
+                // (compressing, then uploading), so the bar only ever climbs.
+                let fileToUpload = files[i];
+                let compression = null;
+                const compressing = !!(window.VideoCompressor && window.VideoCompressor.shouldCompress(fileToUpload));
+                if (compressing) {
+                    if (violationUploadStatus) {
+                        violationUploadStatus.textContent = `Compressing video ${i + 1} of ${files.length}… 0%`;
+                    }
+                    setUploadProgress(widget, Math.round(aggregateUploadPercent(i, 0, files.length)));
+                    compression = await window.VideoCompressor.compress(fileToUpload, {
+                        onProgress: (p) => {
+                            const own = Math.round(p * 100);
+                            setUploadProgress(widget, Math.round(aggregateUploadPercent(i, own / 2, files.length)));
+                            if (violationUploadStatus) {
+                                violationUploadStatus.textContent = `Compressing video ${i + 1} of ${files.length}… ${own}%`;
+                            }
+                        }
+                    });
+                    fileToUpload = (compression && compression.file) || files[i];
+                    if (compression && compression.compressed) {
+                        console.log('[Violation] compressed', files[i].name, formatFileSize(compression.originalBytes),
+                            '->', formatFileSize(compression.outputBytes));
+                    } else {
+                        console.info('[Violation] uploading original', files[i].name, '(' + (compression && compression.reason) + ')');
+                    }
+                }
+                const uploadBase = compressing ? 50 : 0;
+                const uploadShare = compressing ? 0.5 : 1;
+                let att = await violationCloudinaryUpload(fileToUpload, folderPath, (pct) => {
                     // Aggregated, not raw: feeding each file's own 0-100 straight
                     // into the bar made three files produce 0->100, 0->100, 0->100,
                     // so the bar visibly restarted and read as a stuck upload.
-                    setUploadProgress(widget, aggregateUploadPercent(i, pct, files.length));
+                    setUploadProgress(widget, Math.round(aggregateUploadPercent(i, uploadBase + pct * uploadShare, files.length)));
                     if (violationUploadStatus) {
                         violationUploadStatus.textContent = `Uploading ${i + 1} of ${files.length}…`;
                     }
                 });
+                // Remember the original size of a compressed video (for the
+                // record and the storage report); bytes/name are the stored file.
+                if (compression && compression.compressed) {
+                    att = Object.assign({}, att, {
+                        compressed: true,
+                        originalBytes: compression.originalBytes,
+                        originalName: files[i].name
+                    });
+                }
                 // ⚠️ STAMP FILES ADDED THROUGH EDIT VIOLATION. An edit-time upload
                 // is additional evidence (typically footage / another angle the
                 // Area Manager asked for), so it is flagged on the record itself.

@@ -3250,6 +3250,21 @@ function subscribeRoomForList(roomId) {
     // load, and an approval re-seeds live (script.js ensureBranchGroupChats).
     var repairedBranchRooms = {};
 
+    // ⚡ PERF: one shared `users` read for the membership repair. It runs once
+    // per branch room, and each run used to download the whole users
+    // collection; rooms opened within a minute now reuse a single read.
+    var usersSnapshotShared = null;
+    var usersSnapshotSharedAt = 0;
+    function getUsersSnapshotShared() {
+        var now = Date.now();
+        if (!usersSnapshotShared || now - usersSnapshotSharedAt > 60000) {
+            usersSnapshotSharedAt = now;
+            usersSnapshotShared = db.collection('users').get();
+            usersSnapshotShared.catch(function () { usersSnapshotShared = null; });
+        }
+        return usersSnapshotShared;
+    }
+
     /**
      * Re-seed a branch room's `members` to the authoritative team when it has
      * drifted — specifically when an OLDER client wrote `everyoneKnownForGroup()`
@@ -3298,7 +3313,7 @@ function subscribeRoomForList(roomId) {
         };
         const currentMembers = norm(summary.members);
 
-        db.collection('users').get().then(function (snap) {
+        getUsersSnapshotShared().then(function (snap) {
             const allUsers = [];
             snap.forEach(function (doc) {
                 allUsers.push(Object.assign({ id: doc.id }, doc.data() || {}));
@@ -6443,28 +6458,51 @@ function syncSummaryFromMessage(roomId, msg) {
     // ==============================================================
     //  INCOMING MESSAGE SOUND
     //
-    //  Delegates to the app's shared, preloaded notification sound
-    //  (js/notifications.js), so a chat message sounds identical to a ticket
-    //  alert and both use the same preloaded Audio.
-    //
-    //  ⚠️ THE LOCAL `new Audio(...)` FALLBACK WAS DELETED. It existed beside a
-    //  guard on `window.playNotificationSound`, but that function was never
-    //  exported — so the guard was always false, the shared path was dead code,
-    //  and the fallback silently became the only path. notifications.js now
-    //  exports it (see the EXPOSE GLOBALLY block there), so the delegation
-    //  below is the single one. The `typeof` guard is kept: it is what stops a
-    //  missing module from throwing inside the failure path.
+    //  Chat uses its own Telegram-style sound (see below), deliberately
+    //  different from the ticket chime so staff can tell them apart.
     // ==============================================================
 
+    // Chat messages now have their OWN sound (myinstants "Telegram
+    // Notification"), separate from the ticket chime. Local-first like the
+    // others: sounds/chat.mp3 is the copy, the myinstants URL is the fallback.
+    // One Audio element, built once and reused for every message.
+    var chatSoundUrl = 'sounds/chat.mp3';
+    var chatSoundFallbackUrl = 'https://www.myinstants.com/media/sounds/telegram-notification.mp3';
+    var chatAudio = null;
+
     function playIncomingSound() {
+        // Max loudness: notifications.js plays the decoded file through a
+        // gain boost + limiter; the plain element below is only the fallback.
+        if (typeof window.playBoostedSound === 'function') {
+            try { window.playBoostedSound(chatSoundUrl, playIncomingSoundElement); return; }
+            catch (e) { /* fall through to the element */ }
+        }
+        playIncomingSoundElement();
+    }
+
+    function playIncomingSoundElement() {
         try {
-            if (typeof window.playNotificationSound === 'function') {
-                window.playNotificationSound();
-                return;
+            if (!chatAudio) {
+                chatAudio = new Audio(chatSoundUrl);
+                chatAudio.preload = 'auto';
+                chatAudio.addEventListener('error', function handleChatSoundError() {
+                    chatAudio.removeEventListener('error', handleChatSoundError);
+                    try {
+                        chatAudio.src = chatSoundFallbackUrl;
+                        chatAudio.load();
+                        // The element is only built when a message arrives,
+                        // so this error always cost that message its sound —
+                        // play the fallback now instead of staying silent.
+                        var fp = chatAudio.play();
+                        if (fp && fp.catch) fp.catch(function () { /* autoplay may be blocked */ });
+                    } catch (e) { /* ignore */ }
+                });
             }
-            // No notification module on this page. Stay silent — a sound is a
-            // nicety, and constructing a new Audio per message would be the
-            // very thing the shared path avoids.
+            chatAudio.pause();
+            chatAudio.currentTime = 0;
+            chatAudio.volume = 1;
+            const p = chatAudio.play();
+            if (p && p.catch) p.catch(function () { /* autoplay may be blocked */ });
         } catch (e) {
             // Audio is a nicety; never let it break the chat.
         }
@@ -6973,6 +7011,30 @@ function syncSummaryFromMessage(roomId, msg) {
                 // chip in THIS store's room, whoever is looking at it. Still
                 // indexed — another room's picker may legitimately offer it.
                 return inActiveRoomScope(found) ? found : null;
+            }
+        } catch (e) { /* fall through to the scan */ }
+
+        // 3a. ⚡ PERF fast path: exact-match query on ticketNumber (single-field
+        // index, no composite needed) instead of downloading every ticket.
+        // Tried in the common casings; only a full MATCH short-circuits — any
+        // other outcome falls through to the original scan below, so the
+        // result (including the "still open" flag) is unchanged.
+        try {
+            var rawKeyCasing = String(ref || '').trim();
+            var variants = [key, key.toUpperCase()];
+            if (rawKeyCasing && variants.indexOf(rawKeyCasing) === -1) variants.push(rawKeyCasing);
+            var fast = await db.collection('tickets').where('ticketNumber', 'in', variants).get();
+            var fastMatch = null;
+            fast.forEach(function (doc) {
+                if (fastMatch) return;
+                var candidate = Object.assign({ id: doc.id }, doc.data() || {});
+                if (!isMentionableTicket(candidate)) return;
+                if (!inActiveRoomScope(candidate)) return;
+                fastMatch = candidate;
+            });
+            if (fastMatch) {
+                indexTicket(fastMatch);
+                return fastMatch;
             }
         } catch (e) { /* fall through to the scan */ }
 

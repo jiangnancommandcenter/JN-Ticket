@@ -5,14 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CCTV Command Center - Submit Ticket</title>
     <!-- Pre-paint theme: apply saved dark/light theme BEFORE first paint (no flash) -->
-<script>(function(){try{var t=localStorage.getItem('rcms_theme');if(!t){t='light';}document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','light');}})();</script>
+<script>(function(){try{var t=localStorage.getItem('rcms_theme');if(!t){t='dark';}document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','dark');}})();</script>
+    <script src="js/boot-splash.js"></script>
     <!-- App icon + installable manifest (see main.html for the theme_color note) -->
-    <link rel="icon" href="tamang logo.png" type="image/png">
-    <link rel="apple-touch-icon" href="tamang logo.png">
+    <link rel="icon" href="tamang-logo-64.png" type="image/png">
+    <link rel="apple-touch-icon" href="tamang-logo-180.png">
     <link rel="manifest" href="manifest.json">
-    <meta name="theme-color" id="themeColorMeta" content="#72bf6a">
+    <meta name="theme-color" id="themeColorMeta" content="#0e1319">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <!-- Firebase + Google APIs: warm up connections early so the SDKs load faster -->
     <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://firestore.googleapis.com" crossorigin>
@@ -1102,7 +1102,16 @@
                 justify-content: center;
             }
         }
+        /* Required field left empty on submit (set by js/public-form.js) */
+        .track-input.field-missing {
+            border-color: #e5484d !important;
+            box-shadow: 0 0 0 2px rgba(229, 72, 77, .25) !important;
+        }
     </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Condensed:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="jn-ui.css">
 </head>
 <body>
     <!-- Theme toggle (fixed top-right; no app header on this public page) -->
@@ -1113,7 +1122,7 @@
         <div class="form-card">
             <div class="ticket-form-logo" style="display:flex;align-items:center;justify-content:space-between;gap:16px;">
                 <div style="display:flex;align-items:center;gap:16px;">
-                    <img src="logo.png" alt="Jiangnan CCTV Logo" class="login-logo">
+                    <img src="tamang-logo-192.png" alt="Jiangnan CCTV Logo" class="login-logo">
                     <div class="form-title">
                         <h2>Submit a Ticket</h2>
                         <p>Report a CCTV incident at Head Office. You will receive a ticket number to track your request.</p>
@@ -1121,6 +1130,11 @@
                 </div>
                 <button type="button" class="btn btn-primary" id="btnShowTrack" style="margin-left:auto;"><i class="fas fa-search"></i> Track Status</button>
             </div>
+
+            <a class="support-contact support-contact--block" href="tel:+639369239118" style="margin:0 0 20px;">
+                <i class="fas fa-headset"></i>
+                <span><small>Encountered a problem or have a question? Contact Support</small><strong>0936 923 9118</strong></span>
+            </a>
 
             <!-- ================================================================
                  THIS PAGE IS NOW A STATUS PORTAL ONLY.
@@ -1175,7 +1189,7 @@
                     </div>
                     <div class="track-form-group">
                         <label for="publicContact"><i class="fas fa-phone"></i> Contact Number</label>
-                        <input type="text" id="publicContact" class="track-input" placeholder="09171234567" required>
+                        <input type="text" id="publicContact" class="track-input" placeholder="e.g. 09171234567" required>
                     </div>
                     <div class="track-form-group">
                         <label for="publicDatetime"><i class="fas fa-calendar"></i> Incident Date &amp; Time</label>
@@ -1636,7 +1650,7 @@
                                   '\nBranch: ' + (currentTrackData.branch || 'Unknown') +
                                   '\nRequested by: ' + requestedBy +
                                   '\nReason: ' + reason,
-                            icon: 'tamang logo.png',
+                            icon: 'tamang-logo-192.png',
                             tag: 'reopen-ticket-' + currentReopenTicketId,
                             requireInteraction: true,
                             silent: true
@@ -2389,6 +2403,15 @@ document.getElementById('trackDisplayBranch').textContent = data.branch || '\u20
                     status: 'Insufficient Footage',
                     approvalStatus: 'pending',
                     comments: firebase.firestore.FieldValue.arrayUnion(note),
+                    // Open-request marker, same shape as the owner dashboard's
+                    // (requestOwnerFootage in js/owner-dashboard.js). The
+                    // superadmin's approval flips it to 'answered'.
+                    footageRequest: {
+                        status: 'pending',
+                        requestedBy: userEmail,
+                        requestedByEmail: userEmail === 'anonymous' ? '' : userEmail,
+                        requestedAt: note.requestedAt
+                    },
                     updatedAt: firebase.firestore.FieldValue.serverTimestamp()
                 }).then(function() {
                     resetFootageForm();
@@ -2424,7 +2447,7 @@ document.getElementById('trackDisplayBranch').textContent = data.branch || '\u20
                                       '\nBranch: ' + (trackTicketSnap.branch || 'Unknown') +
                                       '\nRequested by: ' + (note.requestedBy || 'Unknown') +
                                       (note.text ? '\nDetails: ' + note.text : ''),
-                                icon: 'tamang logo.png',
+                                icon: 'tamang-logo-192.png',
                                 tag: 'footage-ticket-' + currentTrackTicketId,
                                 requireInteraction: true,
                                 silent: true   // sound is handled by the dashboard listener
@@ -2458,7 +2481,7 @@ document.getElementById('trackDisplayBranch').textContent = data.branch || '\u20
 
         })();
     </script>
-    <script src="js/public-form.js"></script>
+    <script src="js/public-form.js?v=missing-fields-1"></script>
     <style>
         /* Public submission form grid */
         .form-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px 20px; }
